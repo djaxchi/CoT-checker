@@ -159,7 +159,15 @@ The training curve shows the probe peaks at **epoch 7** (77.5%), then validation
 
 The SSAE encodes `[context | <sep> | step]` into a sparse vector `h_c`. The probe's ability to predict step correctness from `h_c`, above the majority baseline, indicates that the SSAE's sparse latent space contains features that correlate with whether a reasoning step leads to a correct solution path. This is a non-trivial finding: the SSAE was trained purely for reconstruction, yet its latent space is semantically organized in a way that reflects step correctness.
 
-### 4.6 Limitations
+### 4.6 Token Position Ablation
+
+To verify that last-token pooling is the right aggregation choice, we probed step correctness at every token position within 200 steps (100 correct, 100 incorrect). The gap between correct and incorrect probe scores is almost flat at the start of a step (0.069 in the first 10% of tokens) and grows steadily to 0.308 in the final 10%. The last token integrates the full causal context and concentrates the discriminative signal. Mean pooling (58.5% accuracy) dilutes this by averaging noisy early tokens with informative late ones; max pooling (50.0%) tracks peak activation rather than class difference and collapses to chance.
+
+We also targeted the token immediately after each "=" sign in arithmetic expressions, which is the result the model writes (e.g., the "42" in "21 + 21 = 42"). On 100 correct and 100 incorrect steps, the probe score at that position averages 0.688 for correct steps and 0.532 for incorrect ones (gap: +0.156, accuracy: 64.5%). This is a genuine partial signal: arithmetic errors are detectable at the result token alone. However, the gap is smaller than at the last token (which achieves 68.5%), meaning the model continues to accumulate correctness information after the arithmetic subexpression, and last-token pooling captures it all.
+
+The reason a signal exists at the "=" result token at all is a consequence of how transformers process arithmetic. By the time the model writes the result, multiple attention heads have already computed an internal representation of the correct answer in the residual stream, following the kind of arithmetic circuits documented in mechanistic interpretability research. When the output token is wrong, the residual stream at that position contains two competing signals: the embedding of the incorrect value and the internally computed correct answer. This mismatch produces a distinctive activation pattern. When the output is correct, both signals agree and the residual stream is more coherent. The SSAE projector appears to capture this tension. This also explains why small models (Qwen2.5-0.5B) make arithmetic errors at all: the circuit computing the answer is weak and its output can be overridden by competing token-frequency or pattern-matching representations at the final logit readout, even when the correct answer was represented internally.
+
+### 4.7 Limitations
 
 - **Small initial sample**: 1,000 steps may not capture the full label distribution from the paper
 - **Math-Shepherd vs GSM8K-Aug**: the paper uses GSM8K-Aug for SSAE training and likely for probe labels too; we use Math-Shepherd labels which assign correctness differently (MC rollout vs possibly reconstruction-based)

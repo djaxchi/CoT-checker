@@ -87,5 +87,6 @@ class StepCorrectnessClassifier(nn.Module):
         cfg = ckpt["config"]
         model = cls(input_dim=cfg["input_dim"], hidden_dim=cfg["hidden_dim"])
         model.load_state_dict(ckpt["model"])
+        model.to(device)
         model.eval()
         return model

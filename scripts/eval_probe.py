@@ -66,10 +66,14 @@ def evaluate(model, loader, device, threshold):
     tp = ((preds_t == 1) & (labels_t == 1)).sum().item()
     fp = ((preds_t == 1) & (labels_t == 0)).sum().item()
     fn = ((preds_t == 0) & (labels_t == 1)).sum().item()
+    tn = ((preds_t == 0) & (labels_t == 0)).sum().item()
     precision = tp / (tp + fp) if (tp + fp) else 0
-    recall = tp / (tp + fn) if (tp + fn) else 0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0
-    return acc, total, precision, recall, f1
+    recall    = tp / (tp + fn) if (tp + fn) else 0
+    f1        = 2 * precision * recall / (precision + recall) if (precision + recall) else 0
+    prec_neg  = tn / (tn + fn) if (tn + fn) else 0
+    rec_neg   = tn / (tn + fp) if (tn + fp) else 0
+    f1_neg    = 2 * prec_neg * rec_neg / (prec_neg + rec_neg) if (prec_neg + rec_neg) else 0
+    return acc, total, precision, recall, f1, prec_neg, rec_neg, f1_neg
 
 
 def main():
@@ -83,7 +87,7 @@ def main():
     pos_rate = dataset.correctness.mean().item()
     majority = max(pos_rate, 1 - pos_rate)
 
-    acc, n, precision, recall, f1 = evaluate(model, loader, device, args.threshold)
+    acc, n, precision, recall, f1, prec_neg, rec_neg, f1_neg = evaluate(model, loader, device, args.threshold)
 
     print(f"\n{'─' * 50}")
     print("  Step Correctness Evaluation")
@@ -95,9 +99,15 @@ def main():
     print(f"  Probe accuracy   : {acc * 100:.2f}%")
     print(f"  Improvement      : +{(acc - majority) * 100:.2f}pp")
     print("")
-    print(f"  Precision        : {precision:.4f}")
-    print(f"  Recall           : {recall:.4f}")
-    print(f"  F1               : {f1:.4f}")
+    print(f"  Class 'correct'  :")
+    print(f"    Precision      : {precision:.4f}")
+    print(f"    Recall         : {recall:.4f}")
+    print(f"    F1             : {f1:.4f}")
+    print("")
+    print(f"  Class 'incorrect':")
+    print(f"    Precision      : {prec_neg:.4f}")
+    print(f"    Recall         : {rec_neg:.4f}")
+    print(f"    F1             : {f1_neg:.4f}")
     print(f"{'─' * 50}")
     print("\n  Paper target (SSAE-Qwen GSM8K): 78.58%")
     if acc * 100 >= 77.0:

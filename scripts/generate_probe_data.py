@@ -118,13 +118,29 @@ def parse_args():
         default=1000,
         help="Total number of steps to encode (drawn from GSM8K split)",
     )
+    p.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Skip the first N steps (use to avoid overlap with training data)",
+    )
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
+    p.add_argument(
+        "--correct-ratio",
+        type=float,
+        default=None,
+        help="Target fraction of correct steps (e.g. 0.5 for 50/50). "
+             "Subsamples the majority class after collection. Default: no rebalancing.",
+    )
+    p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 
 def main():
+    import random
     args = parse_args()
+    random.seed(args.seed)
     device = args.device
 
     # --- Load SSAE ---
@@ -142,15 +158,39 @@ def main():
         if entry.get("task") != "GSM8K":
             continue
         all_records.extend(parse_entry(entry))
-        if len(all_records) >= args.max_steps:
+        if len(all_records) >= args.offset + args.max_steps:
             break
 
-    all_records = all_records[: args.max_steps]
+    all_records = all_records[args.offset : args.offset + args.max_steps]
+    pos_raw = sum(r["label"] for r in all_records)
+    print(f"Steps collected : {len(all_records)}")
+    print(f"Correct (+)     : {pos_raw}  ({pos_raw / len(all_records):.1%})")
+    print(f"Incorrect (-)   : {len(all_records) - pos_raw}  ({(len(all_records) - pos_raw) / len(all_records):.1%})")
+
+    # --- Optional rebalancing ---
+    if args.correct_ratio is not None:
+        correct_recs   = [r for r in all_records if r["label"] == 1]
+        incorrect_recs = [r for r in all_records if r["label"] == 0]
+        ratio = args.correct_ratio
+        # Keep the minority class intact, subsample the majority
+        if len(correct_recs) / len(all_records) > ratio:
+            # Too many correct — subsample correct
+            n_cor = int(len(incorrect_recs) * ratio / (1 - ratio))
+            correct_recs = random.sample(correct_recs, min(n_cor, len(correct_recs)))
+        else:
+            # Too many incorrect — subsample incorrect
+            n_inc = int(len(correct_recs) * (1 - ratio) / ratio)
+            incorrect_recs = random.sample(incorrect_recs, min(n_inc, len(incorrect_recs)))
+        all_records = correct_recs + incorrect_recs
+        random.shuffle(all_records)
+        pos_raw = sum(r["label"] for r in all_records)
+        print(f"\nAfter rebalancing to {ratio:.0%}/{1-ratio:.0%}:")
+        print(f"  Total steps : {len(all_records)}")
+        print(f"  Correct (+) : {pos_raw}  ({pos_raw / len(all_records):.1%})")
+        print(f"  Incorrect (-): {len(all_records) - pos_raw}  ({(len(all_records) - pos_raw) / len(all_records):.1%})")
+
     total = len(all_records)
     pos = sum(r["label"] for r in all_records)
-    print(f"Steps collected : {total}")
-    print(f"Correct (+)     : {pos}  ({pos / total:.1%})")
-    print(f"Incorrect (-)   : {total - pos}  ({(total - pos) / total:.1%})")
     print(f"Majority baseline: {max(pos, total - pos) / total:.1%}")
 
     # --- Encode in batches ---

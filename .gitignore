@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# Large data files — download via HuggingFace (root-level only)
+/data/
+!/data/.gitkeep
+
+# Large binary outputs — reproducible from pipeline
+results/probe_data/
+results/probes/
+results/baselines/
+# Keep the figure referenced in REPORT.md
+!results/probe_training_curve.png
+
+# HuggingFace and torch cache
+.cache/
+*.cache
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Experiment logs and temp files
+nohup.out
+/tmp/
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets / env
+.env
+.env.*
+
+# Claude Code agent instructions (local only)
+CLAUDE.md
+
+# Personal runner scripts (Telegram notifications, local paths)
+scripts/run_pipeline.sh

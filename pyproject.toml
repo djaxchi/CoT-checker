@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cot-checker"
+version = "0.1.0"
+description = "Step-level CoT verification via Sparse Autoencoders"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.45",
+    "accelerate>=0.33",
+    "sentencepiece>=0.2",
+    "tqdm>=4.66",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "datasets>=4.8.3",
+    "matplotlib>=3.10.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+tracking = [
+    "wandb>=0.17",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]   # pycodestyle errors, pyflakes, isort
+ignore = ["E501"]           # line-too-long handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests requiring real model weights (deselect with -m 'not slow')",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.7",
+]

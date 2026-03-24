@@ -59,9 +59,11 @@ from src.saes.ssae import SSAE
 # ---------------------------------------------------------------------------
 
 PHASE_CFG = {
-    1: dict(lr=1e-6,  min_lr=1e-7,  warmup=2,   decay_iters=30,  epochs=1),
-    2: dict(lr=1e-4,  min_lr=1e-5,  warmup=2,   decay_iters=101, epochs=3),
-    3: dict(lr=1e-4,  min_lr=1e-5,  warmup=2,   decay_iters=101, epochs=1),
+    # decay_iters is overridden at runtime to match actual gradient steps
+    # (n_batches // grad_accum * epochs) — the values here are fallback defaults
+    1: dict(lr=1e-6,  min_lr=1e-7,  warmup=100, decay_iters=None, epochs=1),
+    2: dict(lr=1e-4,  min_lr=1e-5,  warmup=20,  decay_iters=None, epochs=3),
+    3: dict(lr=1e-4,  min_lr=1e-5,  warmup=20,  decay_iters=None, epochs=1),
 }
 
 L1_WEIGHT_INIT  = 1e-4   # initial L1 penalty on sparse latents
@@ -367,7 +369,13 @@ def train(args):
     print(f"  Batches/epoch: {len(train_loader)}  |  Phase: {args.phase}")
 
     # --- Optimizer ---
-    cfg = PHASE_CFG[args.phase]
+    cfg = dict(PHASE_CFG[args.phase])  # copy so we can mutate
+
+    # Set decay_iters to span the full training run so cosine annealing
+    # reaches min_lr only at the very last gradient step, not after 30 steps.
+    total_epochs = args.epochs if args.epochs else cfg["epochs"]
+    total_grad_steps = (len(train_loader) // args.grad_accum) * total_epochs
+    cfg["decay_iters"] = total_grad_steps
     trainable = [p for p in model.parameters() if p.requires_grad]
     if not trainable:
         raise RuntimeError("No trainable parameters found. Check phase + freeze settings.")

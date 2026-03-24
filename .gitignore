@@ -20,21 +20,27 @@ env/
 # Large data files — download via HuggingFace (root-level only)
 /data/
 !/data/.gitkeep
+!/data/prontoqa_sample.jsonl
 
 # Large binary outputs — reproducible from pipeline
 results/probe_data/
 results/probes/
 results/baselines/
-# Keep the figure referenced in REPORT.md
+results/checkpoints/
+results/*.json
+results/*.png
+# Keep the figures referenced in REPORT.md
 !results/probe_training_curve.png
+!results/experiment_comparison.png
 
 # HuggingFace and torch cache
 .cache/
 *.cache
 
-# Jupyter
+# Jupyter — exclude everywhere except colab_scripts/
 .ipynb_checkpoints/
 *.ipynb
+!colab_scripts/*.ipynb
 
 # Experiment logs and temp files
 nohup.out

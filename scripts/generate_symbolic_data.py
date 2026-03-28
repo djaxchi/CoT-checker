@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
-"""Generate synthetic ProntoQA problems and model-generated CoT traces.
+"""Load ProntoQA problems from HuggingFace and generate model CoT traces.
 
 Two phases:
-  Phase A — Algorithmically generate N ProntoQA-style problems (no LLM needed).
-             Each problem is a chain of modus-ponens rules with a deterministic
-             gold CoT. Output: --problems-out JSONL.
+  Phase A — Load problems from renma/ProntoQA (HuggingFace).
+             500 problems, ~48% False, complex multi-hop chains with varied
+             vocabulary. Fields are mapped to our internal format.
 
   Phase B — Run Qwen2.5-0.5B on the problems to produce model-generated CoT
              traces. These are what the SSAE will train on. Output: --traces-out JSONL.
-             Each line: {question, query, steps: [...], answer: "True/False"}
+             Each line: {question, query, steps: [...], pred_answer, meta}
 
 The traces are the primary training signal for the SSAE (phase 1 reconstruction).
-PropLogicSolver labels are not stored here — they are computed on-the-fly at
-probe-training time.
+PropLogicSolver labels are computed on-the-fly at probe-training time.
 
 Usage:
-    # Generate 14 000 problems and traces for a ~50K-step SSAE training run
+    # Load all 500 ProntoQA problems and generate traces
     python scripts/generate_symbolic_data.py \\
-        --n-problems 14000 \\
-        --problems-out data/prontoqa_synthetic.jsonl \\
+        --problems-out data/prontoqa_hf.jsonl \\
         --traces-out   data/prontoqa_traces.jsonl \\
-        --device mps \\
-        --batch-size 8
+        --device mps
 
     # Problems only (no LLM), useful for inspection
     python scripts/generate_symbolic_data.py \\
-        --n-problems 500 --problems-only \\
-        --problems-out data/prontoqa_synthetic_small.jsonl
+        --problems-only \\
+        --problems-out data/prontoqa_hf.jsonl
+
+    # Cap to N problems (for quick smoke tests)
+    python scripts/generate_symbolic_data.py \\
+        --max-problems 50 --problems-only
 """
 
 import argparse
 import json
-import random
 import re
 import sys
 from pathlib import Path
@@ -43,86 +43,49 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ---------------------------------------------------------------------------
-# Synthetic problem generator
+# Phase A: load from HuggingFace
 # ---------------------------------------------------------------------------
 
-_ENTITIES = [
-    "Rex", "Polly", "Sam", "Alex", "Max", "Lily", "Otto", "Zara",
-    "Leo", "Nova", "Finn", "Luna", "Axel", "Iris", "Hugo", "Vera",
-]
-_PROPERTIES = [
-    "red", "cold", "large", "metallic", "happy", "luminous",
-    "warm", "blue", "heavy", "soft", "bright", "slow", "fast",
-    "small", "dark", "light", "rough", "smooth", "loud", "quiet",
-]
-_CATEGORIES = [
-    "wumpus", "fumpus", "tumpus", "rompus", "vumpus", "dumpus",
-    "zumpus", "bumpus", "yumpus", "gumpus", "humpus", "sumpus",
-    "numpus", "lumpus", "pumpus", "kumpus", "mumpus", "jimpus",
-    "brompus", "crompus", "drompus", "frompus", "grompus", "trompus",
-]
+def load_prontoqa(max_problems: int | None = None) -> list[dict]:
+    """Load problems from renma/ProntoQA on HuggingFace.
 
-# Hop distribution matching ProntoQA's difficulty spread
-_HOP_WEIGHTS = {1: 0.20, 2: 0.35, 3: 0.30, 4: 0.15}
+    Maps HF fields to our internal format:
+      context  → question  (rules + seed fact)
+      question → query     (normalised to "True or false: X is Y.")
+      answer   → answer    (A → "True", B → "False")
+    """
+    from datasets import load_dataset
 
+    print("Loading renma/ProntoQA from HuggingFace …")
+    ds = load_dataset("renma/ProntoQA", trust_remote_code=True)
+    split = "validation"  # only split available
 
-def _sample_hop(rng: random.Random) -> int:
-    r = rng.random()
-    cum = 0.0
-    for h, w in _HOP_WEIGHTS.items():
-        cum += w
-        if r <= cum:
-            return h
-    return 3
+    problems = []
+    for ex in ds[split]:
+        if max_problems is not None and len(problems) >= max_problems:
+            break
 
+        # Normalise query format to match our few-shot prompt style
+        query = ex["question"].replace(
+            "Is the following statement true or false? ", "True or false: "
+        )
 
-def generate_problem(rng: random.Random, n_hops: int | None = None) -> dict:
-    """Generate one synthetic ProntoQA-style problem."""
-    if n_hops is None:
-        n_hops = _sample_hop(rng)
+        # Options are always ['A) True', 'B) False']
+        answer = "True" if ex["answer"] == "A" else "False"
 
-    entity = rng.choice(_ENTITIES)
-    # Draw n_hops+1 distinct category names for the chain
-    cats = rng.sample(_CATEGORIES, n_hops + 1)
-    final_prop = rng.choice(_PROPERTIES)
+        problems.append({
+            "question": ex["context"],
+            "query": query,
+            "answer": answer,
+            "chain_of_thought": [],  # not provided; traces are model-generated in Phase B
+            "meta": {"source": "prontoqa", "id": ex["id"]},
+        })
 
-    # Rules: cats[0]→cats[1]→...→cats[n_hops-1]→final_prop
-    rules = []
-    for i in range(n_hops - 1):
-        art = "an" if cats[i + 1][0] in "aeiou" else "a"
-        rules.append(f"Every {cats[i]} is {art} {cats[i + 1]}.")
-    rules.append(f"Every {cats[n_hops - 1]} is {final_prop}.")
-
-    # Seed fact
-    art0 = "an" if cats[0][0] in "aeiou" else "a"
-    fact = f"{entity} is {art0} {cats[0]}."
-
-    # Gold CoT
-    cot = [fact]
-    for i in range(1, n_hops):
-        art = "an" if cats[i][0] in "aeiou" else "a"
-        cot.append(f"{entity} is {art} {cats[i]}.")
-    cot.append(f"{entity} is {final_prop}.")
-
-    question = " ".join(rules) + f" {fact}"
-    query = f"True or false: {entity} is {final_prop}."
-
-    return {
-        "question": question,
-        "query": query,
-        "chain_of_thought": cot,
-        "answer": "True",
-        "meta": {"n_hops": n_hops, "entity": entity},
-    }
-
-
-def generate_problems(n: int, seed: int = 42) -> list[dict]:
-    rng = random.Random(seed)
-    return [generate_problem(rng) for _ in range(n)]
+    return problems
 
 
 # ---------------------------------------------------------------------------
-# Few-shot prompt + parser (same as probe_symbolic_traces.py)
+# Few-shot prompt + step parser
 # ---------------------------------------------------------------------------
 
 _FEW_SHOT = """\
@@ -181,7 +144,7 @@ def parse_output(raw: str) -> tuple[list[str], str | None]:
 
 
 # ---------------------------------------------------------------------------
-# Batched generation
+# Phase B: batched LLM trace generation
 # ---------------------------------------------------------------------------
 
 def generate_traces_batched(
@@ -190,7 +153,7 @@ def generate_traces_batched(
     tokenizer,
     device: torch.device,
     batch_size: int = 8,
-    max_new_tokens: int = 120,
+    max_new_tokens: int = 150,
 ) -> list[dict]:
     """Run batched LLM generation over all problems. Returns trace records."""
     prompts = [
@@ -203,14 +166,13 @@ def generate_traces_batched(
         batch_prompts = prompts[i : i + batch_size]
         batch_problems = problems[i : i + batch_size]
 
-        # Left-pad for batched generation
         tokenizer.padding_side = "left"
         enc = tokenizer(
             batch_prompts,
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=768,  # ProntoQA contexts are longer than synthetic
         ).to(device)
 
         with torch.no_grad():
@@ -222,7 +184,7 @@ def generate_traces_batched(
             )
 
         prompt_len = enc["input_ids"].shape[1]
-        for j, (prob, output_ids) in enumerate(zip(batch_problems, out)):
+        for prob, output_ids in zip(batch_problems, out):
             raw = tokenizer.decode(output_ids[prompt_len:], skip_special_tokens=True)
             steps, pred_answer = parse_output(raw)
             if steps:
@@ -243,17 +205,14 @@ def generate_traces_batched(
 
 def main():
     args = parse_args()
-    rng = random.Random(args.seed)
 
-    # --- Phase A: generate problems ---
-    print(f"Generating {args.n_problems} synthetic problems …")
-    problems = generate_problems(args.n_problems, seed=args.seed)
+    # --- Phase A: load from HuggingFace ---
+    problems = load_prontoqa(max_problems=args.max_problems)
 
-    hop_counts = {}
-    for p in problems:
-        h = p["meta"]["n_hops"]
-        hop_counts[h] = hop_counts.get(h, 0) + 1
-    print(f"Hop distribution: { {h: hop_counts[h] for h in sorted(hop_counts)} }")
+    n_false = sum(1 for p in problems if p["answer"] == "False")
+    n_true = len(problems) - n_false
+    print(f"Loaded {len(problems)} problems from ProntoQA")
+    print(f"True / False split: {n_true} / {n_false} ({n_false / len(problems):.0%} False)")
 
     if args.problems_out:
         Path(args.problems_out).parent.mkdir(parents=True, exist_ok=True)
@@ -272,7 +231,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-0.5B", dtype=torch.float32
+        "Qwen/Qwen2.5-0.5B", torch_dtype=torch.float32
     ).to(device)
     model.eval()
 
@@ -299,15 +258,19 @@ def main():
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--n-problems", type=int, default=14_000)
-    p.add_argument("--problems-out", default="data/prontoqa_synthetic.jsonl")
+    p.add_argument(
+        "--max-problems", type=int, default=None,
+        help="Cap number of problems loaded (default: all 500)",
+    )
+    p.add_argument("--problems-out", default="data/prontoqa_hf.jsonl")
     p.add_argument("--traces-out", default="data/prontoqa_traces.jsonl")
-    p.add_argument("--problems-only", action="store_true",
-                   help="Only generate problems, skip LLM trace generation")
+    p.add_argument(
+        "--problems-only", action="store_true",
+        help="Only load and save problems, skip LLM trace generation",
+    )
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--max-new-tokens", type=int, default=120)
+    p.add_argument("--max-new-tokens", type=int, default=150)
     p.add_argument("--device", default="mps", choices=["cpu", "cuda", "mps"])
-    p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
 

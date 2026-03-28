@@ -46,6 +46,26 @@ _NEG_RULE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Wumpuses are [a/an] rompuses."  — plural form used in ProntoQA HuggingFace dataset
+_PLURAL_RULE_RE = re.compile(
+    r"([A-Za-z]+)\s+are\s+(?:not\s+)?(?:a\s+|an\s+)?([A-Za-z]+)\s*\.",
+    re.IGNORECASE,
+)
+_PLURAL_NEG_RULE_RE = re.compile(
+    r"([A-Za-z]+)\s+are\s+(not)\s+(?:a\s+|an\s+)?([A-Za-z]+)\s*\.",
+    re.IGNORECASE,
+)
+
+
+def _singularize(word: str) -> str:
+    """Strip plural suffix from ProntoQA category names (e.g. jompuses → jompus)."""
+    w = word.lower()
+    if w.endswith("es"):
+        return w[:-2]
+    if w.endswith("s"):
+        return w[:-1]
+    return w
+
 # "[Name] is [a/an] [property]."  — Name must start with capital letter
 _FACT_RE = re.compile(
     r"([A-Z][a-z]*)\s+is\s+(?:not\s+)?(?:a\s+|an\s+)?(\w+)\s*\."
@@ -90,26 +110,42 @@ class PropLogicSolver:
 
     @classmethod
     def from_question(cls, question: str) -> "PropLogicSolver":
-        """Parse rules and seed facts from a ProntoQA question string."""
+        """Parse rules and seed facts from a ProntoQA question string.
+
+        Handles both singular forms ("Every wumpus is a rompus.") and the plural
+        forms used in the HuggingFace ProntoQA dataset ("Wumpuses are rompuses.").
+        """
         solver = cls()
 
-        # Extract negation rules first
+        # --- Singular forms: Every/Each X is [not] [a/an] Y ---
         for m in _NEG_RULE_RE.finditer(question):
             premise = _normalise_prop(m.group(1))
             conclusion = _normalise_prop(m.group(3))
             solver.neg_rules.setdefault(premise, set()).add(conclusion)
 
-        # Extract positive rules (excluding sentences already matched as neg rules)
         for m in _RULE_RE.finditer(question):
             full = m.group(0)
-            # skip if this is actually a negation rule
             if re.search(r"\bis\s+not\b", full, re.IGNORECASE):
                 continue
             premise = _normalise_prop(m.group(1))
             conclusion = _normalise_prop(m.group(2))
             solver.rules.setdefault(premise, set()).add(conclusion)
 
-        # Extract seed facts — only capitalised names (entities), not rules
+        # --- Plural forms: Xs are [not] [a/an] Ys ---
+        for m in _PLURAL_NEG_RULE_RE.finditer(question):
+            premise = _singularize(m.group(1))
+            conclusion = _singularize(m.group(3))
+            solver.neg_rules.setdefault(premise, set()).add(conclusion)
+
+        for m in _PLURAL_RULE_RE.finditer(question):
+            full = m.group(0)
+            if re.search(r"\bare\s+not\b", full, re.IGNORECASE):
+                continue
+            premise = _singularize(m.group(1))
+            conclusion = _singularize(m.group(2))
+            solver.rules.setdefault(premise, set()).add(conclusion)
+
+        # --- Seed facts: [Name] is [not] [a/an] X  (capitalised entity names) ---
         for m in _NEG_FACT_RE.finditer(question):
             entity = m.group(1)
             prop = _normalise_prop(m.group(3))

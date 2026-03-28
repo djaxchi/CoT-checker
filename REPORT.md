@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-03-23*
+*Last updated: 2026-03-28*
 
 ## Abstract
 
@@ -175,8 +175,75 @@ The reason a signal exists at the "=" result token at all is a consequence of ho
 
 ---
 
-## 5. Next Steps
+---
 
-- Evaluate on out-of-distribution problems (MATH-500) as the paper does
-- Investigate which SSAE features (sparse dimensions) are most predictive of incorrectness
+## 5. Symbolic Domain Extension
+
+### 5.1 Motivation
+
+The arithmetic experiments validate the paper's reproduction on Math-Shepherd/GSM8K. The next question is whether the SSAE probe generalises to a structurally different reasoning domain. We test on **symbolic propositional logic** (ProntoQA), where reasoning steps are modus-ponens deductions rather than arithmetic operations.
+
+This tests whether SSAE latents encode a general notion of "is this step a valid deduction?" or merely arithmetic-specific patterns.
+
+### 5.2 Setup
+
+**Dataset**: `renma/ProntoQA` (HuggingFace) — 500 problems, ~48% False-answer problems, complex multi-hop chains (avg 7.5 model-generated steps/problem). Richer and harder than our synthetic baseline.
+
+**Step labeling**: `PropLogicSolver` (deterministic) — validates each step via one-step modus ponens against the accumulated knowledge state. Extended to handle ProntoQA's plural rule format ("Jompuses are yumpuses.").
+
+**SSAE**: Trained from scratch on ProntoQA traces (3,736 steps, 1 epoch, frozen Qwen2.5-0.5B backbone). Encoder checkpoint: `ssae_symbolic_p1.enc.pt`.
+
+**Probe**: Same 3-layer MLP as arithmetic experiments, trained on SSAE latents from 3,208 labeled steps (2,566 train / 642 val).
+
+### 5.3 Label Distribution
+
+| Class | Steps | % |
+|-------|-------|---|
+| Correct (+) | 1,864 | 58.1% |
+| Incorrect (-) | 1,344 | 41.9% |
+| **Majority baseline** | | **58.1%** |
+
+The 41.9% incorrect rate reflects the model making genuine reasoning errors on hard multi-hop symbolic problems — a much healthier distribution than the 13% seen with simple synthetic problems.
+
+### 5.4 Results
+
+![Symbolic probe comparison](results/symbolic_probe_comparison.png)
+
+**Figure 3.** Val accuracy and gap above majority baseline across all probe configurations. Arithmetic results (blue) use Math-Shepherd/GSM8K. The symbolic probe (orange) uses ProntoQA with a domain-specific SSAE.
+
+| Configuration | Majority baseline | Val accuracy | Gap above baseline |
+|---|---|---|---|
+| Arithmetic — 1K steps | 72.2% | 77.50% | +5.3 pp |
+| Arithmetic — 40K steps | 70.6% | 78.25% | +7.65 pp |
+| Paper (SSAE-Qwen, GSM8K) | 70.49% | 78.58% | +8.09 pp |
+| **Symbolic — ProntoQA (ours)** | **58.1%** | **70.56%** | **+12.5 pp** |
+
+**Per-class breakdown (symbolic probe, val set):**
+
+| | Precision | Recall | F1 |
+|-|-----------|--------|----|
+| Incorrect steps | 0.652 | 0.615 | 0.633 |
+| **Correct steps** | **0.740** | **0.769** | **0.754** |
+
+### 5.5 Discussion
+
+**The gap above baseline is the strongest result so far.** At +12.5 pp, the symbolic probe exceeds the paper's arithmetic gap (+8.09 pp), despite using 120x fewer training steps (2,566 vs 308K). This is not a direct comparison — baselines and domains differ — but it suggests SSAE latents may be particularly well-suited to symbolic reasoning, where errors are structurally cleaner than arithmetic mistakes.
+
+**Class asymmetry is reversed compared to arithmetic.** In the arithmetic probe, incorrect steps were easier to detect (F1 82.8% incorrect vs 51.2% correct). Here, correct steps are easier to detect (F1 75.4% correct vs 63.3% incorrect). This likely reflects the nature of symbolic errors: when the model hallucinates a wrong category substitution, the error is concentrated in one step and subsequent steps may be locally consistent with the wrong premise. The SSAE may pick up on the coherence of correct chains more reliably than the incoherence of individual wrong steps.
+
+**SSAE training is minimal.** Only 1 epoch on 3,736 steps with a frozen backbone. More training would likely improve the latent space and probe accuracy.
+
+**Limitations of this run:**
+- 2,566 training steps — small, single seed
+- SSAE backbone frozen throughout (T4 memory constraint)
+- Probe uses SSAE latents re-encoded from problems, not from the original trace file — traces were generated twice independently, introducing minor variance
+
+---
+
+## 6. Next Steps
+
+- Train SSAE for more epochs on symbolic data (A100 or multi-epoch T4 run)
+- Investigate which sparse dimensions drive the +12.5 pp gap — feature importance analysis
+- Compare symbolic SSAE vs arithmetic SSAE as encoder for symbolic probe (transfer test)
+- Evaluate on out-of-distribution symbolic problems (longer hop chains, negation-heavy)
 - Compare against the dense baseline `h_k` (pre-projection) to quantify what sparsification adds

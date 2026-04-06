@@ -86,7 +86,7 @@ def parse_entry(entry: dict) -> list[dict]:
 
 
 def encode_batch(
-    model, tokenizer, contexts, steps, device, sep_token_id, max_len=256
+    model, tokenizer, contexts, steps, device, sep_token_id, max_len=128
 ) -> np.ndarray:
     batch_ids = []
     for ctx, step in zip(contexts, steps):
@@ -125,6 +125,8 @@ def parse_args():
         help="Skip the first N steps (use to avoid overlap with training data)",
     )
     p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--max-len", type=int, default=128,
+                   help="Max tokens per context and per step before truncation (default: 128)")
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     p.add_argument(
         "--correct-ratio",
@@ -202,7 +204,7 @@ def main():
         ctxs = [r["context"] for r in batch]
         steps = [r["text"] for r in batch]
         labels = [r["label"] for r in batch]
-        lats = encode_batch(model, tokenizer, ctxs, steps, device, sep_tok_id)
+        lats = encode_batch(model, tokenizer, ctxs, steps, device, sep_tok_id, max_len=args.max_len)
         all_latents.extend(lats)
         all_labels.extend(labels)
 

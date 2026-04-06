@@ -22,6 +22,15 @@ env/
 !/data/.gitkeep
 !/data/prontoqa_sample.jsonl
 
+# Generated labeled data (large, reproducible via label_gsm8k_aug.py)
+results/labeled_data/
+
+# Paper reference clone — nested git repo, not a submodule
+papers/SSAE/
+
+# Generated PDF export of report
+REPORT.pdf
+
 # Large binary outputs — reproducible from pipeline
 results/probe_data/
 results/probes/

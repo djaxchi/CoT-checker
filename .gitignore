@@ -28,6 +28,12 @@ results/labeled_data/
 # Paper reference clone — nested git repo, not a submodule
 papers/SSAE/
 
+# Paper-Scrapper: ignore runtime data, keep source code
+Paper-Scrapper/.env
+Paper-Scrapper/papers.db
+Paper-Scrapper/digests/
+Paper-Scrapper/logs/
+
 # Generated PDF export of report
 REPORT.pdf
 
@@ -70,6 +76,8 @@ nohup.out
 # Secrets / env
 .env
 .env.*
+!.env.example
+!Paper-Scrapper/.env.example
 
 # Claude Code agent instructions (local only)
 CLAUDE.md

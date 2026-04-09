@@ -1,0 +1,92 @@
+# Query profiles for Pass 1 (keyword) and Pass 2 (Claude Haiku) screening.
+# A Pass 1 hit requires: at least one anchor_term AND at least one context_term in the title.
+# Pass 2 uses all four profiles as a rubric for the 0-3 relevance score.
+
+profiles:
+  method:
+    description: "Step-level SAE/SSAE probing of chain-of-thought reasoning steps"
+    anchor_terms:
+      - "sparse autoencoder"
+      - "ssae"
+      - "sae"
+    context_terms:
+      - "step-level"
+      - "step level"
+      - "probe"
+      - "probing"
+      - "classifier"
+      - "chain-of-thought"
+      - "chain of thought"
+      - "reasoning"
+      - "cot"
+
+  task:
+    description: "Chain-of-thought verification, process reward models, and first-error detection"
+    anchor_terms:
+      - "chain-of-thought"
+      - "chain of thought"
+      - "cot"
+      - "process reward model"
+      - "prm"
+    context_terms:
+      - "verification"
+      - "verifier"
+      - "step-level"
+      - "step level"
+      - "first error"
+      - "correctness"
+      - "error detection"
+      - "reward model"
+
+  labels:
+    description: "Process supervision datasets and rollout-based step labels (Math-Shepherd, PRM800K)"
+    anchor_terms:
+      - "math-shepherd"
+      - "math shepherd"
+      - "prm800k"
+      - "process supervision"
+    context_terms:
+      - "label"
+      - "annotation"
+      - "rollout"
+      - "reward"
+      - "supervision"
+      - "dataset"
+
+  robustness:
+    description: "SAE artifacts, falsification attacks, token injection, and seed sensitivity"
+    anchor_terms:
+      - "sparse autoencoder"
+      - "ssae"
+      - "sae"
+    context_terms:
+      - "artifact"
+      - "artefact"
+      - "falsification"
+      - "token injection"
+      - "seed sensitivity"
+      - "robustness"
+      - "spurious"
+
+sources:
+  arxiv:
+    categories:
+      - "cs.AI"
+      - "cs.LG"
+      - "cs.CL"
+    max_results: 500
+
+  semantic_scholar:
+    queries:
+      - "step-level sparse autoencoder chain-of-thought verification"
+      - "process reward model CoT step correctness probe hidden state"
+    max_results_per_query: 50
+    rate_limit_delay: 1.2  # seconds between requests (free tier: 1 req/sec)
+
+screening:
+  pass2_model: "google/gemma-4-26b-a4b-it:free"
+  pass2_threshold: 2  # papers with score >= this appear in Telegram digest
+  pass2_max_tokens: 512
+
+telegram:
+  max_papers_in_message: 15

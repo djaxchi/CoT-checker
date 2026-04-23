@@ -24,7 +24,8 @@ Usage:
         --checkpoint gsm8k-385k_Qwen2.5-0.5b_spar-10.pt \\
         --output results/probe_data/math_shepherd_1000.npz \\
         --max-steps 1000 \\
-        --device mps
+        --max-seq-len 2048 \\
+        --device cuda
 """
 
 import argparse
@@ -86,13 +87,19 @@ def parse_entry(entry: dict) -> list[dict]:
 
 
 def encode_batch(
-    model, tokenizer, contexts, steps, device, sep_token_id, max_len=128
+    model, tokenizer, contexts, steps, device, sep_token_id, max_seq_len=2048
 ) -> np.ndarray:
     batch_ids = []
     for ctx, step in zip(contexts, steps):
-        ctx_ids = tokenizer.encode(ctx, max_length=max_len, truncation=True)
-        step_ids = tokenizer.encode(step, max_length=max_len, truncation=True)
+        ctx_ids = tokenizer.encode(ctx, add_special_tokens=False)
+        step_ids = tokenizer.encode(step, add_special_tokens=False)
         seq = ctx_ids + [sep_token_id] + step_ids + [tokenizer.eos_token_id]
+        # Truncate from the left so the step is always fully preserved.
+        # Overhead = sep + eos = 2 tokens; step must fit within max_seq_len.
+        if len(seq) > max_seq_len:
+            keep = max_seq_len - len(step_ids) - 2  # tokens available for context
+            ctx_ids = ctx_ids[-max(keep, 0):]
+            seq = ctx_ids + [sep_token_id] + step_ids + [tokenizer.eos_token_id]
         batch_ids.append(seq)
 
     max_seq = max(len(s) for s in batch_ids)
@@ -125,8 +132,10 @@ def parse_args():
         help="Skip the first N steps (use to avoid overlap with training data)",
     )
     p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--max-len", type=int, default=128,
-                   help="Max tokens per context and per step before truncation (default: 128)")
+    p.add_argument("--max-seq-len", type=int, default=2048,
+                   help="Max tokens for the full [context|sep|step] sequence. "
+                        "Context is truncated from the left so the step is always fully preserved. "
+                        "Set to 0 to disable (use the model's full context window).")
     p.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     p.add_argument(
         "--correct-ratio",
@@ -198,13 +207,14 @@ def main():
     # --- Encode in batches ---
     all_latents, all_labels = [], []
     bs = args.batch_size
+    max_seq = args.max_seq_len if args.max_seq_len > 0 else 10**9
 
     for i in tqdm(range(0, total, bs), desc="Encoding with SSAE"):
         batch = all_records[i : i + bs]
         ctxs = [r["context"] for r in batch]
         steps = [r["text"] for r in batch]
         labels = [r["label"] for r in batch]
-        lats = encode_batch(model, tokenizer, ctxs, steps, device, sep_tok_id, max_len=args.max_len)
+        lats = encode_batch(model, tokenizer, ctxs, steps, device, sep_tok_id, max_seq_len=max_seq)
         all_latents.extend(lats)
         all_labels.extend(labels)
 

@@ -32,7 +32,7 @@ cd "$PROJECT_DIR"
 mkdir -p logs "$SCRATCH_RESULTS"
 
 module purge
-module load StdEnv/2023 python/3.11 cuda/12.2
+module load StdEnv/2023 gcc arrow/24.0.0 python/3.11 cuda/12.2
 
 source "$HOME/venvs/cot/bin/activate"
 

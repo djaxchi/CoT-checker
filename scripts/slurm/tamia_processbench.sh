@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
-#SBATCH --gpus=h100:2
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --output=logs/processbench_%j.out
 #SBATCH --error=logs/processbench_%j.err
 

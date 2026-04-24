@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-STORE="$HOME/projects/aip-azouaq/$USER"
+STORE="/project/aip-azouaq/$USER"
 HF_CACHE="$STORE/hf_cache"
 
 mkdir -p "$HF_CACHE"

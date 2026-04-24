@@ -8,7 +8,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$HOME/CoT-checker"           # adjust if cloned elsewhere
-STORE="$HOME/projects/aip-azouaq/$USER"   # backed-up project space
+STORE="/project/aip-azouaq/$USER"   # backed-up project space
 
 HF_CACHE="$STORE/hf_cache"
 DATA_DIR="$STORE/probe_data"

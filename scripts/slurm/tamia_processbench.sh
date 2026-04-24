@@ -37,7 +37,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$HOME/CoT-checker"
-STORE="$HOME/projects/aip-azouaq/$USER"
+STORE="/project/aip-azouaq/$USER"
 SCRATCH_PB="$SCRATCH/cot-checker/processbench"
 
 CKPT="$STORE/checkpoints/gsm8k-385k_Qwen2.5-0.5b_spar-10.pt"

@@ -26,7 +26,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$HOME/CoT-checker"
-STORE="$HOME/projects/aip-azouaq/$USER"
+STORE="/project/aip-azouaq/$USER"
 SCRATCH_RESULTS="$SCRATCH/cot-checker/results"
 HF_CACHE="$STORE/hf_cache"
 RECORDS_CACHE="$SCRATCH/cot-checker/probe_data/eval_held_out_text.jsonl"

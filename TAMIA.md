@@ -17,7 +17,7 @@ ssh $USER@tamia.calculquebec.ca
 | Variable | Path | Purpose |
 |---|---|---|
 | `$HOME` | `/home/d/$USER` | Code, venvs. Small quota — never store data here. |
-| `$STORE` | `$HOME/projects/aip-azouaq/$USER` | Persistent project data: checkpoints, probe data, results. Survives job end. |
+| `$STORE` | `/project/aip-azouaq/$USER` | Persistent project data: checkpoints, probe data, results. Survives job end. |
 | `$SCRATCH` | cluster-assigned per user | Large temporary files: HF cache, intermediate npz shards. Purged periodically. |
 
 Key locations inside `$STORE`:

@@ -22,7 +22,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$HOME/CoT-checker"
-STORE="$HOME/projects/aip-azouaq/$USER"
+STORE="/project/aip-azouaq/$USER"
 SCRATCH_RESULTS="$SCRATCH/cot-checker/results"
 
 TRAIN_DATA="$STORE/probe_data/train_full.npz"

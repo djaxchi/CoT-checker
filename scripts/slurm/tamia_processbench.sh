@@ -28,7 +28,7 @@
 # Login-node pre-download (run ONCE before submitting this job):
 #   module load StdEnv/2023 gcc python/3.11
 #   source $HOME/venvs/cot/bin/activate
-#   export HF_HOME=$SCRATCH/hf_cache
+#   export HF_HOME=$SCRATCH/hf_cache   # ProcessBench goes here (only ~15 MB)
 #   python -c "
 #   from datasets import load_dataset
 #   load_dataset('Qwen/ProcessBench', split='gsm8k')
@@ -58,10 +58,15 @@ module load StdEnv/2023 gcc arrow/24.0.0 python/3.11 cuda/12.2
 
 source "$HOME/venvs/cot/bin/activate"
 
-export HF_HOME="$SCRATCH/hf_cache"
-export TRANSFORMERS_CACHE="$SCRATCH/hf_cache"
+# Qwen model weights are in $STORE/hf_cache (downloaded by tamia_download_qwen.sh).
+# ProcessBench dataset is in $SCRATCH/hf_cache (downloaded on the login node).
+# Point HF_HOME at $STORE so the SSAE tokenizer is found; pass $SCRATCH as
+# explicit cache_dir for dataset loading in encode_processbench.py.
+export HF_HOME="$STORE/hf_cache"
+export TRANSFORMERS_CACHE="$STORE/hf_cache"
 export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
+DATASET_CACHE="$SCRATCH/hf_cache"
 
 # ---------------------------------------------------------------------------
 # Step 1: Encode both splits in parallel, one GPU each.
@@ -77,7 +82,7 @@ CUDA_VISIBLE_DEVICES=0 python scripts/encode_processbench.py \
     --output      "$LATENTS_GSM" \
     --batch-size  32 \
     --max-seq-len 2048 \
-    --cache-dir   "$SCRATCH/hf_cache" \
+    --cache-dir   "$DATASET_CACHE" \
     --device      cuda \
     > "$SCRATCH_PB/encode_gsm8k.log" 2>&1 &
 PID_GSM=$!
@@ -88,7 +93,7 @@ CUDA_VISIBLE_DEVICES=1 python scripts/encode_processbench.py \
     --output      "$LATENTS_MATH" \
     --batch-size  32 \
     --max-seq-len 2048 \
-    --cache-dir   "$SCRATCH/hf_cache" \
+    --cache-dir   "$DATASET_CACHE" \
     --device      cuda \
     > "$SCRATCH_PB/encode_math.log" 2>&1 &
 PID_MATH=$!

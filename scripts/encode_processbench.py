@@ -35,9 +35,10 @@ import argparse
 import sys
 from pathlib import Path
 
+import json
+
 import numpy as np
 import torch
-from datasets import load_dataset
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -104,13 +105,17 @@ def parse_args():
                    help="Path to SSAE checkpoint .pt file")
     p.add_argument("--split", default="gsm8k",
                    choices=["gsm8k", "math", "olympiadbench", "omnimath"],
-                   help="ProcessBench split to encode")
+                   help="ProcessBench split name (used for labelling; ignored if --data-file is set)")
+    p.add_argument("--data-file", default=None,
+                   help="Path to a pre-exported JSONL file (one ProcessBench row per line). "
+                        "Use this on compute nodes that have no Hub access. "
+                        "Export with: scripts/slurm/export_processbench.py")
     p.add_argument("--output", default="results/probe_data/processbench_gsm8k.npz")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--max-seq-len", type=int, default=2048)
     p.add_argument("--device", default="cuda", choices=["cpu", "cuda", "mps"])
     p.add_argument("--cache-dir", default=None,
-                   help="HuggingFace cache dir (for offline use on compute nodes)")
+                   help="HuggingFace cache dir (only used when --data-file is not set)")
     return p.parse_args()
 
 
@@ -122,12 +127,18 @@ def main():
     tokenizer = model.tokenizer
     sep_tok_id = tokenizer.sep_token_id
 
-    print(f"Loading ProcessBench (Qwen/ProcessBench, split='{args.split}')...")
-    ds = load_dataset(
-        "Qwen/ProcessBench",
-        split=args.split,
-        cache_dir=args.cache_dir,
-    )
+    if args.data_file:
+        print(f"Loading ProcessBench from local file: {args.data_file}")
+        with open(args.data_file) as f:
+            ds = [json.loads(line) for line in f if line.strip()]
+    else:
+        from datasets import load_dataset
+        print(f"Loading ProcessBench (Qwen/ProcessBench, split='{args.split}')...")
+        ds = list(load_dataset(
+            "Qwen/ProcessBench",
+            split=args.split,
+            cache_dir=args.cache_dir,
+        ))
     n_solutions = len(ds)
     print(f"  Solutions loaded: {n_solutions}")
 

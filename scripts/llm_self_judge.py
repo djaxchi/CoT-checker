@@ -236,11 +236,10 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=dtype_map[args.dtype],
-        device_map={"": args.device},
+        dtype=dtype_map[args.dtype],
         cache_dir=args.cache_dir,
         trust_remote_code=True,
-    )
+    ).to(args.device)
     model.eval()
 
     yes_ids, no_ids = find_yesno_token_ids(tok)

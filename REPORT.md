@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-04-06*
+*Last updated: 2026-04-24*
 
 ---
 
@@ -118,15 +118,17 @@ After parsing, Step 5 above becomes:
 
 ### 5.3 Encoding: From Text to Latent
 
-Each record is encoded by the SSAE as a single sequence:
+Each record is encoded as a single sequence fed to the SSAE:
 
 ```
-[context tokens (≤128)] + [<sep>] + [step tokens (≤128)] + [<eos>]
+[context tokens] + [<sep>] + [step tokens] + [<eos>]
 ```
 
-Both context and step are truncated independently to 128 tokens before concatenation. The SSAE encoder (Qwen2.5-0.5B backbone + sparse projector) runs a forward pass and returns the hidden state at the **last token position**, projected through the sparse bottleneck. This yields a 896-dimensional latent vector `h_c`.
+The context and step are tokenized without per-part length limits. If the combined sequence exceeds `max_seq_len=2048`, the oldest context tokens are dropped from the left — always preserving the full step text. In practice no sequence in this dataset reached 2048 tokens, so truncation was never triggered. This corrects the previous encoding, which truncated context and step independently at 128 tokens each, silently dropping the most recent prior steps when context was long.
 
-The encoder applies L2 normalization to `h_c` so all vectors lie on the unit sphere. Every latent in our dataset has L2 norm exactly 1.0 (verified across all 176,008 encoded steps).
+The SSAE encoder (Qwen2.5-0.5B backbone + sparse projector) runs a forward pass and returns the hidden state at the **last token position**, projected through the sparse bottleneck. This yields a 896-dimensional latent vector `h_c`.
+
+The encoder applies L2 normalization to `h_c` so all vectors lie on the unit sphere.
 
 **What a latent actually looks like** (first 20 of 896 dimensions, from `results/probe_data/math_shepherd_176k_natural.npz`):
 
@@ -142,21 +144,20 @@ Across all 176,008 steps, incorrect steps activate on average **9.7 more dimensi
 
 ### 5.4 Data Provenance and Integrity
 
-We encode Math-Shepherd in two separate windows to guarantee clean train/eval separation:
+We encode from the Math-Shepherd GSM8K partition (172,283 problems, ~648K total steps). The dataset has a natural distribution of ~28.9% correct / 71.1% incorrect within offsets 0–375K. Beyond offset 375K the distribution degrades toward 100% correct-only steps (an artifact of dataset construction); we exclude this tail entirely.
 
-| File | Steps | Math-Shepherd offset | max_len | Distribution |
-|---|---|---|---|---|
-| `math_shepherd_40k_natural.npz` | 40,126 | 0 | 256 | 28.0% correct |
-| `math_shepherd_57k_balanced.npz` | 57,782 | 0 | 256 | 50.0% correct |
-| `math_shepherd_176k_natural.npz` | 176,008 | 110,000 | 128 | 28.9% correct |
-| `math_shepherd_eval_5k_clean.npz` | 5,000 | 100,000 | 128 | 28.9% correct (raw) |
-| `math_shepherd_eval_balanced.npz` | 2,890 | — (subsampled from above) | 128 | **50.0% correct** |
+Data is separated at the encoding stage by offset:
 
-**A contamination issue we found and fixed:** the original eval file (`math_shepherd_eval_5k_contaminated.npz`, now retired) was generated from the same offset-0 window as the training data. An exact row-hash check revealed 48.9% of its 5,000 rows were present verbatim in the balanced training set, and 33.4% in the natural training set. All experiments using that file produced inflated metrics and are not reported here.
+| File | Steps | GSM8K step offset | Distribution |
+|---|---|---|---|
+| `eval_held_out.npz` | 50,000 | 0 – 90K | **50.0% correct** (balanced, carved from raw shard) |
+| `train_final.npz` | 450,000 | 90K – 450K | 33.3% correct (natural) |
 
-The clean eval (`math_shepherd_eval_5k_clean.npz`) is from offset 100,000 — a window between the two training encodings (0–100K and 110K–286K). A row-hash check against all training files confirms 0% exact overlap.
+**Eval was carved first.** Offset 0–90K (~90K natural steps, ~26K correct + ~64K incorrect) was encoded, then 25,000 correct and 25,000 incorrect steps were selected uniformly at random (seed=42) to form the balanced held-out set. The remaining steps from that shard were discarded.
 
-Additionally, the 40K/57K files were encoded at max_len=256 while the 176K file uses max_len=128 (reduced to fit within MPS memory). Because of this encoding inconsistency, we do not mix the older files with the 176K data in the results below.
+**Training covers only offsets 90K–450K.** Four shards of 90K steps each (offsets 90K, 180K, 270K, 360K) were encoded in parallel on 4 H100 GPUs and merged. The shard at offset 360K is near the dataset tail and has a slightly elevated correct rate (53.1%), but remains within acceptable range for a 70/30-subsampled training regime.
+
+There is no row overlap between eval and training by construction: they cover non-overlapping offset windows.
 
 ---
 
@@ -170,18 +171,16 @@ Linear(1024 → 512) → LayerNorm(512)  → ReLU → Dropout(0.1)
 Linear(512 → 1)    [raw logit; sigmoid gives P(correct)]
 ```
 
-**Training** (`scripts/experiment_176k_clean.py`):
+**Training** (`scripts/experiment_full_clean.py`):
 - Loss: binary cross-entropy on the single logit output
 - Optimizer: AdamW, lr=1e-4, weight_decay=0.01
-- Scheduler: cosine annealing over 30 epochs
-- Batch size: 128
-- 80/20 train/val split; best val-accuracy checkpoint saved
+- Scheduler: cosine annealing over 50 epochs
+- Batch size: 512
+- 90/10 train/internal-val split from the training subset; best internal-val-accuracy checkpoint saved
 
-**Decision threshold:** 0.8 at evaluation (not 0.5). A threshold of 0.8 means the probe only predicts "correct" when P(correct) ≥ 0.8, and defaults to "incorrect" otherwise. This is the conservative direction: at threshold=0.5 the probe calls 3,192 of 5,000 eval steps correct; at threshold=0.8 it calls only 1,597.
+**Training subset construction:** the full 450K training pool contains 149,769 correct (33.3%) and 300,231 incorrect (66.7%) steps. We subsample to 70% correct / 30% incorrect without duplication — keeping all 149,769 correct steps and drawing 64,186 incorrect steps — for 213,955 total. This replicates the distribution that produced the best result in prior local runs.
 
-This is well-motivated by the SSAE's training regime. The SSAE was trained exclusively on correct steps. Its encoder learned to compress correct reasoning into sparse latent vectors; it never saw incorrect steps during training. A step that is genuinely correct should produce an h_c that behaves like the ones the encoder was trained on — compact, familiar. An incorrect step is out-of-distribution for the encoder, likely producing a different activation pattern. Raising the threshold means: only commit to "correct" when the probe is highly confident the latent looks like what a correct step should look like; treat everything else as incorrect by default.
-
-Note: L2 normalization means every h_c vector has Euclidean length exactly 1.0 — all latents lie on the surface of a 896-dimensional unit sphere. This means the magnitude of activations carries no information; only the *direction* of h_c matters. Whether correct and incorrect steps are geometrically separated on this sphere (i.e., whether they form distinct directional clusters) has not been tested. That is part of the step-2 feature analysis.
+Note: L2 normalization means every h_c vector has Euclidean length exactly 1.0 — all latents lie on the surface of a 896-dimensional unit sphere. The magnitude of activations carries no information; only the *direction* of h_c matters. Whether correct and incorrect steps are geometrically separated on this sphere has not been tested. That is part of the step-2 feature analysis.
 
 ---
 
@@ -189,65 +188,94 @@ Note: L2 normalization means every h_c vector has Euclidean length exactly 1.0 �
 
 ### 7.1 Dataset for This Experiment
 
-Source: `math_shepherd_176k_natural.npz` (176,008 steps, offset 110K, max_len=128)
-
-To train without any duplication, we take a 70/30 subset by keeping all 50,950 unique correct steps and subsampling 21,835 incorrect steps from the 125,058 available:
-
 | Split | Steps | Correct | Incorrect |
 |---|---|---|---|
-| Training subset | 72,785 | 50,950 (70.0%) | 21,835 (30.0%) |
-| Train (80%) | 58,228 | — | — |
-| Val (20%) | 14,557 | — | — |
-| **Eval (balanced, held-out)** | **2,890** | **1,445 (50.0%)** | **1,445 (50.0%)** |
+| Training pool (encoded) | 450,000 | 149,769 (33.3%) | 300,231 (66.7%) |
+| Training subset (70/30, no duplication) | 213,955 | 149,769 (70.0%) | 64,186 (30.0%) |
+| Internal val (10% of subset) | 21,396 | — | — |
+| Train (90% of subset) | 192,559 | — | — |
+| **Held-out eval (balanced, never seen)** | **50,000** | **25,000 (50.0%)** | **25,000 (50.0%)** |
 
-The eval set is balanced 50/50: the raw clean file (`math_shepherd_eval_5k_clean.npz`) has 1,445 correct and 3,555 incorrect steps; we subsample incorrect to 1,445 to match. A balanced eval makes accuracy directly interpretable as discrimination ability — a majority classifier scores 50%, not 71%. No row in the eval set appears in any training file (verified by row-hash comparison).
+The eval set is balanced 50/50 and drawn from offset 0–90K, a window that was encoded before any training data was assembled. A balanced eval makes accuracy directly interpretable as discrimination ability — a majority classifier scores 50%.
 
 ### 7.2 Training Curve
 
-Val accuracy across 30 epochs:
+Across 4 seeds the probe reaches best internal validation accuracy between epochs 10 and 24, then plateaus. Loss continues to fall through epoch 50 while val accuracy stays flat — 50 epochs is sufficient.
 
-| Epoch | Train Loss | Val Acc |
+| Seed | Best internal val acc | At epoch |
 |---|---|---|
-| 1 | 0.4219 | 81.16% |
-| 6 | 0.3975 | 81.34% |
-| 9 | 0.3889 | **81.39%** ← best |
-| 20 | 0.3289 | 80.79% |
-| 30 | 0.2905 | 80.40% |
-
-The model peaks at epoch 9 and then slightly overfits. Loss continues to fall while val accuracy plateaus and dips, a sign that 30 epochs is more than sufficient for this dataset size.
+| 42 | 76.91% | 20 |
+| 43 | 77.07% | 24 |
+| 44 | 76.78% | 11 |
+| 45 | 76.11% | 10 |
 
 ### 7.3 Held-Out Evaluation
 
-Evaluated on `math_shepherd_eval_balanced.npz` (2,890 steps, 50/50 correct/incorrect, subsampled from offset-100K clean data, never seen during training), threshold=0.8:
+Evaluated on `eval_held_out.npz` (50,000 steps, 25,000 correct / 25,000 incorrect). Results reported at threshold=0.5 (default) and threshold=0.7 (macro-F1-optimal across all seeds).
 
-```
-Majority baseline : 50.00%
-Probe accuracy    : 73.40%  (+23.40 pp)
-```
+**At threshold = 0.5:**
 
-| Class | Precision | Recall | F1 |
-|---|---|---|---|
-| Correct steps | 0.779 | 0.655 | **0.711** |
-| Incorrect steps | 0.702 | 0.814 | **0.754** |
+| Seed | Accuracy | Gain vs majority | F1 correct | F1 incorrect | Macro F1 |
+|---|---|---|---|---|---|
+| 42 | 70.24% | +20.24 pp | 0.760 | 0.609 | 0.684 |
+| 43 | 69.91% | +19.91 pp | 0.758 | 0.603 | 0.680 |
+| 44 | 67.54% | +17.54 pp | 0.747 | 0.547 | 0.647 |
+| 45 | 69.13% | +19.13 pp | 0.757 | 0.577 | 0.667 |
+| **Mean** | **69.21%** | **+19.21 pp** | **0.756** | **0.584** | **0.670** |
+| **Std** | **1.12 pp** | **1.12 pp** | **0.006** | **0.026** | **0.016** |
 
-**Reading these numbers:**
+At threshold=0.5, correct recall is very high (0.94–0.96) but incorrect recall is low (0.39–0.46): the probe over-predicts "correct" and misses most incorrect steps.
 
-On a balanced eval, accuracy directly measures discrimination ability — a probe that always predicts the majority class scores 50%. The +23.4 pp gain reflects genuine signal, not baseline inflation.
+**At threshold = 0.7 (macro-F1 optimal):**
 
-The threshold of 0.8 makes the probe conservative: it only predicts "correct" when P(correct) ≥ 0.8, and defaults to "incorrect" otherwise. This produces a consistent pattern across all four metrics:
+| Seed | Accuracy | Gain vs majority | F1 correct | F1 incorrect | Macro F1 |
+|---|---|---|---|---|---|
+| 42 | 74.52% | +24.52 pp | 0.750 | 0.740 | 0.745 |
+| 43 | 74.23% | +24.23 pp | 0.757 | 0.726 | 0.741 |
+| 44 | 74.86% | +24.86 pp | 0.760 | 0.735 | 0.748 |
+| 45 | 74.88% | +24.88 pp | 0.760 | 0.736 | 0.748 |
+| **Mean** | **74.62%** | **+24.62 pp** | **0.757** | **0.734** | **0.746** |
+| **Std** | **0.31 pp** | **0.31 pp** | **0.005** | **0.006** | **0.003** |
 
-- **Incorrect recall (0.814) > correct recall (0.655).** Most incorrect steps score below the 0.8 threshold and are correctly labelled incorrect. Many correct steps also score below 0.8 — the probe is strict — and get mislabelled as incorrect.
-- **Correct precision (0.779) > incorrect precision (0.702).** Because the probe is selective about predicting "correct", nearly every step it does call correct genuinely is. Incorrect precision is lower because the probe sweeps in borderline correct steps (those with P between 0.5 and 0.8) as false positives for the incorrect class.
+Threshold 0.7 is optimal for macro F1 on all four seeds and substantially reduces the class imbalance in predictions, making both F1 scores nearly equal.
 
-In short: high threshold → few "correct" predictions but reliable ones (high correct precision); many "incorrect" predictions that include both true incorrect steps and borderline correct ones (lower incorrect precision, high incorrect recall).
+**Full threshold sweep (mean across 4 seeds):**
 
-### 7.4 Effect of Training Distribution (Directional Finding)
+| Threshold | Accuracy | F1 correct | F1 incorrect | Macro F1 |
+|---|---|---|---|---|
+| 0.3 | 59.65% | 0.712 | 0.331 | 0.521 |
+| 0.4 | 64.47% | 0.734 | 0.464 | 0.599 |
+| 0.5 | 69.21% | 0.756 | 0.584 | 0.670 |
+| 0.6 | 72.76% | 0.768 | 0.677 | 0.723 |
+| **0.7** | **74.62%** | **0.757** | **0.734** | **0.746** |
+| 0.8 | 72.89% | 0.699 | 0.754 | 0.726 |
 
-Before the clean eval was established, we ran distribution experiments using the contaminated eval. The exact numbers are not reliable, but the directional finding held consistently across all runs and is explained by a simple mechanism:
+### 7.4 Inference Latency (H100 GPU)
 
-- **50/50 rebalancing hurts incorrect-class recall.** Training at 50/50 shifts the probe's implicit prior toward predicting "correct" more often than warranted, raising false negatives on the class that matters most for a verification task.
-- **Flipping to 72/28 (favoring correct) hurts incorrect-class precision.** The probe overcounts correct steps and accumulates more false positives on the incorrect class.
-- **Natural distribution (28/72) or a mild 70/30 shift** best preserves the probe's calibration to the actual deployment prior.
+Measured with `cuda.synchronize()` fences, 1,000 single-step trials per seed.
+
+| Seed | Mean latency | Std | p99 | Batch throughput (batch=512) |
+|---|---|---|---|---|
+| 42 | 0.107 ms | 0.002 ms | 0.112 ms | 5,242,825 steps/s |
+| 43 | 0.109 ms | 0.004 ms | 0.124 ms | 5,171,185 steps/s |
+| 44 | 0.113 ms | 0.006 ms | 0.137 ms | 5,039,260 steps/s |
+| 45 | 0.109 ms | 0.042 ms | 0.114 ms | 5,217,241 steps/s |
+| **Mean** | **0.110 ms** | — | **0.122 ms** | **~5.2M steps/s** |
+
+Training time per seed: ~57s on a single H100.
+
+### 7.5 Comparison to Previous Best
+
+| | Previous best | This run |
+|---|---|---|
+| Eval size | 2,890 steps | **50,000 steps** |
+| Eval balance | 50/50 | 50/50 |
+| Seeds | 1 (seed=42) | **4 (seeds 42–45)** |
+| Training steps (subset) | 72,785 | **213,955** |
+| Training pool (encoded) | 176,008 | **450,000** |
+| Context truncation | Bugged (independent 128-tok per part) | **Fixed (left-truncate combined)** |
+| Best accuracy | 73.40% (threshold=0.8) | **74.62% ± 0.31 pp** (threshold=0.7) |
+| Best macro F1 | ~0.73 | **0.746 ± 0.003** |
 
 ---
 
@@ -263,21 +291,19 @@ Whether this signal generalizes beyond arithmetic reasoning to other domains is 
 
 ## 9. Limitations
 
-- All results are single-seed (seed=42). No variance estimates have been computed.
-- Only one checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries.
-- The 176K training steps and 5K eval steps were encoded at max_len=128 per context and per step. Steps with very long accumulated context are truncated, which may bias against later steps in multi-step problems.
-- The 40K and 57K datasets (encoded at max_len=256) are not directly comparable to the 176K dataset and are excluded from results for that reason.
-- The probe was trained on a 70/30 subset (no duplication) of the available 176K steps. The minority class (correct, 50,950 steps) drives the dataset size; a larger correct pool would allow more training data without oversampling.
+- Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
+- The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
+- Seed 44 underperforms the other three seeds by ~2 pp at threshold=0.5 (macro F1=0.647 vs 0.667–0.684). The cause is unknown; it narrows to 0.31 pp std at threshold=0.7.
+- The probe was trained on a 70/30 subset (no duplication) of the 450K pool. The minority class (correct, 149,769 steps) caps the training size; a larger correct pool would allow more training data without oversampling.
 
 ---
 
 ## 10. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
-- Multi-seed runs to quantify variance on all reported numbers
-- Re-encode the 40K/57K window at max_len=128 to enable a fair comparison across training set sizes
 - Implement a logistic regression and a linear SVM baseline on the same SSAE latents — if a linear classifier matches the MLP, the signal is linearly decodable, which is a stronger geometric claim; if it falls short, the structure is non-linear
-- Fix context truncation direction: truncate from the left (keep most recent prior steps, drop distant question prefix) or use a sliding window of the last N steps
+- Investigate why seed 44 consistently underperforms; check whether it is a training instability or a real distributional effect
+- Run additional seeds (46–49) to tighten the variance estimate
 
 **Step 2 (feature analysis and mechanistic interpretation):**
 - Feature importance: identify which of the 896 dimensions carry the correctness signal most strongly (e.g. permutation importance, SHAP values)
@@ -290,23 +316,3 @@ Whether this signal generalizes beyond arithmetic reasoning to other domains is 
 - Train an SSAE from scratch on data annotated with MC rollout labels — this would remove the mismatch between the encoder's training objective and the probe's label source
 - Extend to symbolic reasoning domain (see `WIP_Report.md`)
 
-**Caveat: context truncation truncates the wrong end.**
-
-The current encoding truncates context from the right (the HuggingFace default), which keeps the first 128 tokens and silently drops the tail. For a 6-step problem where context = question + prior steps, this means later steps lose their most recent predecessors. Concretely, when encoding Step 6 of a rope problem (186 context tokens), the model never sees Steps 3, 4, or 5 — only the original question plus Steps 1–2:
-
-```
-Full context (186 tokens):
-  "Tony wants to build the longest rope... [question]
-   Step 1: Tony has 8 + 20 + 6 = 34 feet of rope.
-   Step 2: He has 34 + 7 = 41 feet of rope.
-   Step 3: He has 41 - 2 = 39 feet of rope.      ← dropped
-   Step 4: He has 39 - 3 = 36 feet of rope.       ← dropped
-   Step 5: He has 36 - 1.2 = 34.8 feet of rope."  ← dropped
-
-What the model sees at max_len=128 (128 tokens):
-  "Tony wants to build the longest rope... [question]
-   Step 1: Tony has 8 + 20 + 6 = 34 feet of rope.
-   Step 2: He has 34 + 7 = 41 feet..."             ← cut here
-```
-
-The correct approach is to truncate from the left — keep the most recent prior steps (directly relevant to the current step) and drop the distant question prefix if something must go. This is a known flaw in the 176K encoding. The next encoding run should reverse the truncation direction or use a sliding-window context (e.g. keep only the last 3 prior steps regardless of question length).

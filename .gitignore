@@ -62,6 +62,9 @@ nohup.out
 /tmp/
 *.log
 
+# Local scp download staging dirs
+cot-checker-results/
+
 # macOS
 .DS_Store
 .AppleDouble

@@ -60,11 +60,12 @@ source "$HOME/venvs/cot/bin/activate"
 
 # Qwen model weights are in $STORE/hf_cache (downloaded by tamia_download_qwen.sh).
 # ProcessBench dataset is in $SCRATCH/hf_cache (downloaded on the login node).
-# Point HF_HOME at $STORE so the SSAE tokenizer is found; pass $SCRATCH as
-# explicit cache_dir for dataset loading in encode_processbench.py.
+# HF_HOME points at $STORE so the SSAE tokenizer is found.
+# TRANSFORMERS_OFFLINE=1 keeps Qwen fully offline.
+# HF_DATASETS_OFFLINE is intentionally NOT set: with no internet the datasets
+# library falls back to the local cache_dir automatically.
 export HF_HOME="$STORE/hf_cache"
 export TRANSFORMERS_CACHE="$STORE/hf_cache"
-export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 DATASET_CACHE="$SCRATCH/hf_cache"
 

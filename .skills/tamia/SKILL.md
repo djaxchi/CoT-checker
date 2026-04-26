@@ -61,12 +61,33 @@ $SCRATCH/
 
 ---
 
+## Connect
+
+```bash
+ssh dchikhi@tamia.alliancecan.ca
+```
+
+Authentication requires a password + Duo two-factor push. The login node is `tamia2`.
+
+**This is the only hostname that resolves externally.** Do NOT use `tamia.calculquebec.ca`, `tamia2.calculquebec.ca`, or `tamia2.tamia.ecpia.ca` — none of these resolve from outside the cluster network.
+
+**rsync / scp from your Mac always uses this hostname:**
+```bash
+# Pull results to laptop
+rsync -avz dchikhi@tamia.alliancecan.ca:~/CoT-checker/results/mechanistic/ /Users/djadja/Code/CoT-checker/results/mechanistic/
+
+# Pull $STORE outputs
+rsync -avz dchikhi@tamia.alliancecan.ca:/project/aip-azouaq/dchikhi/results/ ./results/tamia/
+```
+
+---
+
 ## One-time setup
 
 Run once per new cluster account. From the login node:
 
 ```bash
-ssh $USER@tamia.alliancecan.ca
+ssh dchikhi@tamia.alliancecan.ca
 bash ~/CoT-checker/scripts/slurm/tamia_setup.sh
 ```
 
@@ -122,7 +143,7 @@ Manual equivalent:
 ```bash
 rsync -avz --exclude='results/' --exclude='*.pt' --exclude='*.npz' \
   --exclude='__pycache__' --exclude='.git' \
-  ./ $USER@tamia.alliancecan.ca:~/CoT-checker/
+  ./ dchikhi@tamia.alliancecan.ca:~/CoT-checker/
 ```
 
 ---
@@ -132,7 +153,7 @@ rsync -avz --exclude='results/' --exclude='*.pt' --exclude='*.npz' \
 Always do this on the login node before submitting a job. Compute nodes have no internet.
 
 ```bash
-ssh $USER@tamia.alliancecan.ca
+ssh dchikhi@tamia.alliancecan.ca
 
 # Qwen model weights → $STORE/hf_cache  (large, persistent)
 export HF_HOME=/project/aip-azouaq/$USER/hf_cache
@@ -204,8 +225,8 @@ bash scripts/tamia/retrieve.sh 123456
 
 Manual equivalent:
 ```bash
-rsync -avz $USER@tamia.alliancecan.ca:/project/aip-azouaq/$USER/results/ ./results/tamia/
-scp "$USER@tamia.alliancecan.ca:~/CoT-checker/logs/probe_123456.out" .
+rsync -avz dchikhi@tamia.alliancecan.ca:/project/aip-azouaq/$USER/results/ ./results/tamia/
+scp "dchikhi@tamia.alliancecan.ca:~/CoT-checker/logs/probe_123456.out" .
 ```
 
 ---

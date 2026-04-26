@@ -327,6 +327,7 @@ class SSAE(nn.Module):
         if self.phase == 1:
             hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
             h_k = self._get_last_token_embeddings(hidden, attention_mask)
+            h_k = h_k.to(self.autoencoder.encoder.weight.dtype)
             latents = self.autoencoder(h_k)
             latents = F.normalize(latents, p=2, dim=-1)
             loss_sparsity = latents.abs().sum(dim=(1, 2))  # (batch,)
@@ -344,6 +345,7 @@ class SSAE(nn.Module):
             # Encode step to get ground-truth latents
             hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
             h_k = self._get_last_token_embeddings(hidden, attention_mask)
+            h_k = h_k.to(self.autoencoder.encoder.weight.dtype)
             latents = self.autoencoder(h_k)
             latents = F.normalize(latents, p=2, dim=-1)
 
@@ -401,7 +403,8 @@ class SSAE(nn.Module):
         without_last = input_ids[mask].reshape(batch_size, seq_len - 1)
 
         embed = self.decoder.get_input_embeddings()
-        inputs_embs = torch.cat([recons, embed(without_last).to(recons.dtype)], dim=1)
+        embed_dtype = embed.weight.dtype
+        inputs_embs = torch.cat([recons.to(embed_dtype), embed(without_last)], dim=1)
 
         recons_mask = torch.ones(
             (batch_size, self.sparsity_factor - 1), dtype=torch.long, device=device

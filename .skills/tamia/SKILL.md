@@ -32,22 +32,32 @@ Do NOT use this skill for local training runs, CI, or any cluster other than Tam
 
 ## Storage layout
 
-| Variable | Canonical path | Purpose |
-|---|---|---|
-| `$HOME` | `/home/d/$USER` | Code checkout and venvs only. Small quota. |
-| `$STORE` | `/project/aip-azouaq/$USER` | Persistent: checkpoints, probe data, final results. Backed up daily. |
-| `$SCRATCH` | system-assigned | Temporary: HF cache, intermediate shards. Purged periodically. |
+Three tiers — choose based on size and how long the file needs to survive:
 
-Key paths inside `$STORE`:
+| Variable | Canonical path | Quota | Survives purge? | Use for |
+|---|---|---|---|---|
+| `$HOME` | `/home/d/$USER` | ~50 GB | Yes (backed up) | Code checkout and venvs **only**. Never write data here. |
+| `$STORE` | `/project/aip-azouaq/$USER` | ~1 TB (group) | Yes (backed up) | Persistent outputs: checkpoints, final training data, probe .npz, results. Everything you want to keep across jobs. |
+| `$SCRATCH` | system-assigned | **Very large** (many TB) | **No** — files not accessed in ~60 days are auto-deleted | Large temporary files during a run: HF dataset cache, intermediate shards, raw data before preprocessing. The fast, big tier — use it for anything that can be regenerated. |
+
+Rule of thumb: **generate in `$SCRATCH`, keep in `$STORE`.**
+
+Key paths inside `$STORE` for this project:
 ```
 $STORE/
+├── data/            # Training/eval JSONL files (gsm8k_385K_train.json, gsm8k_385K_valid.json)
 ├── checkpoints/     # SSAE .pt files
-├── hf_cache/        # Qwen model weights (set HF_HOME here for model downloads)
+├── hf_cache/        # Qwen model weights (large, persistent — set HF_HOME=$STORE/hf_cache for model downloads)
 ├── probe_data/      # .npz datasets: train_final, eval_held_out, processbench_*
-└── results/         # Trained probe checkpoints + logs
+└── results/
+    └── checkpoints/ # Future-SSAE experiment outputs (best.pt, train_log.jsonl)
 ```
 
-`$SCRATCH/hf_cache` — HuggingFace datasets cache (fast to re-download; do not put model weights here).
+Key paths inside `$SCRATCH` for this project:
+```
+$SCRATCH/
+└── hf_cache/        # HuggingFace dataset cache (set HF_HOME=$SCRATCH/hf_cache for dataset downloads)
+```
 
 ---
 
@@ -208,7 +218,11 @@ scp "$USER@tamia.alliancecan.ca:~/CoT-checker/logs/probe_123456.out" .
 
 ### Missing HF cache
 **Symptom:** `OSError: Can't load tokenizer for 'Qwen/...'` or `FileNotFoundError` for model config.  
-**Fix:** Check `$HF_HOME` is set to `$STORE/hf_cache` for model weights. Re-run `tamia_download_qwen.sh`. If using datasets, `$HF_HOME` should be `$SCRATCH/hf_cache`; re-download the dataset on the login node.
+**Fix:** Model weights → `HF_HOME=$STORE/hf_cache`. Re-run `tamia_download_qwen.sh` on the login node. Dataset cache → `HF_HOME=$SCRATCH/hf_cache`; re-download on the login node.
+
+### Missing training data (`FileNotFoundError` for .json or .jsonl)
+**Symptom:** `FileNotFoundError: .../gsm8k_385K_train.json` or similar at the start of a job.  
+**Fix:** Training JSONL files live in `$STORE/data/`. They are not synced from the laptop — they must be generated on the cluster (or uploaded once). Check `ls $STORE/data/` on the login node. If the directory is empty, run the data-generation job first or upload the files with `scp`/`rsync`.
 
 ### Wrong Slurm account
 **Symptom:** Job rejected immediately with `Invalid account or account/partition combination specified`.  

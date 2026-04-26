@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-04-24*
+*Last updated: 2026-04-26*
 
 ---
 
@@ -30,31 +30,25 @@ The paper releases its checkpoint publicly (`Miaow-Lab/SSAE-Checkpoints`), makin
 
 ---
 
-## 3. What We Observed During Reproduction
+## 3. Why the SSAE Architecture and How We Diverge From the Paper
 
-### 3.1 The Label Semantics Problem
+### 3.1 What Attracted Us to the SSAE Architecture
 
-The paper describes its labels as "ground-truth labels derived programmatically via symbolic verification of numerical outputs." The actual code in `papers/SSAE/classifier/classifier_data.py` computes labels differently:
+The SSAE has a specific geometric property that motivated this work. The sparse bottleneck forces the encoder to compress each step into a latent vector that captures only the additional information contained in that step, beyond what the backbone already represents from the context. The reconstruction objective requires the latent to be sufficient to recover the step text given the context, while the sparsity constraint prevents it from simply copying the backbone's contextual representation. The result is a step-specific vector that is, by construction, informative about the content of that step and not the sequence as a whole.
 
-```python
-# Encoder sees [context | <sep> | step] -> sparse latent hk
-# Decoder takes hk + context and reconstructs the step autoregressively
-# Label = 1 if last number in reconstruction matches last number in ground truth
-```
+If the step-specific latent encodes what this step contributes to the reasoning, then a correctness signal, if it exists anywhere in the model's internal representation of a step, should be recoverable from `h_c`. We do not need to understand which features in `h_c` carry the signal; the question is simply whether it is there.
 
-The label is not computed from the original step. It is computed from the SSAE's own reconstruction of the step. A step is labeled "correct" if the SSAE can faithfully decode its final number, and "incorrect" if the SSAE reconstruction drifts. The paper's phrase "symbolic verification" refers to matching the last number in the SSAE-decoded text against the last number in the source text.
+### 3.2 Our Question
 
-This is a reconstruction fidelity metric, not a mathematical correctness metric. A step that contains a genuine arithmetic error will be labeled "correct" if the SSAE reconstructs it accurately (including the error). A correct step can be labeled "incorrect" if the SSAE fails to recover its final number.
+Can the SSAE latent space, trained purely for reconstruction, encode step-level correctness in a way that a lightweight probe can extract?
 
-### 3.2 The Training Data Is All Correct
+### 3.3 How We Differ From the Paper
 
-The second observation: GSM8K-Aug, the training corpus, was filtered to exclude any example where intermediate steps do not lead to the correct final answer. Every step the SSAE was trained on is arithmetically correct. The probe therefore never sees genuinely incorrect steps during training in the paper's setup. Label = 0 in the paper means "SSAE failed to reconstruct this correct step," not "this step is mathematically wrong."
+The paper trains and evaluates using labels derived from the SSAE's own reconstruction quality: a step is labeled "correct" if the SSAE faithfully decodes its final number. This creates a circular dependency between the encoder and the probe. Furthermore, the training corpus (GSM8K-Aug) contains only arithmetically correct steps, so the probe never observes a genuinely incorrect step during training.
 
-### 3.3 What the Paper Actually Measures
+We decouple the encoder from the labels entirely. We use the paper's SSAE checkpoint as a fixed encoder and replace the supervision signal with an external oracle (Math-Shepherd), which assigns correctness via Monte Carlo rollouts on model-generated solutions. The probe must find the correctness signal from first principles, with no access to anything the SSAE was trained on.
 
-Putting these observations together: the paper's 78.58% accuracy measures whether the SSAE latent space predicts the SSAE's own reconstruction quality. The signal is real, but it is not the signal we care about. A probe that scores well on that task has learned which types of steps the SSAE encodes compactly, not which steps are mathematically valid.
-
-This was the moment the project pivoted.
+This changes the question from "does the probe predict SSAE reconstruction quality?" to "does the probe predict step correctness as judged by an independent source?" The encoding architecture is identical to the paper; only the labels change.
 
 ---
 
@@ -320,6 +314,8 @@ The linear probe result (§7.5) clarifies the geometric structure of this signal
 
 ## 9. Out-of-Distribution Evaluation: ProcessBench
 
+The Math-Shepherd results (§7) were encouraging: a linear probe on SSAE latents detects step-level incorrectness at 74.3% accuracy, outperforming a 7B self-judge by 8 pp. This suggested the latent space does encode a meaningful correctness signal. The natural next question was how this compares to dedicated process reward models (PRMs) designed specifically for step-level verification. ProcessBench is the standard benchmark used to compare PRM methods, so we applied our methodology there to situate our results within the existing literature.
+
 ### 9.1 What ProcessBench Measures
 
 ProcessBench (arXiv:2412.06559) tests a strictly harder task than the step-level binary classification used in §7: **first-error localization**. Each solution in the benchmark is annotated with the index of the first incorrect step, or -1 if all steps are correct. A method must scan the solution left-to-right and identify, at the solution level, exactly where reasoning first goes wrong.
@@ -385,11 +381,37 @@ MATH is harder than GSM8K: PB-F1 drops ~4–5 pp for the linear probe and ~9 pp 
 
 1. **Linear probe outperforms MLP on ProcessBench, reversing the Math-Shepherd pattern.** On the in-distribution Math-Shepherd eval (§7.5), the MLP and linear probe are nearly tied (74.62% vs 74.31% accuracy, a 0.31 pp gap). On ProcessBench, the linear probe leads by 7.8 pp in PB-F1 on GSM8K (30.2% vs 22.4%) and 12.2 pp on MATH (25.7% vs 13.5%). The MLP probe also shows much higher variance across seeds (4.9% std on GSM8K vs 0.2% for linear). This suggests the MLP has learned features specific to the Math-Shepherd training distribution that do not transfer cleanly to ProcessBench's Qwen2-7B-Instruct solutions. The linear probe, constrained to a single hyperplane, generalizes better.
 
-2. **The probe is substantially below PRM baselines on PB-F1.** The best linear probe (30.2%) is 17.7 pp behind Math-Shepherd-PRM-7B (47.9%), a 7B model explicitly trained for step-level process reward modeling. The gap reflects both (a) model scale -- our backbone is 0.5B vs 7B -- and (b) task misalignment: the probe was trained on Math-Shepherd MC rollout labels and asked to perform exact first-error localization, a task that requires knowing not just that a step is wrong but that all prior steps were correct.
+2. **The probe is substantially below PRM baselines on PB-F1.** The best linear probe (30.2%) is 17.7 pp behind Math-Shepherd-PRM-7B (47.9%), a 7B model explicitly trained for step-level process reward modeling. The gap reflects both model scale (our backbone is 0.5B vs 7B) and task misalignment: the probe was trained on Math-Shepherd MC rollout labels and asked to perform exact first-error localization, a task that requires knowing not just that a step is wrong but that all prior steps were correct.
 
-3. **The localization constraint is the bottleneck, not error detection.** Looking at the per-threshold tables: at threshold 0.3 on GSM8K, the linear probe reaches Acc(correct) ~ 46% and Acc(error) ~ 22%, giving PB-F1 ~ 30%. As the threshold rises, Acc(correct) increases (fewer false alarms) but Acc(error) barely moves -- the probe is flagging incorrect steps, just not at the right threshold for exact first-error localization. The harmonic mean in PB-F1 penalizes any imbalance between the two accuracies harshly.
+3. **The localization constraint is the bottleneck, not error detection.** At threshold 0.3 on GSM8K, the linear probe reaches Acc(correct) ~ 46% and Acc(error) ~ 22%, giving PB-F1 ~ 30%. As the threshold rises, Acc(correct) increases (fewer false alarms) but Acc(error) barely moves: the probe is flagging incorrect steps, just not at the right positions for exact first-error localization. The harmonic mean in PB-F1 penalizes any imbalance between the two accuracies harshly.
 
-**On contamination:** Math-Shepherd draws from the same GSM8K problem distribution as ProcessBench's GSM8K split. Some Math-Shepherd solutions may overlap with ProcessBench training data. We cannot rule out partial contamination, but the low PB-F1 scores make contamination-driven inflation unlikely -- a contaminated probe would be expected to perform well, not at 30%.
+**On contamination:** Math-Shepherd draws from the same GSM8K problem distribution as ProcessBench's GSM8K split. Some Math-Shepherd solutions may overlap with ProcessBench training data. We cannot rule out partial contamination, but the low PB-F1 scores make contamination-driven inflation unlikely: a contaminated probe would be expected to perform well, not at 30%.
+
+### 9.6 Hypothesis: What the Reconstruction Objective Cannot Capture
+
+The poor ProcessBench results point toward a structural limitation of our current approach. The SSAE latent `h_c` is trained to encode the content of a step well enough to reconstruct it. It has no training signal that relates one step to the next. A step can be fluent, arithmetically correct in isolation, and faithfully reconstructed by the SSAE, yet still be wrong in the context of the full reasoning chain: it may pursue the right sub-goal by the wrong path, or arrive at a locally correct intermediate value that leads the solution away from the final answer.
+
+This category of error is exactly what ProcessBench's first-error localization task is designed to expose. Our probe, trained on per-step binary labels, has no way to detect it: the latent `h_c` does not represent the relationship between step k and step k+1.
+
+Our hypothesis is that adding a next-step prediction auxiliary loss to the SSAE training objective would force `h_c` to encode information about the information flow between steps, not just the content of the current one. A sparse latent that must both reconstruct step k and predict step k+1 would be pressured to encode whether the current step is a coherent continuation of the reasoning so far, and whether it sets up a viable path to the next step. This would make the latent sensitive to the kind of contextually misleading but locally valid steps that our current probe misses entirely.
+
+This is the motivation for the Future-SSAE experiments described in §10.
+
+## 10. Future-SSAE: Adding a Next-Step Prediction Objective
+
+The hypothesis in §9.6 leads directly to a new training objective. We extend the SSAE with a prediction branch that shares the same sparse latent `h_c` used for reconstruction, and adds an auxiliary loss requiring `h_c` to predict step k+1 given the question and step k. The total loss is:
+
+```
+L = L_recon + λ * ||h_c||_1 + α * (L_pred / ema_pred_nll)
+```
+
+The prediction branch uses teacher-forcing: the decoder sees `[question | step_k | h_c]` and must predict `step_{k+1}`. Crucially, no content from step k+1 is visible to the encoder when computing `h_c`. Any gradient that flows through the prediction loss must do so via `h_c`, which means the sparse latent is directly incentivized to encode forward-looking information about where the reasoning is going.
+
+We train two context-mode variants: M1 uses `[question | step_k]` as prediction context, and M2 uses `[question | step_{k-1} | step_k]` to provide one additional step of history. Both use `alpha_pred = 0.1` as the initial signal-validation setting. Results from these runs are pending.
+
+The key diagnostic is whether `pred_first_token_nll` decreases across step-index buckets (idx=0: first step of the solution, idx=1: second step, idx=2+: all later steps). If the signal appears only at idx=0, the model is learning the easy first-step transition; if it appears uniformly across buckets, `h_c` is genuinely encoding cross-step information flow.
+
+---
 
 ## 11. Limitations
 

@@ -411,6 +411,34 @@ class SSAE(nn.Module):
         return self.decoder(inputs_embeds=inputs_embs, attention_mask=full_mask).logits
 
     # ------------------------------------------------------------------
+    # Prediction branch decoder (Future-SSAE)
+    # ------------------------------------------------------------------
+
+    def decode_from_latents(
+        self,
+        latents: torch.Tensor,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Teacher-forcing decode using pre-computed latents without re-running the encoder.
+
+        Used by Future-SSAE to share h_hat_k between the reconstruction and
+        prediction branches, avoiding a second encoder forward pass.
+
+        Args:
+            latents:        (batch, 1, n_latents) — from the reconstruction forward pass
+            input_ids:      (batch, T) — full teacher-forcing sequence (e.g. [q | s_k | SEP | s_{k+1} | EOS])
+            attention_mask: (batch, T)
+
+        Returns:
+            logits: (batch, T + sparsity_factor - 1, vocab_size)
+        """
+        batch_size = latents.shape[0]
+        recons = self.projection_mlp(latents)
+        recons = recons.view(batch_size, self.sparsity_factor, self.n_inputs)
+        return self._decode(recons, input_ids, attention_mask)
+
+    # ------------------------------------------------------------------
     # Inference helpers
     # ------------------------------------------------------------------
 

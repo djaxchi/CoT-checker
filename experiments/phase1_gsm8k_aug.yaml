@@ -1,0 +1,39 @@
+# Phase 1 SSAE training — paper-exact hyperparameters (arXiv:2603.03031)
+#
+# Run:
+#   python scripts/train_phase1_gsm8k.py \
+#       --data data/gsm8k_385K_train.json \
+#       --val-data data/gsm8k_385K_valid.json \
+#       --output-dir results/checkpoints/phase1_gsm8k_aug \
+#       --device cuda
+
+# --- Model ---
+model_id: Qwen/Qwen2.5-0.5B
+sparsity_factor: 1          # n_latents = hidden_size * sparsity_factor = 896
+
+# --- Sparsity (DWA, eq. 7) ---
+l1_target: 3.0              # tau_spar: target average active dimensions per step
+l1_weight_init: 1.0e-4      # initial lambda for the L1 penalty
+l1_dwa_interval: 100        # update lambda every N batches
+
+# --- Optimisation ---
+epochs: 30
+batch_size: 16              # per-device batch size
+grad_accum: 8               # effective batch = 16 * 8 = 128
+lr: 1.0e-6
+min_lr: 1.0e-7
+warmup_steps: 200           # linear warmup (paper: WARMUP_ITERS=2 epochs)
+grad_clip: 1.0
+weight_decay: 0.01
+
+# --- Noise (paper §3.2) ---
+mask_prob: 0.10             # fraction of step tokens dropped from encoder attention
+
+# --- Data ---
+max_length: 256             # max tokenized length for context and step
+val_frac: 0.05              # fraction of train set used for val if no --val-data
+
+# --- Hardware ---
+device: cuda
+seed: 1337
+num_workers: 4

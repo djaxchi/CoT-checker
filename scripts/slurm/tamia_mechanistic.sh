@@ -42,9 +42,6 @@ module load StdEnv/2023 gcc arrow/24.0.0 python/3.11
 
 source "$HOME/venvs/cot/bin/activate"
 
-# Ensure analysis dependencies are present (safe no-op if already installed)
-pip install --quiet matplotlib 2>/dev/null || true
-
 # Offline mode: no HF downloads needed for this analysis
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1

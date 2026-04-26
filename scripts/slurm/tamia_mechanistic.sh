@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cot-mechanistic
 #SBATCH --account=aip-azouaq
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

@@ -302,13 +302,49 @@ Three findings:
 
 ---
 
-## 8. Interpretation (Math-Shepherd Held-Out Eval)
+## 8. Mechanistic Analysis of the Latent Space
 
-The SSAE latent space, trained solely for reconstruction on correct GSM8K steps, encodes enough information to detect step-level incorrectness as labeled by an independent oracle (Math-Shepherd). This supports the encoding half of the hypothesis.
+The following analysis is based on the actual experiment-7 encodings: the 50,000-step balanced held-out set (`eval_held_out.npz`) and four trained linear probe checkpoints (`linear_probe_seed{42..45}.pt`). All statistics below supersede the earlier estimates from smaller-scale runs.
 
-One observable difference: incorrect steps activate on average 9.7 more dimensions than correct steps (209.1 vs 199.4 active dimensions out of 896). This is consistent with the SSAE producing more compact representations for in-distribution steps (correct reasoning it was trained on) and more diffuse representations for out-of-distribution ones (incorrect steps it never saw).
+### 8.1 Sparsity: Incorrect Steps Use More Dimensions, but the Overlap is Large
 
-The linear probe result (§7.5) clarifies the geometric structure of this signal. A linear probe with 897 parameters achieves 74.31% accuracy — essentially identical to the 1.4M-parameter MLP. This means the correctness signal is not buried in a curved manifold: correct and incorrect h_c vectors are nearly linearly separable on the 896-dimensional unit sphere. The MLP probe is reading a direction in the latent space, not a nonlinear feature combination. Which specific dimensions drive the separation, and whether they correspond to interpretable SSAE features, remains the open question for step 2 of the hypothesis.
+Across the 50,000-step held-out eval, incorrect steps activate on average **6.8 more dimensions** than correct steps (204.1 vs 197.3 out of 896, std ≈ 29–32). This is consistent with the SSAE producing more compact representations for in-distribution steps (correct reasoning it was trained on) and more diffuse representations for out-of-distribution ones (incorrect steps it never saw during training). The same direction holds in the training pool (5.4 dim delta over 50,000 sampled steps).
+
+However, the distributions overlap almost entirely — both are roughly bell-shaped with peaks separated by less than one standard deviation. Active dimension count alone cannot reliably discriminate correct from incorrect steps at the individual level. It is a signal, but not the signal the probe uses.
+
+### 8.2 The Probe Has Found a Clean Directional Separation
+
+Projecting every h_c vector onto the learned probe direction (w^T h_c) reveals two clearly separated distributions: correct steps cluster at positive values (~0.05–0.15), incorrect steps cluster at negative-to-zero values (~−0.10–0.05), with substantial but not complete overlap in the transition region. The correct distribution is notably tighter than the incorrect one.
+
+This directional separation is what produces 74.31% accuracy from 897 parameters. The probe is reading a well-defined direction in the 896-dimensional latent space — not a noisy average over many weak signals, but a coherent geometric axis along which the two classes are meaningfully offset.
+
+### 8.3 The Correctness Signal Is Not in the Dominant Variance Directions
+
+PCA on the eval latents reveals that the first two components explain 18.1% and 14.0% of variance respectively. In the PC1–PC2 plane, correct and incorrect steps are completely intermixed — neither class forms a visible cluster or region. The probe weight direction projects only weakly onto PC1 (−0.027) and moderately onto PC2 (+0.183), with the remainder distributed across higher components.
+
+This means the correctness signal is a secondary structure in the latent space. The dominant variance captured by PC1 and PC2 represents something else: likely mathematical content, step length, or problem type — dimensions along which correct and incorrect steps vary similarly. Correctness is encoded in a direction that contributes little to total variance but carries high discriminative information.
+
+### 8.4 The Probe Is Not Reading Mean Activation Differences
+
+The most mechanistically surprising result is the low correlation between probe weights and per-feature activation deltas: Pearson r = 0.237. The activation delta for any individual feature (mean_correct[i] − mean_incorrect[i]) is very small across all 896 dimensions — the largest is 0.056, and most are below 0.02. Yet the probe assigns weights ranging from −2.42 to +2.78. Large probe weights attach to dimensions with nearly zero mean activation difference between classes.
+
+This rules out a simple explanation for why the probe works. The probe is not learning "dimension i is more active for correct steps, therefore weight it positively." It has learned a direction that is nearly orthogonal to the mean-difference direction, exploiting the covariance structure of the latent space rather than marginal activation levels. Put differently: the correctness information is not in any single dimension, but in the joint pattern of activations across many dimensions simultaneously.
+
+This is consistent with the LDA (Linear Discriminant Analysis) picture: the optimal linear classifier need not align with the direction of largest class-mean difference — it aligns with the direction of maximum between-class variance relative to within-class variance. The probe has learned the LDA direction, which in a 896-dimensional space can be almost orthogonal to what univariate statistics would suggest.
+
+### 8.5 The Class Geometry on the Unit Sphere
+
+Mean cosine similarities confirm that both classes cluster mildly on the unit sphere. Within-class similarity is 0.605 (correct) and 0.614 (incorrect); between-class similarity is 0.575. The gap of ~0.03 is small but consistent on both sides — incorrect steps are slightly more internally coherent than correct steps, which aligns with the sparsity observation that incorrect steps have a narrower distribution of active dimensions.
+
+This mild but consistent geometric separation is what the linear probe exploits. The probe's decision hyperplane bisects the sphere between the two class clusters.
+
+### 8.6 Summary: What the SSAE Latent Space Encodes
+
+The mechanistic picture that emerges is the following. The SSAE was trained to reconstruct correct GSM8K steps from a sparse latent. When applied to incorrect steps (out-of-distribution for the encoder), it produces latents that are geometrically shifted: slightly more diffuse (more active dimensions), slightly more internally coherent as a class (higher within-class cosine similarity), and offset along a specific direction in the latent space that is not aligned with the main axes of variation.
+
+That direction — the probe direction — carries 74.3% accuracy for distinguishing correct from incorrect. It is linearly decodable (the MLP adds nothing over the linear probe), it is stable across four independent training seeds (std ≈ 0.03 pp), and it is not captured by any individual feature's marginal statistics. The signal is in the geometry of the joint activation pattern, distributed across nearly all 896 dimensions.
+
+The open question remains why this direction exists. The reconstruction objective gives no explicit supervision about correctness. The most plausible account is that the SSAE learned a compressed representation of "what a valid arithmetic step looks like," and incorrect steps, which were never seen during training, fall systematically off this manifold in a consistent direction — one that a linear probe can recover.
 
 ---
 

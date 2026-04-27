@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cot-ssae-c4
 #SBATCH --account=aip-azouaq
-#SBATCH --time=36:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -94,9 +94,9 @@ CUDA_VISIBLE_DEVICES=0 python scripts/train_ssae.py \
     --topk-k        40 \
     --freeze-encoder \
     --dtype         bfloat16 \
-    --epochs        10 \
-    --batch-size    32 \
-    --grad-accum    4 \
+    --epochs        8 \
+    --batch-size    64 \
+    --grad-accum    2 \
     --lr            1e-4 \
     --min-lr        1e-5 \
     --warmup-steps  500 \

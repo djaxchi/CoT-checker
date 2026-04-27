@@ -87,7 +87,8 @@ def parse_entry(entry: dict) -> list[dict]:
 
 
 def encode_batch(
-    model, tokenizer, contexts, steps, device, sep_token_id, max_seq_len=2048
+    model, tokenizer, contexts, steps, device, sep_token_id, max_seq_len=2048,
+    encoding: str = "sparse",
 ) -> np.ndarray:
     batch_ids = []
     for ctx, step in zip(contexts, steps):
@@ -111,8 +112,11 @@ def encode_batch(
         attn_mask[i, : len(seq)] = 1
 
     with torch.no_grad():
-        latents = model.encode(input_ids, attn_mask)  # (B, 1, n_latents)
-    return latents.squeeze(1).cpu().float().numpy()  # (B, n_latents)
+        if encoding == "dense":
+            vecs = model.encode_dense(input_ids, attn_mask)  # (B, 1, d)
+        else:
+            vecs = model.encode(input_ids, attn_mask)        # (B, 1, n_latents)
+    return vecs.squeeze(1).cpu().float().numpy()
 
 
 def parse_args():
@@ -145,6 +149,13 @@ def parse_args():
              "Subsamples the majority class after collection. Default: no rebalancing.",
     )
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--encoding",
+        default="sparse",
+        choices=["sparse", "dense"],
+        help="'sparse' uses the SSAE bottleneck (default); "
+             "'dense' skips the autoencoder and returns the raw backbone h_k.",
+    )
     return p.parse_args()
 
 
@@ -209,12 +220,16 @@ def main():
     bs = args.batch_size
     max_seq = args.max_seq_len if args.max_seq_len > 0 else 10**9
 
-    for i in tqdm(range(0, total, bs), desc="Encoding with SSAE"):
+    desc = "Encoding (dense)" if args.encoding == "dense" else "Encoding (SSAE sparse)"
+    for i in tqdm(range(0, total, bs), desc=desc):
         batch = all_records[i : i + bs]
         ctxs = [r["context"] for r in batch]
         steps = [r["text"] for r in batch]
         labels = [r["label"] for r in batch]
-        lats = encode_batch(model, tokenizer, ctxs, steps, device, sep_tok_id, max_seq_len=max_seq)
+        lats = encode_batch(
+            model, tokenizer, ctxs, steps, device, sep_tok_id,
+            max_seq_len=max_seq, encoding=args.encoding,
+        )
         all_latents.extend(lats)
         all_labels.extend(labels)
 

@@ -215,7 +215,8 @@ def _numpy_pca(X: np.ndarray, n_components: int = 10):
     return Z, components, explained
 
 
-def pca_analysis(h: np.ndarray, y: np.ndarray, w_mean: np.ndarray, outdir: Path) -> None:
+def pca_analysis(h: np.ndarray, y: np.ndarray, w_mean: np.ndarray, outdir: Path,
+                 label: str = "SSAE sparse") -> None:
     """PCA visualization and probe direction projection."""
     section("5. PCA analysis")
     n_components = 10
@@ -260,7 +261,7 @@ def pca_analysis(h: np.ndarray, y: np.ndarray, w_mean: np.ndarray, outdir: Path)
     ax.text(dx * 1.05, dy * 1.05, "probe direction", fontsize=9, ha="center")
     ax.set_xlabel(f"PC1 ({explained[0]*100:.1f}% var)")
     ax.set_ylabel(f"PC2 ({explained[1]*100:.1f}% var)")
-    ax.set_title("SSAE latents: PC1 vs PC2 (correct / incorrect)")
+    ax.set_title(f"[{label}] PC1 vs PC2 (correct / incorrect)")
     ax.legend(markerscale=5, loc="upper right")
     plt.tight_layout()
     out = outdir / "pca_scatter.png"
@@ -277,9 +278,9 @@ def pca_analysis(h: np.ndarray, y: np.ndarray, w_mean: np.ndarray, outdir: Path)
             label="correct", density=True)
     ax.hist(proj_1d[y_sub == 0], bins=bins, alpha=0.6, color="#F44336",
             label="incorrect", density=True)
-    ax.set_xlabel("Projection onto probe direction (w^T h_c)")
+    ax.set_xlabel("Projection onto probe direction (w^T h)")
     ax.set_ylabel("Density")
-    ax.set_title("1D projection: correct vs incorrect along probe axis")
+    ax.set_title(f"[{label}] 1D projection: correct vs incorrect along probe axis")
     ax.legend()
     plt.tight_layout()
     out = outdir / "probe_projection_1d.png"
@@ -288,7 +289,8 @@ def pca_analysis(h: np.ndarray, y: np.ndarray, w_mean: np.ndarray, outdir: Path)
     print(f"  Saved: {out}")
 
 
-def plot_sparsity_hist(h: np.ndarray, y: np.ndarray, outdir: Path) -> None:
+def plot_sparsity_hist(h: np.ndarray, y: np.ndarray, outdir: Path,
+                       label: str = "SSAE sparse") -> None:
     active = (h > 0).sum(axis=1)
     fig, ax = plt.subplots(figsize=(8, 4))
     bins = np.arange(active.min(), active.max() + 2)
@@ -296,9 +298,9 @@ def plot_sparsity_hist(h: np.ndarray, y: np.ndarray, outdir: Path) -> None:
             label="correct", density=True)
     ax.hist(active[y == 0], bins=bins, alpha=0.6, color="#F44336",
             label="incorrect", density=True)
-    ax.set_xlabel("Number of active dimensions (out of 896)")
+    ax.set_xlabel("Number of positive dimensions (out of 896)")
     ax.set_ylabel("Density")
-    ax.set_title("Active dimension count per step: correct vs incorrect")
+    ax.set_title(f"[{label}] Positive-dimension count per step: correct vs incorrect")
     ax.legend()
     plt.tight_layout()
     out = outdir / "active_dims_hist.png"
@@ -307,14 +309,15 @@ def plot_sparsity_hist(h: np.ndarray, y: np.ndarray, outdir: Path) -> None:
     print(f"\n  Saved: {out}")
 
 
-def plot_delta_vs_weights(delta: np.ndarray, w_mean: np.ndarray, outdir: Path) -> None:
+def plot_delta_vs_weights(delta: np.ndarray, w_mean: np.ndarray, outdir: Path,
+                          label: str = "SSAE sparse") -> None:
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.scatter(delta, w_mean, alpha=0.3, s=3, color="#555", rasterized=True)
     ax.axhline(0, color="gray", lw=0.5)
     ax.axvline(0, color="gray", lw=0.5)
     ax.set_xlabel("mean_correct[i] - mean_incorrect[i]  (activation delta)")
     ax.set_ylabel("Probe weight w[i]")
-    ax.set_title("Per-feature: activation delta vs probe weight")
+    ax.set_title(f"[{label}] Per-feature: activation delta vs probe weight")
     corr = np.corrcoef(delta, w_mean)[0, 1]
     ax.text(0.05, 0.95, f"r = {corr:.3f}", transform=ax.transAxes,
             va="top", fontsize=11, fontweight="bold")
@@ -326,7 +329,8 @@ def plot_delta_vs_weights(delta: np.ndarray, w_mean: np.ndarray, outdir: Path) -
 
 
 def plot_top_features(mean_cor: np.ndarray, mean_inc: np.ndarray,
-                      w_mean: np.ndarray, outdir: Path, k: int = 40) -> None:
+                      w_mean: np.ndarray, outdir: Path, k: int = 40,
+                      label: str = "SSAE sparse") -> None:
     """Bar chart: top-k features sorted by |activation delta|."""
     delta = mean_cor - mean_inc
     top_idx = np.argsort(np.abs(delta))[::-1][:k]
@@ -340,7 +344,7 @@ def plot_top_features(mean_cor: np.ndarray, mean_inc: np.ndarray,
     ax.bar(x - width/2, mean_cor[top_idx], width, color="#2196F3", label="correct")
     ax.bar(x + width/2, mean_inc[top_idx], width, color="#F44336", label="incorrect")
     ax.set_ylabel("Mean activation")
-    ax.set_title(f"Top-{k} features by |activation delta|: mean activations")
+    ax.set_title(f"[{label}] Top-{k} features by |activation delta|: mean activations")
     ax.legend()
 
     # Lower: probe weights
@@ -350,7 +354,7 @@ def plot_top_features(mean_cor: np.ndarray, mean_inc: np.ndarray,
     ax.axhline(0, color="black", lw=0.8)
     ax.set_xlabel("Feature rank (by |activation delta|)")
     ax.set_ylabel("Probe weight w[i]")
-    ax.set_title("Probe weights for the same features")
+    ax.set_title(f"[{label}] Probe weights for the same features")
 
     axes[0].set_xticks(x)
     axes[0].set_xticklabels([str(i) for i in top_idx], rotation=90, fontsize=6)
@@ -377,6 +381,9 @@ def parse_args():
     p.add_argument("--output-dir", default="results/mechanistic/")
     p.add_argument("--max-train-samples", type=int, default=50_000,
                    help="Max samples to load from train-data for stats (default: 50K for speed)")
+    p.add_argument("--label", default="SSAE sparse",
+                   help="Short label for this encoding (used in plot titles and summary)."
+                        " E.g. 'SSAE sparse' or 'Dense h_k'.")
     return p.parse_args()
 
 
@@ -384,9 +391,10 @@ def main():
     args = parse_args()
     outdir = Path(args.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
+    label = args.label
 
     print("=" * 70)
-    print("  Mechanistic Analysis: SSAE Latents (experiment-7 encodings)")
+    print(f"  Mechanistic Analysis: {label}")
     print("=" * 70)
 
     # --- Load eval data ---
@@ -415,7 +423,7 @@ def main():
     print(f"{'─'*70}")
 
     sparsity_stats = analyze_sparsity(h_eval, y_eval)
-    plot_sparsity_hist(h_eval, y_eval, outdir)
+    plot_sparsity_hist(h_eval, y_eval, outdir, label=label)
 
     if h_train is not None:
         print(f"\n{'─'*70}")
@@ -426,12 +434,12 @@ def main():
     w_mean = analyze_probe_weights(probe_weights, D)
     mean_cor, mean_inc, delta = analyze_per_feature(h_eval, y_eval, w_mean)
 
-    plot_delta_vs_weights(delta, w_mean, outdir)
-    plot_top_features(mean_cor, mean_inc, w_mean, outdir)
+    plot_delta_vs_weights(delta, w_mean, outdir, label=label)
+    plot_top_features(mean_cor, mean_inc, w_mean, outdir, label=label)
 
     analyze_geometry(h_eval, y_eval)
 
-    pca_analysis(h_eval, y_eval, w_mean, outdir)
+    pca_analysis(h_eval, y_eval, w_mean, outdir, label=label)
 
     # -----------------------------------------------------------------------
     section("Summary")

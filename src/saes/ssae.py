@@ -306,6 +306,30 @@ class SSAE(nn.Module):
         latents = F.normalize(latents, p=2, dim=-1)
         return latents
 
+    @torch.no_grad()
+    def encode_dense(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode a step to the raw backbone embedding, skipping the sparse bottleneck.
+
+        Returns h_k (last-token hidden state) L2-normalised, matching the
+        normalisation applied in encode(). Used as the dense ablation baseline.
+
+        Args:
+            input_ids:      (batch, seq_len)
+            attention_mask: (batch, seq_len)
+
+        Returns:
+            h_k: (batch, 1, n_inputs)  — dense, L2-normalised
+        """
+        hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
+        h_k = self._get_last_token_embeddings(hidden, attention_mask)
+        h_k = h_k.float()
+        h_k = F.normalize(h_k, p=2, dim=-1)
+        return h_k
+
     # ------------------------------------------------------------------
     # Forward (training)
     # ------------------------------------------------------------------

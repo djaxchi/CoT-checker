@@ -10,6 +10,29 @@ import torch
 import torch.nn as nn
 
 
+class TopKActivation(nn.Module):
+    """Hard-sparse activation: ReLU then keep only the top K values per sample.
+
+    Unlike ReLU + L1, this enforces exact-K sparsity structurally — no penalty
+    tuning required. Standard in modern overcomplete SAEs (e.g. Anthropic k-SAE).
+
+    Args:
+        k: Number of features to keep active per sample.
+    """
+
+    def __init__(self, k: int) -> None:
+        super().__init__()
+        self.k = k
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_relu = torch.relu(x)
+        k = min(self.k, x_relu.shape[-1])
+        topk_vals, topk_idx = torch.topk(x_relu, k, dim=-1)
+        out = torch.zeros_like(x)
+        out.scatter_(-1, topk_idx, topk_vals)
+        return out
+
+
 class SparseAutoencoder(nn.Module):
     """Linear encoder with a ReLU bottleneck that promotes sparse activations.
 

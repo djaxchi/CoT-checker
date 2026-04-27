@@ -26,7 +26,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
-from .autoencoder import SparseAutoencoder
+from .autoencoder import SparseAutoencoder, TopKActivation
+
+__all__ = ["SSAE", "TopKActivation"]
 
 # Map local training paths → public HuggingFace model IDs
 _LOCAL_TO_HF: dict[str, str] = {
@@ -79,6 +81,7 @@ class SSAE(nn.Module):
         decoder_model_id: str | None = None,
         phase: int = 1,
         dtype: torch.dtype | None = None,
+        freeze_encoder: bool = False,
     ) -> None:
         super().__init__()
         if decoder_model_id is None:
@@ -86,6 +89,7 @@ class SSAE(nn.Module):
 
         self.tokenizer = tokenizer
         self.sparsity_factor = sparsity_factor
+        self.freeze_encoder = freeze_encoder
 
         # --- Backbone models ---
         kwargs = {} if dtype is None else {"dtype": dtype}
@@ -146,6 +150,8 @@ class SSAE(nn.Module):
             self.var_mlp.requires_grad_(False)
             self.mean_mlp.requires_grad_(False)
             self.hints_encoder.requires_grad_(False)
+            if self.freeze_encoder:
+                self.encoder.requires_grad_(False)
         elif phase == 2:
             self.encoder.requires_grad_(False)
             self.decoder.requires_grad_(False)

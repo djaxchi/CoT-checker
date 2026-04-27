@@ -45,7 +45,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.gsm8k_dataset import GSM8KCollateFn, GSM8KStepDataset
-from src.saes.ssae import SSAE
+from src.saes.ssae import SSAE, TopKActivation
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,11 @@ def save_checkpoint(
             "encoder_name": model.encoder.config._name_or_path,
             "decoder_name": model.decoder.config._name_or_path,
             "sparsity_factor": model.sparsity_factor,
-            "config": {"sparsity_factor": model.sparsity_factor, "phase": 1},
+            "config": {
+                "sparsity_factor": model.sparsity_factor,
+                "phase": 1,
+                "freeze_encoder": model.freeze_encoder,
+            },
         },
         path,
     )
@@ -196,15 +200,28 @@ def train_phase1(args: argparse.Namespace) -> None:
         tokenizer.add_special_tokens({"sep_token": "<sep>"})
     tokenizer.sep_token_id = tokenizer.convert_tokens_to_ids(tokenizer.sep_token)
 
+    activation = TopKActivation(args.topk_k) if args.topk_k > 0 else None
+
+    dtype = None
+    if args.dtype == "bfloat16":
+        dtype = torch.bfloat16
+    elif args.dtype == "float16":
+        dtype = torch.float16
+
     model = SSAE(
         tokenizer=tokenizer,
         sparsity_factor=args.sparsity_factor,
+        activation=activation,
         phase=1,
+        dtype=dtype,
+        freeze_encoder=args.freeze_encoder,
     ).to(device)
 
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    act_name = f"TopK(k={args.topk_k})" if args.topk_k > 0 else "ReLU+L1"
     print(f"  n_inputs={model.n_inputs}  n_latents={model.n_latents}  "
           f"trainable_params={n_trainable:,}")
+    print(f"  activation={act_name}  freeze_encoder={args.freeze_encoder}  dtype={args.dtype}")
 
     eos_id = tokenizer.eos_token_id
     pad_id = eos_id  # Qwen uses eos as pad
@@ -271,9 +288,13 @@ def train_phase1(args: argparse.Namespace) -> None:
     best_val = float("inf")
     global_step = 0
 
+    use_topk = args.topk_k > 0
     print(f"\nPhase 1 training: {args.epochs} epochs  "
-          f"lr={args.lr:.0e}  l1_target={args.l1_target}  "
-          f"l1_init={args.l1_weight_init:.0e}  grad_accum={args.grad_accum}")
+          f"lr={args.lr:.0e}  grad_accum={args.grad_accum}")
+    if use_topk:
+        print(f"  TopK sparsity: k={args.topk_k}  (L1 penalty disabled)")
+    else:
+        print(f"  L1 sparsity: target={args.l1_target}  l1_init={args.l1_weight_init:.0e}")
 
     with open(log_path, "w") as log_f:
         for epoch in range(args.epochs):
@@ -295,7 +316,7 @@ def train_phase1(args: argparse.Namespace) -> None:
                     attn_mask, sep_pos, val_len, args.mask_prob
                 )
 
-                l1_w = dwa.current_weight
+                l1_w = 0.0 if use_topk else dwa.current_weight
 
                 latents, loss_sparsity, logits = model(
                     input_ids, masked_attn, hints_sep_ids, hints_sep_attn
@@ -311,7 +332,8 @@ def train_phase1(args: argparse.Namespace) -> None:
                 (loss / args.grad_accum).backward()
                 accum += 1
 
-                dwa.step(loss_spa.item())  # update per batch, matching reference
+                if not use_topk:
+                    dwa.step(loss_spa.item())  # update per batch, matching reference
 
                 if accum == args.grad_accum:
                     torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
@@ -405,6 +427,14 @@ def parse_args() -> argparse.Namespace:
     # Model
     p.add_argument("--model-id", default="Qwen/Qwen2.5-0.5B")
     p.add_argument("--sparsity-factor", type=int, default=1)
+    p.add_argument("--topk-k", type=int, default=0,
+                   help="Use TopK activation with exactly K active features. "
+                        "0 = disabled (use ReLU + L1 instead).")
+    p.add_argument("--freeze-encoder", action="store_true",
+                   help="Freeze the backbone encoder during phase 1 training.")
+    p.add_argument("--dtype", default="float32",
+                   choices=["float32", "bfloat16", "float16"],
+                   help="Model dtype. bfloat16 recommended for H100.")
     # Sparsity
     p.add_argument("--l1-target", type=float, default=3.0)
     p.add_argument("--l1-weight-init", type=float, default=1e-4)

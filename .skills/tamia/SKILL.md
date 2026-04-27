@@ -213,20 +213,14 @@ States: `R` = running, `PD` = pending, `CG` = completing, `F` = failed, `CD` = c
 ## Retrieve outputs
 
 ```bash
-# From your laptop
-bash scripts/tamia/retrieve.sh
+# All experiment checkpoints + logs
+rsync -avz dchikhi@tamia.alliancecan.ca:/project/aip-azouaq/dchikhi/results/ ./results/tamia/
 
-# What it pulls:
-#   $STORE/results/      → ./results/tamia/
-#   $STORE/probe_data/   → ./data/tamia/
-#   logs for a specific job: pass JOBID as argument
-bash scripts/tamia/retrieve.sh 123456
-```
+# Probe .npz data
+rsync -avz dchikhi@tamia.alliancecan.ca:/project/aip-azouaq/dchikhi/probe_data/ ./data/tamia/
 
-Manual equivalent:
-```bash
-rsync -avz dchikhi@tamia.alliancecan.ca:/project/aip-azouaq/$USER/results/ ./results/tamia/
-scp "dchikhi@tamia.alliancecan.ca:~/CoT-checker/logs/probe_123456.out" .
+# Single job log
+scp "dchikhi@tamia.alliancecan.ca:~/CoT-checker/results/logs/<jobname>-<JOBID>.out" .
 ```
 
 ---

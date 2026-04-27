@@ -61,6 +61,7 @@ results/*.png
 nohup.out
 /tmp/
 *.log
+results/
 
 # Local scp download staging dirs
 cot-checker-results/

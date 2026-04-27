@@ -433,19 +433,98 @@ Our hypothesis is that adding a next-step prediction auxiliary loss to the SSAE 
 
 This is the motivation for the Future-SSAE experiments described in §10.
 
-## 10. Future-SSAE: Adding a Next-Step Prediction Objective
+## 10. Future-SSAE Validation Run
 
-The hypothesis in §9.6 leads directly to a new training objective. We extend the SSAE with a prediction branch that shares the same sparse latent `h_c` used for reconstruction, and adds an auxiliary loss requiring `h_c` to predict step k+1 given the question and step k. The total loss is:
+### 10.1 Experimental Setup
+
+We ran a first validation experiment to test whether adding a next-step prediction objective can make SSAE latents encode trajectory-level information, without using correctness labels.
+
+Both models were trained for 2 epochs on GSM8K-Aug:
+
+- 384,620 raw problems
+- 521,120 valid step-transition pairs
+- Qwen2.5-0.5B backbone
+- `alpha_pred = 0.1`
+- single H100
+- shared sparse latent `h_c` between reconstruction and prediction branches
+
+Two variants were compared:
+
+| Model | Prediction context |
+|---|---|
+| M1 | question + current step |
+| M2 | question + previous step + current step |
+
+The original SSAE objective is preserved: reconstruct the current step from context and sparse latent. The added objective asks the same latent to help predict the next step. This tests whether `h_c` can encode not only local step information, but also information about the reasoning trajectory.
+
+### 10.2 Training Behavior
+
+Both models trained stably.
+
+The reconstruction loss decreased from about `2.47` to `0.88` for both M1 and M2. This shows that the original SSAE behavior is preserved: the sparse latent still captures enough current-step information for reconstruction.
+
+The prediction branch also learned. During training, `pred_first_token_nll` dropped from about `6.1` to `3.5`, a reduction of roughly `2.6` nats. This is important because the first token of the next step has no next-step prefix available to the decoder, so improvement here indicates that gradient is flowing through the sparse latent rather than only through teacher-forced language modeling.
+
+However, learning plateaued quickly. Between epoch 1 and epoch 2, reconstruction improved only slightly and prediction metrics were almost flat. This suggests that the current setup is not compute-limited by two epochs. It is more likely signal-limited: with `alpha_pred = 0.1` and a transition distribution biased toward shallow first-step pairs, the latent is not pushed strongly enough toward deeper trajectory encoding.
+
+### 10.3 Validation Diagnostics
+
+| Metric | M1 ep1 | M1 ep2 | M2 ep1 | M2 ep2 |
+|---|---:|---:|---:|---:|
+| val_recon_nll | 0.807 | 0.786 | 0.787 | 0.763 |
+| val_pred_nll | 0.866 | 0.867 | 0.793 | 0.799 |
+| val_pred_first_token_nll_idx0 | 2.928 | 2.914 | 2.938 | 2.929 |
+| val_pred_first_token_nll_idx1 | 3.583 | 3.555 | 3.400 | 3.409 |
+| val_pred_first_token_nll_idx2+ | 3.827 | 3.837 | 3.777 | 3.809 |
+| val_pred_nll_idx0 | 0.755 | 0.748 | 0.752 | 0.748 |
+| val_pred_nll_idx1 | 0.892 | 0.885 | 0.769 | 0.766 |
+| val_pred_nll_idx2+ | 1.073 | 1.076 | 0.936 | 0.942 |
+| val_corr_recon_pred | 0.807 | 0.797 | 0.827 | 0.819 |
+| n_idx0 / n_idx1 / n_idx2+ | 281 / 179 / 169 | 281 / 179 / 169 | 281 / 179 / 169 | 281 / 179 / 169 |
+
+### 10.4 Interpretation
+
+The result is not a failure, but it is not yet enough for ProcessBench.
+
+The first clear result is that the prediction branch is real. The training-time drop in first-token NLL shows that the prediction objective is using `h_c`; it is not being ignored.
+
+The second result is that M2 is better than M1 on the transitions that matter. At epoch 2, M2 reaches `val_pred_nll_idx2+ = 0.942`, compared with `1.076` for M1. It also improves `val_pred_first_token_nll_idx1` from `3.555` to `3.409`. Adding the previous step gives the decoder useful local trajectory context, especially beyond the first transition.
+
+The third result is that the current setup mostly learns shallow transitions. The easiest bucket is always `idx0`, which corresponds to predicting the next step after the first reasoning step. This is expected because GSM8K-Aug is shallow: more than half of the transition pairs come from `idx0`. The deeper buckets, especially `idx2+`, remain much harder.
+
+The fourth result is that reconstruction and prediction are not competing. `val_corr_recon_pred` stays strongly positive around `0.8`. This means examples that are hard to reconstruct are also hard to predict. The latent is not being pulled in opposite directions by the two losses. Therefore, `alpha_pred = 0.1` is safe, but likely too weak.
+
+### 10.5 Decision
+
+We should keep the `q_prev1_current` setting and drop `q_current` for now.
+
+M2 is consistently better on deeper transitions, and deeper transitions are the relevant regime for first-error detection. ProcessBench requires detecting when a reasoning trajectory breaks, not just predicting the first obvious step from the question.
+
+The next experiment should increase trajectory pressure.
+
+Recommended next run:
+
+| Model | Prediction context | alpha_pred | Data |
+|---|---|---:|---|
+| M3 | q_prev1_current | 0.3 | original GSM8K-Aug pairs |
+| M4 | q_prev1_current | 0.3 | downsampled idx0 or upweighted idx1/idx2+ |
+
+The goal is to reduce the gap between shallow and deeper transitions:
 
 ```
-L = L_recon + λ * ||h_c||_1 + α * (L_pred / ema_pred_nll)
+idx0 first-token NLL should stay good
+idx1 and idx2+ first-token NLL should decrease
+val_corr_recon_pred should remain > -0.5
+reconstruction NLL should not degrade sharply
 ```
 
-The prediction branch uses teacher-forcing: the decoder sees `[question | step_k | h_c]` and must predict `step_{k+1}`. Crucially, no content from step k+1 is visible to the encoder when computing `h_c`. Any gradient that flows through the prediction loss must do so via `h_c`, which means the sparse latent is directly incentivized to encode forward-looking information about where the reasoning is going.
+### 10.6 Current Conclusion
 
-We train two context-mode variants: M1 uses `[question | step_k]` as prediction context, and M2 uses `[question | step_{k-1} | step_k]` to provide one additional step of history. Both use `alpha_pred = 0.1` as the initial signal-validation setting. Results from these runs are pending.
+This validation run supports the direction but exposes the bottleneck.
 
-The key diagnostic is whether `pred_first_token_nll` decreases across step-index buckets (idx=0: first step of the solution, idx=1: second step, idx=2+: all later steps). If the signal appears only at idx=0, the model is learning the easy first-step transition; if it appears uniformly across buckets, `h_c` is genuinely encoding cross-step information flow.
+Future-SSAE does learn a trajectory signal, but with `alpha_pred = 0.1` and the current GSM8K-Aug transition distribution, the signal is mostly shallow. The method is working mechanically, but the next step is to push the latent harder toward deeper reasoning dynamics through stronger prediction loss and step-index rebalancing.
+
+In short: the prediction branch is valid, the latent learns trajectory information, and the current setting is too weak and too biased toward first-step transitions to expect strong ProcessBench performance yet.
 
 ---
 

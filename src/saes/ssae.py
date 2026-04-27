@@ -355,8 +355,14 @@ class SSAE(nn.Module):
         batch_size = input_ids.shape[0]
 
         if self.phase == 1:
-            hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
+            if self.freeze_encoder:
+                with torch.no_grad():
+                    hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
+            else:
+                hidden = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
             h_k = self._get_last_token_embeddings(hidden, attention_mask)
+            if self.freeze_encoder:
+                h_k = h_k.detach()
             h_k = h_k.to(self.autoencoder.encoder.weight.dtype)
             latents = self.autoencoder(h_k)
             latents = F.normalize(latents, p=2, dim=-1)

@@ -95,8 +95,8 @@ CUDA_VISIBLE_DEVICES=0 python scripts/train_ssae.py \
     --freeze-encoder \
     --dtype         bfloat16 \
     --epochs        8 \
-    --batch-size    64 \
-    --grad-accum    2 \
+    --batch-size    16 \
+    --grad-accum    8 \
     --lr            1e-4 \
     --min-lr        1e-5 \
     --warmup-steps  500 \

@@ -125,7 +125,7 @@ def phase1_nll_loss(
 ) -> torch.Tensor:
     """Cross-entropy on step tokens only (context tokens are masked out)."""
     B, T, V = logits.shape
-    ce = F.cross_entropy(logits.view(-1, V), input_ids.view(-1), reduction="none")
+    ce = F.cross_entropy(logits.reshape(-1, V), input_ids.reshape(-1), reduction="none")
     ce = ce.view(B, T)
     denom = loss_mask.float().sum().clamp(min=1.0)
     return (ce * loss_mask.float()).sum() / denom

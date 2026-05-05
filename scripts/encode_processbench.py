@@ -74,7 +74,8 @@ def build_records(row: dict, row_idx: int) -> list[dict]:
     return records
 
 
-def encode_batch(model, tokenizer, contexts, steps, device, sep_token_id, max_seq_len=2048):
+def encode_batch(model, tokenizer, contexts, steps, device, sep_token_id, max_seq_len=2048,
+                 encoding="ssae"):
     batch_ids = []
     for ctx, step in zip(contexts, steps):
         ctx_ids = tokenizer.encode(ctx, add_special_tokens=False)
@@ -95,7 +96,10 @@ def encode_batch(model, tokenizer, contexts, steps, device, sep_token_id, max_se
         attn_mask[i, :len(seq)] = 1
 
     with torch.no_grad():
-        latents = model.encode(input_ids, attn_mask)
+        if encoding == "dense":
+            latents = model.encode_dense(input_ids, attn_mask)
+        else:
+            latents = model.encode(input_ids, attn_mask)
     return latents.squeeze(1).cpu().float().numpy()
 
 
@@ -103,6 +107,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True,
                    help="Path to SSAE checkpoint .pt file")
+    p.add_argument("--encoding", default="ssae", choices=["ssae", "dense"],
+                   help="'ssae' = sparse latents via SSAE projector (default), "
+                        "'dense' = raw backbone last-token h_k (L2-normalised)")
     p.add_argument("--split", default="gsm8k",
                    choices=["gsm8k", "math", "olympiadbench", "omnimath"],
                    help="ProcessBench split name (used for labelling; ignored if --data-file is set)")
@@ -181,6 +188,7 @@ def main():
             [r["context"] for r in batch],
             [r["text"] for r in batch],
             args.device, sep_tok_id, max_seq_len=max_seq,
+            encoding=args.encoding,
         )
         all_latents.append(lats)
 

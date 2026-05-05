@@ -18,12 +18,15 @@ C4_TRAIN="${C4_TRAIN:-$SCRATCH/cot-checker/probe_data_c4/c4_train_full.npz}"
 MECH_DIR="${MECH_DIR:-$PROJECT_DIR/results/mechanistic_c4}"
 
 cd "$PROJECT_DIR"
+mkdir -p results
+
+EVAL_OUT="$PROJECT_DIR/results/c4_probe_eval.txt"
 
 # ---------------------------------------------------------------------------
 # [1/3] Threshold sweep on all 8 probes (4 linear + 4 MLP)
 # ---------------------------------------------------------------------------
 echo "=== [1/3] Evaluating c=4 probes on held-out eval set ==="
-python - <<PYEOF
+python - <<PYEOF | tee "$EVAL_OUT"
 import numpy as np
 import torch
 import torch.nn as nn
@@ -158,8 +161,9 @@ echo ""
 # ---------------------------------------------------------------------------
 # [3/3] Summary: c=4 vs. c=1 sparse vs. dense
 # ---------------------------------------------------------------------------
+SUMMARY_OUT="$PROJECT_DIR/results/c4_summary.txt"
 echo "=== [3/3] Summary: c=4 TopK vs. c=1 sparse vs. Dense h_k ==="
-python - <<'PYEOF'
+python - <<'PYEOF' | tee "$SUMMARY_OUT"
 import glob, re, pathlib, os, statistics
 
 base   = os.path.expandvars("$SCRATCH/cot-checker")
@@ -228,5 +232,7 @@ cp "$SCRATCH/cot-checker/ssae_c4/best.pt" "$CKPT_DIR/ssae_c4_topk40_frozen.pt" 2
 
 echo ""
 echo "=== Done. Results in $FINAL ==="
-echo "Fetch mechanistic plots locally with:"
-echo "  rsync -avz $USER@tamia.alliancecan.ca:~/CoT-checker/results/mechanistic_c4/ ./results/mechanistic_c4/"
+echo "  Probe eval saved to  : $EVAL_OUT"
+echo "  Summary saved to     : $SUMMARY_OUT"
+echo "Fetch all results locally with:"
+echo "  rsync -avz $USER@tamia.alliancecan.ca:~/CoT-checker/results/ ./results/"

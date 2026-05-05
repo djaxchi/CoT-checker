@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --gpus-per-node=h100:2
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --output=logs/encoding_comparison_%j.out
 #SBATCH --error=logs/encoding_comparison_%j.err
 

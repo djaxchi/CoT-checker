@@ -46,12 +46,15 @@ from src.saes.ssae import SSAE
 STEP_DELIM = "\u043a\u0438"
 
 
-def parse_entry(entry: dict) -> list[dict]:
+def parse_entry(entry: dict, solution_id: int = 0) -> list[dict]:
     """Parse a Math-Shepherd entry into (context, step_text, label) records.
 
     The `label` field looks like:
       "Question text Step 1: ... +\\nStep 2: ... -\\n..."
     where + means the step is on a path to the correct answer, - means not.
+
+    Each record includes solution_id and step_pos to enable transition-probe
+    analysis (Δz = z_k - z_{k-1}) after encoding.
     """
     label_str = entry["label"]
 
@@ -70,15 +73,17 @@ def parse_entry(entry: dict) -> list[dict]:
     records = []
     prior_steps: list[str] = []
 
-    for step_text, sign in step_blocks:
+    for step_pos, (step_text, sign) in enumerate(step_blocks):
         # Strip <<expr=result>> calculator annotations (not natural language)
         clean = re.sub(r"<<[^>]*>>", "", step_text).strip()
         context = (question + " " + " ".join(prior_steps)).strip()
         records.append(
             {
-                "context": context,
-                "text": clean,
-                "label": 1 if sign == "+" else 0,
+                "context":     context,
+                "text":        clean,
+                "label":       1 if sign == "+" else 0,
+                "solution_id": solution_id,
+                "step_pos":    step_pos,
             }
         )
         prior_steps.append(clean)
@@ -176,10 +181,12 @@ def main():
     ds = load_dataset("peiyi9979/Math-Shepherd", split="train", streaming=True)
 
     all_records: list[dict] = []
+    solution_counter = 0
     for entry in ds:
         if entry.get("task") != "GSM8K":
             continue
-        all_records.extend(parse_entry(entry))
+        all_records.extend(parse_entry(entry, solution_id=solution_counter))
+        solution_counter += 1
         if len(all_records) >= args.offset + args.max_steps:
             break
 
@@ -216,7 +223,7 @@ def main():
     print(f"Majority baseline: {max(pos, total - pos) / total:.1%}")
 
     # --- Encode in batches ---
-    all_latents, all_labels = [], []
+    all_latents, all_labels, all_sol_ids, all_step_pos = [], [], [], []
     bs = args.batch_size
     max_seq = args.max_seq_len if args.max_seq_len > 0 else 10**9
 
@@ -232,14 +239,18 @@ def main():
         )
         all_latents.extend(lats)
         all_labels.extend(labels)
+        all_sol_ids.extend(r["solution_id"] for r in batch)
+        all_step_pos.extend(r["step_pos"]    for r in batch)
 
     # --- Save ---
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         out,
-        latents=np.array(all_latents, dtype=np.float16),
-        correctness=np.array(all_labels, dtype=np.int8),
+        latents=np.array(all_latents,  dtype=np.float16),
+        correctness=np.array(all_labels,   dtype=np.int8),
+        solution_ids=np.array(all_sol_ids, dtype=np.int32),
+        step_positions=np.array(all_step_pos, dtype=np.int8),
     )
     print(f"\nSaved {total} samples → {out}")
     print(

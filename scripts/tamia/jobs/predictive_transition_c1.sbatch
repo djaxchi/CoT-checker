@@ -27,12 +27,13 @@
 #                          All .pt files, summary tables, figures go here.
 #
 # Pipeline stages:
-#   1  [4×GPU ~40min]  cache_transition_hidden_states.py  — 4 parallel shards (train)
-#   2  [CPU    ~2min]  merge_transition_shards.py          — merge train shards
-#   3  [4×GPU ~15min]  cache_transition_hidden_states.py  — val split (single, no filter)
+#   0.5[CPU    ~5min]  add_ms_solution_ids.py              — patch dense .npz with solution_ids
+#   1  [4×GPU ~40min]  cache_transition_hidden_states.py   — 4 parallel shards (train)
+#   2  [CPU    ~2min]  merge_transition_shards.py           — merge train shards
+#   3  [4×GPU ~15min]  cache_transition_hidden_states.py   — val split (single, no filter)
 #   4  [4×GPU ~20min]  train_predictive_transition_bottleneck.py  — DataParallel
 #   5  [CPU    ~5min]  extract_predictive_transition_latents.py
-#   6  [CPU   ~60min]  eval_predictive_transition_probes.py  — 6 reps × 4 seeds
+#   6  [CPU   ~90min]  eval_predictive_transition_probes.py  — 6 reps × 4 seeds
 #   7  [CPU    ~3min]  mechanistic_analysis.py  — PTB z_k
 #   8  [CPU    ~3min]  compare_mechanistic_viz.py
 #
@@ -129,6 +130,26 @@ for seed in 42 43 44 45; do
         [ ! -f "$probe" ] && echo "  WARNING: existing probe not found (will skip in viz): $probe"
     done
 done
+echo ""
+
+# ---------------------------------------------------------------------------
+# Stage 0.5: Patch solution_ids into dense .npz files (CPU, idempotent)
+#
+# The dense files were generated with an older generate_probe_data.py that
+# did not save solution_ids / step_positions. add_ms_solution_ids.py
+# re-streams Math-Shepherd (no GPU) and patches the files in-place.
+# If the arrays already exist the script exits immediately.
+# ---------------------------------------------------------------------------
+echo "=== [Stage 0.5] Patch solution_ids into dense .npz files ==="
+python scripts/add_ms_solution_ids.py \
+    --npz       "$PROBE_DATA/dense_eval_held_out.npz" \
+    --offset    0 \
+    --max-steps 90000
+
+python scripts/add_ms_solution_ids.py \
+    --npz       "$PROBE_DATA/dense_train_full.npz" \
+    --offset    90000 \
+    --max-steps 360000
 echo ""
 
 # ---------------------------------------------------------------------------

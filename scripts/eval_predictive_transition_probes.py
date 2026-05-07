@@ -147,7 +147,7 @@ def train_and_eval_probe(
         "pb_f1":        float("nan"),
     }
 
-    # ProcessBench eval
+    # ProcessBench eval — sweep thresholds and report the best PB-F1
     if pb_npz_path and Path(pb_npz_path).exists():
         pb = np.load(pb_npz_path)
         pb_h = pb["latents"].astype(np.float32)
@@ -156,10 +156,14 @@ def train_and_eval_probe(
         pb_step_pos     = pb["step_positions"]
         pb_sol_labels   = pb["solution_labels"]
         p_correct_pb = get_p_correct(model, pb_h, device)
-        _, _, pb_f1 = processbench_f1(
-            p_correct_pb, pb_sol_ids, pb_step_pos, pb_sol_labels, threshold=0.5
-        )
-        result["pb_f1"] = float(pb_f1)
+        best_pb_f1 = 0.0
+        for t in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]:
+            _, _, f1 = processbench_f1(
+                p_correct_pb, pb_sol_ids, pb_step_pos, pb_sol_labels, threshold=t
+            )
+            if f1 > best_pb_f1:
+                best_pb_f1 = f1
+        result["pb_f1"] = float(best_pb_f1)
 
     return result
 

@@ -38,7 +38,7 @@ OUT_DIR="$SCRATCH_BASE/ms_ablation"
 SPLIT_FILE="$OUT_DIR/splits.json"
 
 # Optional local dataset files (leave empty to load from HF cache)
-MS_DATA_FILE="$STORE/data/math_shepherd_gsm8k.jsonl"
+MS_DATA_FILE="$SCRATCH/cot-checker/ms_ablation/math_shepherd_gsm8k.jsonl"
 PB_DATA_FILE="$SCRATCH_BASE/processbench/processbench_gsm8k.jsonl"
 
 cd "$PROJECT_DIR"

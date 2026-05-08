@@ -26,7 +26,7 @@ STORE="/project/aip-azouaq/$USER"
 SCRATCH_BASE="$SCRATCH/cot-checker"
 OUT_DIR="$SCRATCH_BASE/ms_ablation"
 
-MS_DATA_FILE="$STORE/data/math_shepherd_gsm8k.jsonl"
+MS_DATA_FILE="$SCRATCH/cot-checker/ms_ablation/math_shepherd_gsm8k.jsonl"
 
 cd "$PROJECT_DIR"
 mkdir -p "$OUT_DIR" results/logs

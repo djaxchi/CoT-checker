@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-STORE="/project/aip-azouaq/$USER"
+export STORE="/project/aip-azouaq/$USER"
 SCRATCH_BASE="$SCRATCH/cot-checker"
 OUT_DIR="$SCRATCH_BASE/ms_ablation"
 

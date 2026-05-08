@@ -47,6 +47,7 @@ export HF_HOME="$STORE/hf_cache"
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+export PROBE_DATA PB_DIR
 
 echo "======================================================="
 echo "  Stage 00: Pre-flight checks"

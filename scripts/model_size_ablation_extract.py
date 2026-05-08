@@ -342,10 +342,9 @@ def main() -> None:
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
-        torch_dtype=dtype,
+        dtype=dtype,
         cache_dir=args.cache_dir,
-        device_map=args.device,
-    )
+    ).to(args.device)
     model.eval()
     d = model.config.hidden_size
     n_layers = model.config.num_hidden_layers

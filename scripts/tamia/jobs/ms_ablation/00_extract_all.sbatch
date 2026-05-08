@@ -83,7 +83,6 @@ run_extract() {
         --model-tag   "$tag" \
         --split-file  "$SPLIT_FILE" \
         --output-dir  "$OUT_DIR" \
-        --cache-dir   "$STORE/hf_cache" \
         --batch-size  "$batch" \
         --max-seq-len 1024 \
         --dtype       float16 \

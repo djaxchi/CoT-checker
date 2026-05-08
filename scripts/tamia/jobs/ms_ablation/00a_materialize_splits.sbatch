@@ -50,7 +50,6 @@ MS_ARG=""
 
 python scripts/model_size_ablation_materialize_splits.py \
     --output-dir   "$OUT_DIR" \
-    --cache-dir    "$STORE/hf_cache" \
     --ms-per-class 10000 \
     --seed         42 \
     $MS_ARG

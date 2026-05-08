@@ -45,9 +45,8 @@ source "$HOME/venvs/cot/bin/activate"
 
 export HF_HOME="$STORE/hf_cache"
 export TRANSFORMERS_CACHE="$STORE/hf_cache"
-# HF_DATASETS_OFFLINE must be 0 here so the dataset cache is readable.
-# The cache was populated when eval_held_out.npz was generated.
-export HF_DATASETS_OFFLINE=0
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 
 echo "======================================================="

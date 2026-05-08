@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-04-26*
+*Last updated: 2026-05-05*
 
 ---
 
@@ -528,7 +528,84 @@ In short: the prediction branch is valid, the latent learns trajectory informati
 
 ---
 
-## 11. Limitations
+## 11. Overcomplete SSAE Ablation (c=4, TopK-40, Frozen Encoder)
+
+### 11.1 Motivation
+
+The c=1 mechanistic analysis (§8) found that the correctness signal in the SSAE latent space is not carried by any individual feature's marginal statistics (probe-delta correlation r=0.237), but is distributed across the joint activation pattern. One hypothesis is that the bottleneck at c=1 forces polysemantic encoding: features that would ideally carry a single interpretable concept are instead mixed, and a linear probe must recover correctness from an entangled representation. Expanding the dictionary to c=4 (n_latents=3584, four times the input dimension) should allow the autoencoder to disentangle features into more monosemantic units, potentially making the correctness signal more linearly accessible.
+
+Two other weaknesses of the c=1 experiment motivated this ablation:
+
+- **ReLU+L1 sparsity** requires tuning the L1 penalty across training, and dynamic weight adjustment adds noise to the training signal. TopK activation (keep exactly k features per sample) enforces exact structural sparsity without any penalty schedule.
+- **Unfrozen encoder** at c=1 allowed the backbone to co-adapt with the sparse projector, potentially conflating representation learning with compression artifacts. Freezing the encoder forces the sparse projector to compress a fixed representation, making the latent geometry more interpretable.
+
+### 11.2 Experimental Setup
+
+| Setting | Value |
+|---|---|
+| Architecture | SSAE, c=4, n_inputs=896, n_latents=3584 |
+| Activation | TopK (k=40) — keeps 40 of 3584 features active per step |
+| Encoder | Frozen (Qwen2.5-0.5B backbone, no gradient) |
+| dtype | bfloat16 |
+| Epochs | 8 |
+| Batch size | 16 (grad_accum=8, effective batch=128) |
+| Training data | gsm8k_385K_train.json (385K steps, TamIA $STORE) |
+| Hardware | 4x H100 80GB (TamIA, job 264277) |
+| Training time | ~10.2h (8 × ~77 min/epoch) |
+| Checkpoint | ssae_c4_topk40_frozen.pt (best val loss) |
+
+The no-grad + detach fix was required for the frozen encoder: setting `requires_grad_(False)` alone is insufficient because PyTorch still allocates activation memory during the forward pass. The encoder forward is wrapped in `torch.no_grad()` and the output `h_k` is detached before entering the sparse projector. Without this, the 80GB H100 OOMs at batch_size=64.
+
+Probe training used the same protocol as §6: 4 seeds (42–45), 50 epochs, AdamW, 70/30 class imbalance correction, evaluated on the same 50K balanced held-out set.
+
+### 11.3 Results
+
+**MLP probe — threshold sweep (mean ± std, 4 seeds):**
+
+| Threshold | Accuracy | F1 correct | F1 incorrect | Macro F1 |
+|---|---|---|---|---|
+| 0.3 | 69.13 ± 0.09% | 0.764 ± 0.000 | 0.555 ± 0.002 | 0.659 ± 0.001 |
+| 0.4 | 69.95 ± 0.15% | 0.768 ± 0.001 | 0.575 ± 0.004 | 0.671 ± 0.002 |
+| 0.5 | 71.50 ± 0.18% | 0.774 ± 0.001 | 0.615 ± 0.005 | 0.694 ± 0.003 |
+| 0.6 | 73.41 ± 0.15% | 0.778 ± 0.001 | 0.669 ± 0.005 | 0.723 ± 0.002 |
+| **0.7** | **74.54 ± 0.03%** | **0.766 ± 0.004** | **0.720 ± 0.004** | **0.743 ± 0.000** |
+| 0.8 | 72.05 ± 0.48% | 0.695 ± 0.011 | 0.742 ± 0.001 | 0.719 ± 0.006 |
+
+**Linear probe — threshold sweep (mean ± std, 4 seeds):**
+
+| Threshold | Accuracy | F1 correct | F1 incorrect | Macro F1 |
+|---|---|---|---|---|
+| 0.3 | 60.32 ± 0.92% | 0.716 ± 0.005 | 0.343 ± 0.026 | 0.529 ± 0.015 |
+| 0.4 | 66.74 ± 0.60% | 0.750 ± 0.003 | 0.504 ± 0.014 | 0.627 ± 0.009 |
+| 0.5 | 69.69 ± 0.25% | 0.764 ± 0.001 | 0.578 ± 0.007 | 0.671 ± 0.004 |
+| 0.6 | 71.68 ± 0.21% | 0.763 ± 0.001 | 0.649 ± 0.009 | 0.706 ± 0.004 |
+| **0.7** | **71.99 ± 0.35%** | **0.725 ± 0.010** | **0.715 ± 0.003** | **0.720 ± 0.003** |
+| 0.8 | 65.90 ± 1.10% | 0.571 ± 0.028 | 0.717 ± 0.003 | 0.644 ± 0.016 |
+
+### 11.4 Comparison with c=1 and Dense Baselines
+
+| Configuration | Probe | Accuracy (t=0.7) | Macro F1 (t=0.7) |
+|---|---|---|---|
+| c=1, ReLU+L1, unfrozen | MLP | 74.62 ± 0.31% | 0.746 ± 0.003 |
+| c=1, ReLU+L1, unfrozen | Linear | 74.31 ± 0.03% | 0.742 ± 0.001 |
+| **c=4, TopK-40, frozen** | **MLP** | **74.54 ± 0.03%** | **0.743 ± 0.000** |
+| **c=4, TopK-40, frozen** | **Linear** | **71.99 ± 0.35%** | **0.720 ± 0.003** |
+
+### 11.5 Interpretation
+
+**The MLP probe is unchanged; the linear probe is worse.** The c=4 MLP nearly exactly matches c=1 (−0.08 pp accuracy, −0.003 macro F1 — well within noise given the seed variance). The linear probe however drops 2.32 pp in accuracy and 0.022 in macro F1.
+
+This reverses the hypothesis. The overcomplete expansion was expected to disentangle features and make the correctness signal more linearly accessible. Instead, the linear probe degrades while the MLP holds steady. The gap between linear and MLP probes has widened: at c=1 the linear probe trails the MLP by only 0.31 pp; at c=4 the gap is 2.55 pp.
+
+A plausible explanation is that the overcomplete dictionary distributes the correctness signal across more dimensions. In a 3584-dimensional space with only 40 active features per sample, the correctness direction may require a non-axis-aligned projection that a linear probe over sparse activations cannot learn as efficiently with the same training budget. The MLP, with its first-layer nonlinearity, can still recover the signal; the linear probe cannot find it as cleanly in the sparser, higher-dimensional space.
+
+A second factor is the frozen encoder. The c=1 results were produced with an unfrozen backbone, which may have aligned the embedding space with the probe training signal during SSAE training. With the encoder frozen, the sparse projector must compress a fixed backbone representation, and the resulting latent geometry is determined entirely by the backbone's existing structure rather than being shaped by the reconstruction-plus-probe training interaction.
+
+**The bottom line is that overcomplete expansion with TopK does not improve probe-based correctness detection on this task.** The MLP probe result is stable across both architectures, which is reassuring, but the hypothesis that feature disentanglement would improve linear decodability is not supported here.
+
+---
+
+## 12. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -537,7 +614,331 @@ In short: the prediction branch is valid, the latent learns trajectory informati
 
 ---
 
-## 12. Next Steps
+## 14. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+
+### 14.1 Overview
+
+The field has converged around a central question: do intermediate CoT steps causally determine the final answer, and can mechanistic signals detect when they do not? As of May 2026, five broad approaches have emerged.
+
+---
+
+### 14.2 Full Paper Inventory
+
+#### Tier 1: Most Directly Relevant (Mechanistic Signal + Step-Level CoT Validity)
+
+**[P1] Step-Level Sparse Autoencoder for Reasoning Process Interpretation**
+- Authors: Xuan Yang, Jiayu Liu, Yuhang Lai, Hao Xu, Zhenya Huang, Ning Miao
+- arXiv: 2603.03031 | March 2026 | GitHub: Miaow-Lab/SSAE
+- Signal: Step-level SAE features + linear probing
+- Granularity: Step-level (explicit step boundary)
+- Dataset: AIME 2024, math reasoning benchmarks | Model: DeepSeek-R1-Distill-Qwen-32B
+- **Contribution:** Proposes step-level SAEs (SSAE) operating at reasoning-step granularity via an information bottleneck, disentangling "incremental information" from "background information" into sparse dimensions. Linear probing on SSAE features predicts step correctness and logicality. Improves AIME 2024 from 86.67% to 90.00%.
+
+**[P2] Mechanistic Interpretability of Code Correctness in LLMs via Sparse Autoencoders**
+- Authors: Kriz Tahimic, Charibeth Cheng
+- arXiv: 2510.02917 | Oct 2025 | ICLR 2026
+- Signal: SAE directions (error alarms F1=0.821), attention analysis, weight orthogonalization
+- Granularity: Trace-level, with step-level attention analysis
+- Dataset: MBPP | Model: Gemma-2
+- **Contribution:** Identifies "detection directions" for incorrect code (F1: 0.821) and "steering directions." Reveals asymmetry: model reliably signals incorrect code but not correct code. Mechanisms persist through instruction tuning.
+
+**[P3] Verifying Chain-of-Thought Reasoning via Its Computational Graph (CRV)**
+- Authors: Zheng Zhao, Yeskendir Koishekenov, Xianjun Yang, Naila Murray, Nicola Cancedda
+- arXiv: 2510.09312 | Oct 2025 | ICLR 2026 (Oral)
+- Signal: Attribution graphs, transcoder circuits (white-box mechanistic)
+- Granularity: Step-level
+- **Contribution:** Builds attribution graphs using transcoders, identifies structural fingerprints of incorrect steps, trains a graph classifier. Error signatures are causal -- intervening on transcoder features corrects faulty reasoning. Error patterns are domain-specific.
+
+**[P4] How does Chain of Thought Think? Mechanistic Interpretability via Sparse Autoencoding**
+- Authors: Xi Chen, Aske Plaat, Niki van Stein
+- arXiv: 2507.22928 | July 2025
+- Signal: SAE features + activation patching (causal)
+- Granularity: Trace-level CoT vs. non-CoT comparison; feature-level
+- Dataset: GSM8K | Models: Pythia-70M, Pythia-2.8B
+- **Contribution:** First feature-level causal study of CoT faithfulness. Swapping CoT-reasoning features into non-CoT runs raises answer log-probabilities significantly in the 2.8B model (negligible in 70M), establishing a capacity threshold for CoT's mechanistic effect.
+
+**[P5] Reasoning Models Know When They're Right: Probing Hidden States for Self-Verification**
+- Authors: Anqi Zhang, Yulin Chen, Jane Pan, Chen Zhao, Aurojit Panda, Jinyang Li, He He
+- arXiv: 2504.05419 | April 2025 | GitHub: AngelaZZZ-611/reasoning_models_probing
+- Signal: Linear probe on hidden states (step-level)
+- Granularity: Step-level (per reasoning chunk)
+- **Contribution:** Binary linear probe on hidden states at intermediate reasoning steps predicts final-answer correctness. Used as inference-time verifier for early-exit, reducing token count by 24% with no performance loss.
+
+**[P6] Deep Hidden Cognition Facilitates Reliable Chain-of-Thought Reasoning**
+- Authors: Zijun Chen, Wenbo Hu, Richang Hong
+- arXiv: 2507.10007 | July 2025 | AAAI-26
+- Signal: Attention head activations (step-level truthfulness probe)
+- Granularity: Step-level
+- Dataset: Math, symbolic, commonsense + multimodal
+- **Contribution:** Attention head activations reflect step truthfulness up to 85% accuracy, concentrated in middle layers. Confidence predictor on these activations guides beam search, outperforming Self-Consistency and Self-Evaluation Guided Beam Search.
+
+**[P7] LLM Reasoning as Trajectories: Step-Specific Representation Geometry and Correctness Signals**
+- Authors: Lihao Sun et al. (Microsoft Research)
+- arXiv: 2604.05655 | April 2026 | ACL 2026 (Main)
+- Signal: Representation geometry / trajectory analysis (step-specific subspace)
+- Granularity: Step-level
+- **Contribution:** Models CoT as a trajectory through representation space. Step-specific subspaces become increasingly separable with layer depth. Correct/incorrect solutions diverge at late stages; mid-reasoning correctness prediction achieves ROC-AUC up to 0.87.
+
+**[P8] Hidden States as Early Signals: Step-level Trace Evaluation and Pruning for Efficient Test-Time Scaling (STEP)**
+- Authors: Zhixiang Liang, Beichen Huang, Zheng Wang, Minjia Zhang
+- arXiv: 2601.09093 | Jan 2026
+- Signal: Hidden state probe (step scorer)
+- Granularity: Step-level
+- **Contribution:** Lightweight step scorer probing hidden states estimates trace quality. GPU memory-aware pruning triggered at KV cache saturation reduces latency 45-70% while improving accuracy.
+
+**[P9] Mechanistic Evidence for Faithfulness Decay in Chain-of-Thought Reasoning**
+- Authors: Donald Ye, Max Loffgren, Om Kotadia, Linus Wong
+- arXiv: 2602.11201 | Feb 2026
+- Signal: Step corruption + logit drop (behavioral/mechanistic hybrid)
+- Granularity: Step-level (per-step corruption)
+- **Contribution:** Introduces Normalized Logit Difference Decay (NLDD): corrupts individual reasoning steps and measures confidence drop. Discovers "Reasoning Horizon" (k*) at 70-85% of chain length beyond which tokens have minimal/negative effect. Models can encode correct internal representations while failing the task.
+
+**[P10] Knowing Before Saying: LLM Representations Encode Information About Chain-of-Thought Success Before Completion**
+- Authors: Anum Afzal, Florian Matthes, Gal Chechik, Yftah Ziser
+- arXiv: 2505.24362 | May 2025 | ACL 2025 Findings
+- Signal: Linear probing on LLM representations (pre-generation)
+- Granularity: Trace-level and per-step prefix
+- **Contribution:** Probing classifier on internal representations predicts CoT success before a single token is generated (60-76.4% accuracy). Early representations can be as informative as later ones.
+
+**[P11] Reasoning with Confidence: Efficient Verification via Uncertainty Heads (ReProbe)**
+- Authors: Jingwei Ni, Ekaterina Fadeeva, Tianyi Wu, et al.
+- arXiv: 2511.06209 | Nov 2025 | ACL 2026 (Main)
+- Signal: Uncertainty heads (<10M params) on frozen LLM internal states
+- Granularity: Step-level
+- Dataset: Math, planning, QA
+- **Contribution:** UHeads match or surpass PRMs up to 810x larger. Training labels from DeepSeek-R1 or self-supervised. Works across math, planning, and QA.
+
+**[P12] Interpreting Reasoning Features via Sparse Autoencoders**
+- Authors: Andrey Galichin et al. (AIRI-Institute)
+- arXiv: 2503.18878 | March 2025 | GitHub: AIRI-Institute/SAE-Reasoning
+- Signal: SAE features + ReasonScore + steering experiments
+- Granularity: Token/step-level (reasoning moment detection)
+- Model: DeepSeek-R1-Llama-8B
+- **Contribution:** Uses SAEs to decompose DeepSeek-R1 activations. Introduces ReasonScore to identify features active during reasoning moments. Finds features encoding uncertainty, exploratory thinking, self-reflection. Steering: +2.2% accuracy, +20.5% reasoning trace length.
+
+**[P13] Thought Anchors: Which LLM Reasoning Steps Matter?**
+- Authors: Paul C. Bogdan, Uzay Macar, Neel Nanda, Arthur Conmy
+- arXiv: 2506.19143 | June 2025
+- Signal: Attention patterns + causal attribution (sentence-level)
+- Granularity: Step/sentence-level
+- Models: DeepSeek R1-Distill Qwen-14B, Llama-8B
+- **Contribution:** Identifies "thought anchors" with outsized causal impact on reasoning trajectory via three attribution methods: counterfactual sampling, attention pattern aggregation (broadcasting heads), and causal sentence-to-sentence attribution.
+
+**[P14] Base Models Know How to Reason, Thinking Models Learn When**
+- Authors: Constantin Venhoff, Iván Arcuschin, Philip Torr, Arthur Conmy, Neel Nanda
+- arXiv: 2510.07364 | Oct 2025 | NeurIPS 2025 Mechanistic Interpretability Workshop
+- Signal: Top-K SAEs on sentence-level activations + steering vectors
+- Granularity: Sentence/step-level
+- Dataset: MMLU-Pro (430k sentences), GSM8K, MATH500
+- **Contribution:** Derives unsupervised taxonomy of reasoning behaviors via SAE clustering. Reasoning mechanisms exist in base models; thinking models learn when to deploy them. Steering 12% of tokens recovers 91% of performance gap to thinking models.
+
+**[P15] Mining Intrinsic Rewards from LLM Hidden States for Efficient Best-of-N Sampling (SWIFT)**
+- Authors: Jizhou Guo, Zhaomin Wu, Hanchen Yang, Philip S. Yu
+- arXiv: 2505.12225 | May 2025 | KDD 2026
+- Signal: Linear layer on concatenated LLM hidden states (token-level reward)
+- Granularity: Token-level reward (aggregated to trace-level)
+- Dataset: MATH
+- **Contribution:** ~80% per-layer accuracy in predicting reasoning correctness from hidden states. Outperforms EurusRM-7B by 12.7% on MATH with <0.005% of parameters.
+
+**[P16] Sparse Reward Subsystem in Large Language Models**
+- Authors: Guowei Xu, Mert Yuksekgonul, James Zou
+- arXiv: 2602.00986 | Feb 2026
+- Signal: Sparse neuron subsystem (mechanistic, intervention-based)
+- Granularity: Token/state-level
+- **Contribution:** Identifies "value neurons" tracking expected state value and "dopamine neurons" encoding reward prediction errors, analogous to biological reward systems. Robust across datasets, scales, architectures, and fine-tuned variants.
+
+**[P17] Harnessing Reasoning Trajectories for Hallucination Detection (ARS)**
+- Authors: Jianxiong Zhang et al.
+- arXiv: 2601.17467 | Jan 2026 | ICML 2026
+- Signal: Latent embedding perturbation + answer-agreement representation
+- Granularity: Trace-level
+- **Contribution:** Perturbs trace-boundary embeddings to generate counterfactual answers, trains detectors on answer-stability. No human annotations required.
+
+**[P18] Resa: Transparent Reasoning Models via SAEs**
+- Authors: Shangshang Wang, Julian Asilis et al.
+- arXiv: 2506.09967 | June 2025
+- Signal: SAE features encoding reasoning abilities
+- Granularity: Reasoning-ability-level
+- Dataset: AIME24, AMC23 | Models: Qwen, R1-Distill variants (1.5B)
+- **Contribution:** SAE-Tuning: trains SAE to extract reasoning abilities from source model, uses it to guide SFT on target model. Retains >97% of RL-trained performance at 2000x cost reduction.
+
+**[P19] Truth as a Trajectory: What Internal Representations Reveal About LLM Reasoning**
+- Authors: Hamed Damirchi et al.
+- arXiv: 2603.01326 | March 2026
+- Signal: Layer-wise geometric displacement (trajectory analysis)
+- Granularity: Layer-level trajectory (within a forward pass)
+- **Contribution:** TaT models inference as unfolded trajectory of layer-wise geometric displacements. Uncovers geometric invariants distinguishing valid from spurious reasoning; outperforms conventional probing by mitigating lexical confounds.
+
+**[P20] Probing the Trajectories of Reasoning Traces in Large Language Models**
+- Authors: Marthe Ballon, Brecht Verbeken, Vincent Ginis, Andres Algaba
+- arXiv: 2601.23163 | Jan 2026
+- Signal: Behavioral probing (trace injection + next-token probabilities)
+- Granularity: Token-percentile level
+- Dataset: GPQA Diamond, MMLU-Pro | Models: Qwen3 (4B-14B), gpt-oss (20B, 120B)
+- **Contribution:** Truncates reasoning traces at fixed token-percentiles and reinjects them. Accuracy increases monotonically with reasoning tokens (from relevant content, not length). Stronger models backtrack; weaker ones anchor to initial wrong answers.
+
+**[P21] SAE-Guided CoT Generation: Interpretable and Inference-Optimal**
+- arXiv: 2510.01528 | Oct 2025
+- Signal: SAE token representations + transition graph reward
+- Granularity: Token-level transition
+
+**[P22] Feature Extraction and Steering for Enhanced CoT Reasoning**
+- arXiv: 2505.15634 | May 2025
+- Signal: SAE features + residual activation directions (SAE-free steering)
+
+**[P23] Controllable LLM Reasoning via Sparse Autoencoder-Based Steering**
+- arXiv: 2601.03595 | Jan 2026
+- Signal: SAE strategy-specific features
+- **Contribution:** Decomposes hidden states into disentangled feature space, identifies strategy-specific features. 7% absolute accuracy improvement by redirecting from erroneous reasoning paths.
+
+**[P24] Mapping Faithful Reasoning in Language Models (Concept Walk)**
+- arXiv: 2510.22362 | Oct 2025 | NeurIPS 2025 Mechanistic Interpretability Workshop
+- Signal: Concept direction projection in activation space
+- Granularity: Reasoning step-level
+- Model: Qwen 3-4B
+- **Contribution:** Traces how model's internal stance evolves per reasoning step by projecting onto concept directions. Distinguishes decorative from load-bearing reasoning steps.
+
+**[P25] Measuring CoT Faithfulness by Unlearning Reasoning Steps (FUR)**
+- Authors: Martin Tutek, Fateme Hashemi Chaleshtori, Ana Marasovic, Yonatan Belinkov
+- arXiv: 2502.14829 | Feb 2025 | EMNLP 2025
+- Signal: Machine unlearning + parameter intervention (step-level)
+- Granularity: Step-level
+- Dataset: Multi-hop MCQA (5 datasets)
+- **Contribution:** Erases individual CoT step content from model parameters and measures the effect on prediction. Can precisely change model predictions by unlearning key steps.
+
+**[P26] When Chains of Thought Don't Matter: Causal Bypass in LLMs**
+- arXiv: 2602.03994 | Feb 2026
+- Signal: Hidden-state patching (CoT-Mediated Influence) + behavioral scoring
+- Granularity: Trace-level
+- **Contribution:** Many QA items show near-total bypass (CMI ~0); logic problems show stronger mediation (CMI up to 0.56).
+
+**[P27] PRISM: Dual View of LLM Reasoning through Semantic Flow and Latent Computation**
+- arXiv: 2603.22754 | March 2026
+- Signal: Token-level semantic flow + Gaussian mixture model of hidden states
+- Granularity: Step-level
+- **Contribution:** Identifies failed trajectories as trapped in "unproductive verification loops" or diverging into overthinking/premature commitment.
+
+**[P28] No Answer Needed: Predicting LLM Accuracy from Question-Only Linear Probes**
+- arXiv: 2509.10625 | Sep 2025
+- Signal: Linear probe on pre-generation activations
+- **Contribution:** Works on factual/knowledge tasks but generalizes poorly to mathematical reasoning. Early-to-mid layers suffice.
+
+**[P29] Dissecting Logical Reasoning in LLMs: FineLogic**
+- arXiv: 2506.04810 | June 2025 | EMNLP 2025 Findings
+- Signal: Representation-level probing + stepwise soundness evaluation
+- **Contribution:** Reveals trade-off: natural language supervision generalizes but produces non-atomic steps; symbolic supervision produces structurally sound atomic steps.
+
+**[P30] Interpretable Reward Model via Sparse Autoencoder (SARM)**
+- arXiv: 2508.08746 | Aug 2025 | AAAI 2026 (Oral)
+- Signal: SAE features for reward attribution
+
+**[P31] SAFER: Probing Safety in Reward Models with Sparse Autoencoder**
+- arXiv: 2507.00665 | July 2025
+- Signal: SAE features in reward model activations
+
+**[P32] Circuit Stability Characterizes Language Model Generalization**
+- Authors: Alan Sun (CMU)
+- arXiv: 2505.24731 | May 2025 | ACL 2025
+- Signal: Circuit stability (mechanistic circuit analysis)
+- **Contribution:** CoT induces circuit stability; circuit stability predicts length, structural, and compositional generalization.
+
+#### Tier 2: Foundational / Background Papers
+
+| arXiv | Title | Year | Role |
+|---|---|---|---|
+| 2305.04388 | Language Models Don't Always Say What They Think (Turpin et al.) | 2023 | Canonical baseline: CoT faithfulness is unreliable |
+| 2307.13702 | Measuring Faithfulness in Chain-of-Thought Reasoning (Lanham et al., Anthropic) | 2023 | Systematic intervention study; larger models less faithful |
+| 2502.12289 | Evaluating Step-by-step Reasoning Traces: A Survey (Lee & Hockenmaier) | 2025 | Taxonomy: factuality, validity, coherence, utility |
+| 2507.11473 | Chain of Thought Monitorability (Korbak et al.) | 2025 | CoT monitoring as an AI safety property |
+| 2510.23966 | Measuring Chain-of-Thought Monitorability | 2025 | Pragmatic metrics for CoT monitor evaluation |
+| 2603.26410 | Why Models Know But Don't Say: Faithfulness Divergence in Thinking Tokens | 2026 | 55.4% of misleading-hint cases: thinking acknowledges hints, answers do not |
+| 2603.22582 | Lie to Me: Faithfulness in Open-Weight Reasoning Models | 2026 | Systematic faithfulness evaluation of Q4 2025-Q1 2026 models |
+
+---
+
+### 14.3 Directly Relevant Papers (Both Criteria: Mechanistic Signal + Step-Level CoT Validity)
+
+| # | Paper | Signal | Step-Level? | Year |
+|---|---|---|---|---|
+| P1 | SSAE (Miaow-Lab) | SAE + linear probe | Yes (explicit) | 2026 |
+| P3 | CRV (ICLR Oral) | Attribution graphs / transcoders | Yes | 2025 |
+| P5 | Reasoning Models Know When They're Right | Linear probe on hidden states | Yes | 2025 |
+| P6 | Deep Hidden Cognition | Attention head activations | Yes | 2025 |
+| P7 | LLM Reasoning as Trajectories (Microsoft) | Representation geometry | Yes | 2026 |
+| P8 | STEP | Hidden state scorer | Yes | 2026 |
+| P9 | NLDD Faithfulness Decay | Step corruption + logit drop | Yes | 2026 |
+| P11 | ReProbe / Uncertainty Heads | Frozen LLM internal states | Yes | 2025 |
+| P13 | Thought Anchors (Nanda et al.) | Attention patterns + causal attribution | Yes | 2025 |
+| P24 | Concept Walk | Concept direction activation projection | Yes | 2025 |
+| P25 | FUR / Machine Unlearning | Parameter intervention | Yes | 2025 |
+
+---
+
+### 14.4 State-of-the-Art Summary
+
+#### Approach 1: Sparse Autoencoders (SAEs) on Activations
+
+The most directly relevant and rapidly growing approach. SAEs decompose LLM activations into interpretable sparse features that can be probed for step-level properties, causally intervened on (steering), or used to guide generation.
+
+**P1 (SSAE, 2026)** is the most direct instantiation of this project's goal: explicit step-level SAEs with information bottleneck, linear probes predict step correctness and logicality. **P2** (code correctness, ICLR 2026) shows SAEs identify asymmetric error-detection directions (F1=0.821 for incorrect code, weak for correct code). **P4** (Pythia + SAE) establishes that CoT induces distinct, more interpretable feature activations only in capable (2.8B+) models -- a capacity threshold. **P12** (DeepSeek-R1 SAE analysis) identifies specific SAE features for uncertainty, exploration, self-reflection. **P14** (NeurIPS 2025 workshop) uses sentence-level SAE clustering to build an unsupervised taxonomy of reasoning behaviors.
+
+#### Approach 2: Linear Probes / Uncertainty Heads on Hidden States
+
+The second largest cluster. Lightweight classifiers on raw hidden states predict step-level correctness without SAE decomposition.
+
+**P5** (hidden state probes): binary probes on hidden states at intermediate steps predict final-answer correctness, enabling 24% token savings. **P6** (attention heads): probes on attention heads achieve up to 85% accuracy for step truthfulness, concentrated in middle layers. **P7** (representation geometry, ACL 2026): correct/incorrect traces diverge at late steps, ROC-AUC 0.87 for mid-reasoning prediction. **P11** (ReProbe): <10M-parameter uncertainty heads beat PRMs up to 810x larger. **P16** (sparse reward subsystem): "value neurons" and "dopamine neurons" provide mechanistic grounding for why probes work.
+
+Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 24% token reduction (P5), 810x size advantage (P11).
+
+#### Approach 3: Attribution Graphs / Circuit-Level Analysis
+
+**P3** (CRV, ICLR 2026 Oral) is the most rigorous mechanistic approach: builds attribution graphs using transcoders, finds distinct structural fingerprints for correct vs. incorrect CoT steps, shows causal interventions can repair faulty steps, and establishes that error signatures are domain-specific. **P13** (Thought Anchors, Nanda/Conmy) uses broadcasting attention heads and causal attribution to identify "anchor" sentences with outsized impact. **P26** (Causal Bypass) measures CoT-Mediated Influence via hidden-state patching, finding many QA items have CMI ~0.
+
+#### Approach 4: Trajectory / Geometric Analysis
+
+**P7** (Microsoft ACL 2026): step-specific representational subspaces, ROC-AUC 0.87. **P19** (Truth as Trajectory): layer-wise geometric displacement invariants distinguishing valid from spurious reasoning. **P27** (PRISM): joint semantic flow and hidden-state Gaussian mixture modeling, identifies failed trajectory types.
+
+#### Approach 5: Behavioral / Causal Intervention on CoT Text
+
+**P9** (NLDD/Faithfulness Decay): step corruption + logit drop, discovers Reasoning Horizon at 70-85% of chain length. **P25** (FUR): machine-unlearning of step content from parameters, step-level parametric faithfulness. **P24** (Concept Walk): concept direction projection per step, distinguishes decorative from faithful reasoning.
+
+---
+
+### 14.5 Signal Performance Comparison
+
+| Signal Type | Best Result | Scope | Training Required |
+|---|---|---|---|
+| SAE features + linear probe (step-level, P1) | 90.0% AIME (via steering) | Step-level | Yes (lightweight) |
+| Representation geometry / trajectory (P7) | ROC-AUC 0.87 | Step-level | Minimal |
+| Attention head probe (P6) | Up to 85% step truthfulness | Step-level | Yes |
+| Uncertainty heads (P11) | Matches PRMs 810x larger | Step-level | Yes (self-supervised) |
+| Hidden state linear probe (P5) | High accuracy, 24% token savings | Step-level | Yes |
+| SAE directions for code correctness (P2) | F1 0.821 (error detection) | Token/prompt-level | Yes |
+| Sparse reward neurons (P16) | ~80% per-layer (P15 SWIFT) | Token-level | Yes |
+| Attribution graph classifier (P3) | Highly predictive (causal) | Step-level | Yes |
+| Step corruption / NLDD (P9) | Identifies Reasoning Horizon | Step-level | No (post-hoc) |
+
+---
+
+### 14.6 Open Questions Most Relevant to This Project
+
+1. **SAE probe vs. circuit analysis is unexplored.** P3 (CRV) does circuit-level analysis with transcoders, not SAEs. Combining SAE features with attribution graphs has not been attempted.
+
+2. **Correctness direction asymmetry (P2)** holds for code: SAEs reliably detect incorrect steps but are weaker at confirming correct ones. Whether this asymmetry holds for mathematical reasoning is unknown.
+
+3. **Capacity threshold (P4):** SAE-based CoT signals appear only in models above ~2.8B parameters (Pythia scale). The SSAE backbone (Qwen2.5-0.5B) is below this threshold -- though the SSAE's step-level training may compensate.
+
+4. **The Reasoning Horizon (P9):** mechanistic signals may degrade after 70-85% of chain length, constraining where step-level probes are useful.
+
+5. **Probe generalization across domains (P28)** is weak: probes trained on factual tasks fail on math. Step-level probes need to be trained on the same task distribution -- our Math-Shepherd-trained probe vs. ProcessBench is exactly this generalization gap.
+
+6. **Attention heads vs. residual stream:** P6 finds middle-layer attention heads carry step truthfulness signals; P5 uses residual stream hidden states. Which substrate is more informative for step-level correctness is an open empirical question.
+
+7. **Next-step prediction as auxiliary signal:** our Future-SSAE experiments (§10) address a gap not covered by any existing paper -- no work has used a next-step prediction objective to make SAE latents sensitive to trajectory-level information flow between steps.
+
+---
+
+## 13. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

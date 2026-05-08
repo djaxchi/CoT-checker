@@ -137,37 +137,60 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "=== [3/3] Train PTB variants ==="
 
-_train() {
-    local name=$1 gpu=$2; shift 2
-    local ckpt_dir="$PTB_CKPT_BASE/${name}"
-    mkdir -p "$ckpt_dir"
-    if [ -f "$ckpt_dir/best.pt" ]; then
-        echo "  [$name] Checkpoint exists, skipping."
-        return 0
-    fi
-    echo "  [$name] Training on GPU $gpu ..."
-    CUDA_VISIBLE_DEVICES=$gpu python scripts/train_predictive_transition_bottleneck.py \
-        --train-data    "$TRANS_TRAIN" \
-        --val-data      "$TRANS_VAL" \
-        --output-dir    "$ckpt_dir" \
-        --d             896 \
-        --epochs        30 \
-        --batch-size    2048 \
-        --lr            1e-3 \
-        --device        cuda \
-        --calib-batches 50 \
-        "$@" \
-        > "$ckpt_dir/train.log" 2>&1 &
-    echo $!
-}
+_TRAIN_ARGS="--train-data $TRANS_TRAIN --val-data $TRANS_VAL --d 896 --epochs 30 --batch-size 2048 --lr 1e-3 --device cuda --calib-batches 50"
 
-PID_NO_L1=$( _train "no_l1"           0  --dwa-mode no_l1                                             )
-PID_DWA_C=$( _train "dwa_calibrated"  1  --dwa-mode dwa_calibrated_mean_l1                            )
-PID_ACTF=$(  _train "active_fraction"  2  --dwa-mode dwa_active_fraction --l1-target-active-frac 0.25  )
-PID_TOPK=$(  _train "topk"             3  --dwa-mode topk               --l1-k 50                     )
+PIDS=()
 
-for pid in $PID_NO_L1 $PID_DWA_C $PID_ACTF $PID_TOPK; do
-    [ -n "$pid" ] && wait "$pid" || true
+mkdir -p "$PTB_CKPT_BASE/no_l1"
+if [ -f "$PTB_CKPT_BASE/no_l1/best.pt" ]; then
+    echo "  [no_l1] Checkpoint exists, skipping."
+else
+    echo "  [no_l1] Training on GPU 0 ..."
+    CUDA_VISIBLE_DEVICES=0 python scripts/train_predictive_transition_bottleneck.py \
+        $_TRAIN_ARGS --output-dir "$PTB_CKPT_BASE/no_l1" \
+        --dwa-mode no_l1 \
+        > "$PTB_CKPT_BASE/no_l1/train.log" 2>&1 &
+    PIDS+=($!)
+fi
+
+mkdir -p "$PTB_CKPT_BASE/dwa_calibrated"
+if [ -f "$PTB_CKPT_BASE/dwa_calibrated/best.pt" ]; then
+    echo "  [dwa_calibrated] Checkpoint exists, skipping."
+else
+    echo "  [dwa_calibrated] Training on GPU 1 ..."
+    CUDA_VISIBLE_DEVICES=1 python scripts/train_predictive_transition_bottleneck.py \
+        $_TRAIN_ARGS --output-dir "$PTB_CKPT_BASE/dwa_calibrated" \
+        --dwa-mode dwa_calibrated_mean_l1 \
+        > "$PTB_CKPT_BASE/dwa_calibrated/train.log" 2>&1 &
+    PIDS+=($!)
+fi
+
+mkdir -p "$PTB_CKPT_BASE/active_fraction"
+if [ -f "$PTB_CKPT_BASE/active_fraction/best.pt" ]; then
+    echo "  [active_fraction] Checkpoint exists, skipping."
+else
+    echo "  [active_fraction] Training on GPU 2 ..."
+    CUDA_VISIBLE_DEVICES=2 python scripts/train_predictive_transition_bottleneck.py \
+        $_TRAIN_ARGS --output-dir "$PTB_CKPT_BASE/active_fraction" \
+        --dwa-mode dwa_active_fraction --l1-target-active-frac 0.25 \
+        > "$PTB_CKPT_BASE/active_fraction/train.log" 2>&1 &
+    PIDS+=($!)
+fi
+
+mkdir -p "$PTB_CKPT_BASE/topk"
+if [ -f "$PTB_CKPT_BASE/topk/best.pt" ]; then
+    echo "  [topk] Checkpoint exists, skipping."
+else
+    echo "  [topk] Training on GPU 3 ..."
+    CUDA_VISIBLE_DEVICES=3 python scripts/train_predictive_transition_bottleneck.py \
+        $_TRAIN_ARGS --output-dir "$PTB_CKPT_BASE/topk" \
+        --dwa-mode topk --l1-k 50 \
+        > "$PTB_CKPT_BASE/topk/train.log" 2>&1 &
+    PIDS+=($!)
+fi
+
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || echo "WARNING: variant pid=$pid exited non-zero"
 done
 echo "  All variants done."
 echo ""

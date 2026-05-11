@@ -16,7 +16,7 @@ MODELS = [
 for model_id in MODELS:
     print(f"\nDownloading {model_id} ...")
     AutoTokenizer.from_pretrained(model_id)
-    AutoModelForCausalLM.from_pretrained(model_id, torch_dtype="float16")
+    AutoModelForCausalLM.from_pretrained(model_id, dtype="float16")
     print(f"  done: {model_id}")
 
 print("\nAll models downloaded.")

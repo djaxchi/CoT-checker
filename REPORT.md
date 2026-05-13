@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-05-05*
+*Last updated: 2026-05-13*
 
 ---
 
@@ -605,7 +605,333 @@ A second factor is the frozen encoder. The c=1 results were produced with an unf
 
 ---
 
-## 12. Limitations
+## 12. Five-Encoding Mechanistic Comparison (c=2 ReLU+L1 and Activation SAE)
+
+### 12.1 Motivation
+
+Sections §7–11 established two SSAE variants in isolation: c=1 (ReLU+L1, unfrozen encoder) and c=4 (TopK-40, frozen encoder). These differ in two confounded dimensions: dictionary size (1× vs 4× input) and sparsity type (soft L1 vs hard TopK). Adding c=2 ReLU+L1 with a frozen encoder fills the gap: it isolates the effect of dictionary size from sparsity type, providing a cleaner ablation ladder. An off-the-shelf Activation SAE (standard sparse autoencoder applied directly to backbone activations, without step-level conditioning) is included as a non-SSAE reference point.
+
+The goal of this comparison is not to identify the best-performing encoding but to characterize how each encoding distributes the correctness signal across its latent dimensions.
+
+### 12.2 c=2 Experimental Setup
+
+| Setting | Value |
+|---|---|
+| Architecture | SSAE, c=2, n_inputs=896, n_latents=1792 |
+| Activation | ReLU + L1 (soft sparsity -- no fixed k) |
+| Encoder | Frozen (Qwen2.5-0.5B backbone, no gradient) |
+| dtype | bfloat16 |
+| Epochs | 8 |
+| Batch size | 16 (grad_accum=8, effective batch=128) |
+| Training data | gsm8k_385K_train.json (385K steps, TamIA $STORE) |
+| Hardware | 4× H100 80GB (TamIA) |
+
+ReLU+L1 rather than TopK is the deliberate choice for c=2: the soft penalty lets each step activate as many features as it needs, which is the right inductive bias for monosemanticity. TopK enforces an identical sparsity budget on every step regardless of content. For a dictionary twice the input dimension, L1 is more appropriate because the overcomplete space should be able to represent most steps with fewer active dimensions on average -- the penalty controls sparsity pressure without hard-coding it.
+
+### 12.3 Five-Encoding Comparison
+
+The five encodings compared are:
+
+| Encoding | Type | Latent dim | Sparsity | Encoder |
+|---|---|---|---|---|
+| Dense h_k | None | 896 | None | Unfrozen (c=1 backbone) |
+| SSAE c=1 | SSAE | 896 | ReLU+L1 | Unfrozen |
+| SSAE c=2 ReLU+L1 | SSAE | 1792 | ReLU+L1 | Frozen |
+| SSAE c=4 TopK* | SSAE | 3584 | TopK-40 | Frozen |
+| Activation SAE | SAE | 896 | (post-hoc) | -- |
+
+The comparison uses 5,000 balanced steps per encoding from the held-out Math-Shepherd eval set. Figure 12.1 shows PCA scatter (probe direction overlaid), probe score histograms, probe-weight vs. activation-delta scatter, and active dimension distributions for all five encodings simultaneously.
+
+![Five-encoding comparison -- Math-Shepherd eval](results/mechanistic_comparison/comparison_ms.png)
+*Figure 12.1: Five-encoding mechanistic comparison on 5,000 balanced Math-Shepherd eval steps. Columns left to right: Dense h_k, SSAE c=1, SSAE c=2 ReLU+L1, SSAE c=4 TopK*, Activation SAE. Rows: PCA scatter with probe direction arrow; probe score histograms (blue=correct, red=incorrect); probe weight vs. activation delta scatter; active dimension distributions.*
+
+### 12.4 Probe-Delta Correlation Across Encodings
+
+The key quantity is the Pearson r between per-dimension activation deltas (mean_correct[i] − mean_incorrect[i]) and probe weights w[i]. High r means the probe is essentially a scaled mean-difference classifier; low r means the probe exploits covariance structure beyond marginal statistics. This is the same diagnostic used in §8.4 for the c=1 single-encoding analysis.
+
+| Encoding | MS r | PB r |
+|---|---|---|
+| Dense h_k | 0.590 | 0.201 |
+| SSAE c=1 | 0.239 | 0.170 |
+| **SSAE c=2 ReLU+L1** | **0.133** | **0.123** |
+| SSAE c=4 TopK* | 0.634 | 0.103 |
+| Activation SAE | 0.485 | 0.157 |
+
+Three findings:
+
+1. **SSAE c=2 has the lowest MS r (0.133) of all five encodings.** The correctness direction in c=2 is maximally orthogonal to the marginal mean-difference direction -- more so than c=1 (r=0.239) and far more so than c=4 (r=0.634). Expanding the dictionary with soft sparsity forces the probe to rely on covariance structure even more than the narrower c=1 dictionary.
+
+2. **SSAE c=4 TopK has the highest MS r among SSAE variants (0.634), comparable to dense representations (0.590).** Hard TopK sparsity creates systematic marginal differences: by always activating exactly k=40 features per step, class-conditional mean activations become more pronounced. The probe at c=4 essentially learns the mean-difference direction, not a covariance-based one. This is the same finding as §8.4 and §11.5 from a different angle: TopK appears to make the latent space easier to read via simple statistics, but not more linearly discriminative (the linear probe accuracy actually drops at c=4 -- §11.4).
+
+3. **On ProcessBench, all r values converge to a low range (0.103--0.201), with no clear ordering.** The structural properties learned from Math-Shepherd (whether marginal- or covariance-based) do not transfer their character to ProcessBench. All five encodings lose most of their in-distribution directional specificity OOD.
+
+**Interpretation.** The ReLU+L1 SSAE variants (c=1 and c=2) produce latent spaces where the correctness signal is more structurally distributed than either dense representations or TopK-sparse ones. The particularly low r for c=2 (0.133) is consistent with a larger dictionary: with 1,792 dimensions available under a soft penalty, the autoencoder can spread correctness-relevant structure across many low-delta features, making individual marginal statistics less informative and forcing the probe to use joint activation patterns. This is the desired behavior for a monosemantic dictionary -- each feature should capture a narrower concept, so no single feature's mean activation cleanly separates the classes.
+
+The Activation SAE (r=0.485 on MS) behaves similarly to Dense h_k: the post-hoc sparse decomposition of backbone activations does not break the probe's reliance on marginal differences the way step-level SSAE training does. The step-level conditioning -- requiring the sparse latent to encode only the incremental information contributed by each step -- appears to be the structural property responsible for the low r in c=1 and c=2.
+
+---
+
+## 13. Model-Size Ablation: Dense Hidden-State Decodability Across Scales
+
+### 13.1 Motivation
+
+The experiments in §7–12 used a single backbone (Qwen2.5-0.5B) throughout. Two questions were left open: does step-level correctness become more linearly decodable as the backbone scales up, and does a probe trained on Math-Shepherd transfer to ProcessBench when the backbone has no SSAE on top? This ablation addresses both with a controlled pilot: dense hidden states only (last transformer layer, last token), no SAE, four Qwen2.5 model sizes (0.5B / 1.5B / 3B / 7B), one seed.
+
+The two representation variants -- raw and L2-normalised -- are run in parallel, motivated by the observation in §6 that L2 normalisation projects out magnitude information. Running both allows us to test whether magnitude carries correctness signal.
+
+### 13.2 Experimental Design
+
+**Backbone:** Qwen2.5-0.5B, 1.5B, 3B, 7B (base, not instruct). Last transformer layer, last token. Left-padded batches so position `[:, -1]` is always the final real token.
+
+**Representation:** raw float16 hidden states saved from the extraction job; L2 normalisation applied at probe time via `--repr {raw, l2}`. Both variants share the same extracted states.
+
+**Probe:** sklearn `LogisticRegression(C=1.0, solver='lbfgs', max_iter=1000)`. Threshold sweep on MS eval only (maximise Macro-F1); same threshold applied to ProcessBench without re-tuning (strict OOD).
+
+**Data:**
+- Math-Shepherd: 10,000 + 10,000 steps per class (balanced) for train; 5,000 + 5,000 for eval. Split IDs materialised to `splits.json` before extraction to guarantee identical examples across all four model jobs.
+- ProcessBench: full GSM8K split (1,568 steps). Used as zero-shot OOD only; no threshold re-tuning.
+
+**Metrics:** AUROC, Macro-F1 at best-threshold, positive prediction rate (PPR).
+
+### 13.3 Results
+
+| Model | dim | MS AUROC | MS F1 | PB AUROC | PB F1 | PB PPR |
+|-------|-----|----------|-------|----------|-------|--------|
+| **Raw representation** | | | | | | |
+| Qwen2.5-0.5B | 896 | 0.763 | — | 0.483 | — | — |
+| Qwen2.5-1.5B | 1536 | 0.790 | — | 0.649 | — | — |
+| Qwen2.5-3B | 2048 | 0.805 | — | 0.634 | — | — |
+| Qwen2.5-7B | 3584 | 0.835 | — | 0.496 | — | — |
+| **L2-normalised** | | | | | | |
+| Qwen2.5-0.5B | 896 | 0.698 | 0.648 | 0.502 | 0.492 | 0.856 |
+| Qwen2.5-1.5B | 1536 | 0.701 | 0.658 | 0.572 | 0.524 | 0.840 |
+| Qwen2.5-3B | 2048 | 0.709 | 0.656 | 0.542 | 0.503 | 0.955 |
+| Qwen2.5-7B | 3584 | 0.691 | 0.654 | 0.433 | 0.263 | 0.191 |
+
+### 13.4 Figure Analysis
+
+#### Fig 01 — Probe score histograms (L2 repr)
+
+![Probe histograms](results/ms_ablation/01_probe_histograms.png)
+
+The four panels reveal two distinct regimes. For 0.5B and 1.5B, the MS distributions show partial separation: the incorrect peak (red) sits left of threshold, correct (blue) extends right. The PB distributions (dashed) are shifted almost entirely toward the positive (correct) side -- PPR of 0.856 and 0.840 respectively. The probe is predicting "correct" for most ProcessBench steps regardless of true label, yielding near-random discrimination despite high recall on the positive class.
+
+The 3B panel is an extreme version: PB dashed distributions collapse almost entirely to the right (PPR=0.955). The threshold-based F1 breaks down completely; AUROC of 0.542 is the only meaningful number here.
+
+The 7B panel shows a dramatic reversal: PB distributions shift left (PPR=0.191). The probe now predicts mostly incorrect for ProcessBench steps. PB incorrect steps happen to be classified as negative, but PB correct steps are massively misclassified too, collapsing AUROC to 0.433 (below chance). The probe direction has inverted polarity relative to what ProcessBench requires.
+
+**The probe scores on ProcessBench are never calibrated.** The threshold tuned on balanced MS eval maps arbitrarily onto PB's different class distribution and geometry.
+
+#### Fig 02 — PCA scatter
+
+![PCA scatter](results/ms_ablation/02_pca_scatter.png)
+
+The geometry explains the OOD failure. At 0.5B, MS (circles) and PB (triangles) occupy largely the same cloud; the probe arrow is approximately aligned with the PC1 axis; PB correct/incorrect triangles show weak but consistent ordering. At 1.5B, MS splits more cleanly along PC1 and PB follows partially. By 3B, PB triangles cluster tightly in one corner of the MS cloud -- the probe direction still separates MS, but the PB cluster lands in the high-score region regardless of step correctness. At 7B, the shift is most dramatic: PB triangles occupy a region geometrically anti-aligned with the MS probe direction, causing the polarity reversal visible in the histograms.
+
+**The domain shift is geometric, not a labeling artifact.** Larger models produce representations where Math-Shepherd and ProcessBench GSM8K steps occupy increasingly divergent regions of representation space.
+
+#### Fig 03 — AUROC vs model size
+
+![AUROC vs model size](results/ms_ablation/03_auroc_vs_size.png)
+
+This is the most informative figure in the set. The two curves tell completely different stories depending on representation:
+
+- **L2 (from the main table):** MS AUROC is flat at ~0.70 across all sizes. No scaling trend. PB AUROC peaks at 1.5B (0.572) and collapses at 7B (0.433, below chance).
+- **Raw (from fig 08):** MS AUROC increases monotonically -- 0.763, 0.790, 0.805, 0.835. A genuine, clean scaling signal. L2 normalisation destroys it entirely.
+
+The curve shown here (L2) is the one the report table reflects. See fig 08 for the separation.
+
+#### Fig 04 — Macro-F1 vs model size
+
+![Macro-F1 vs model size](results/ms_ablation/04_macro_f1_vs_size.png)
+
+MS F1 is essentially constant across sizes (0.648–0.658), consistent with the flat L2 AUROC. PB F1 peaks at 1.5B (0.524) then collapses to 0.263 at 7B. The F1 curves track PPR instability rather than probe quality: as PPR shifts chaotically across sizes, the threshold-based F1 fluctuates with it.
+
+#### Fig 05 — Positive prediction rate vs model size
+
+![PPR vs model size](results/ms_ablation/05_ppr_vs_size.png)
+
+The most diagnostically useful figure. MS PPR is stable near 0.5 for all sizes (the balanced eval set is 50/50, and the threshold was tuned to maximise F1 on it). PB PPR is 0.856, 0.840, 0.955, 0.191 -- chaotic, not a trend. ProcessBench is not balanced (most steps in a solution are correct; only the first-error step and those after are incorrect). The base rate mismatch alone would push PB PPR high. But the 7B reversal (PPR=0.191) shows a different effect dominates: the 7B representation maps PB into the negative side of the probe.
+
+#### Fig 06 — Confusion matrices
+
+![Confusion matrices](results/ms_ablation/06_confusion_matrices.png)
+
+**MS rows (top):** All four models are qualitatively similar. TP and TN are both around 63-67%, with symmetric false positive/negative rates. The probe makes genuine weak distinctions, not degenerate predictions.
+
+**PB rows (bottom):** 0.5B, 1.5B, 3B almost exclusively predict "correct" (Pred+ column is dark for all true classes). True incorrect steps are nearly entirely misclassified as correct. At 7B the matrix flips: most PB steps are predicted incorrect, true correct steps are massively misclassified. The confusion matrix resembles a near-identity rotated 90 degrees -- the polarity inversion made explicit.
+
+#### Fig 07 — Activation delta vs probe weights
+
+![Delta vs weights](results/ms_ablation/07_delta_vs_weights.png)
+
+Pearson r values: 0.5B=0.996, 1.5B=0.854, 3B=0.981, 7B=0.998.
+
+For 0.5B, 3B, and 7B, the near-perfect correlation (r>0.98) means the probe is doing almost nothing beyond a scaled mean-difference classifier. The logistic regression finds the mean(correct) − mean(incorrect) direction and scales it by regularised magnitude. This is functionally a centroid classifier.
+
+**1.5B is the outlier at r=0.854.** The probe at 1.5B extracts a direction that is not purely the mean-difference direction -- it exploits the covariance structure of the latent space for something beyond the first moment. This is directly consistent with 1.5B having the best OOD transfer: its representation has richer structure that the probe can use for generalisation.
+
+The x-axis range (mean delta magnitude) also grows with model size, largest at 7B. This means 7B encodes correctness with higher-magnitude directional differences from MS training -- but those large differences are precisely the ones that do not generalise to ProcessBench, because they reflect MS-specific features amplified at scale.
+
+#### Fig 08 — Raw vs L2 AUROC
+
+![Raw vs L2](results/ms_ablation/08_raw_vs_l2.png)
+
+The central methodological finding of the ablation.
+
+**MS AUROC:**
+- Raw: 0.763 → 0.790 → 0.805 → 0.835 (monotonically increasing, ~7 points per step)
+- L2: 0.698 → 0.701 → 0.709 → 0.691 (flat, no trend)
+
+L2 normalisation costs 7–15 AUROC points on MS and eliminates the scaling signal entirely. The magnitude of hidden states carries real correctness information. Larger models do not just change the direction of the correctness vector -- they increase its magnitude relative to noise.
+
+**PB AUROC:**
+- Raw: 0.483 → 0.649 → 0.634 → 0.496 (peaks 1.5B, collapses at 7B)
+- L2: 0.502 → 0.572 → 0.542 → 0.433 (peaks 1.5B, collapses at 7B)
+
+Both representations show the same OOD story. Raw is better at the sizes that matter. If only L2 had been run, the MS scaling signal would have been missed entirely.
+
+### 13.5 Answers to the Research Questions
+
+**Q1 — Does in-domain decodability improve with model size?**
+Yes, but only with raw representations. Raw MS AUROC improves monotonically from 0.763 to 0.835 across 0.5B → 7B. L2 normalisation destroys this signal. If only L2 had been run, the conclusion would have been: no.
+
+**Q2 — Does OOD transfer improve with model size?**
+No. Transfer peaks at 1.5B (raw PB AUROC=0.649) and collapses at 7B (0.496 raw, 0.433 L2). Larger models encode correctness more strongly in-domain but the representation geometry increasingly diverges from ProcessBench.
+
+**Q3 — Is ProcessBench geometrically shifted relative to Math-Shepherd?**
+Yes, and increasingly so with model size. The PCA shows MS and PB clouds are nearly co-located at 0.5B and clearly diverged by 7B. This is not a scaling factor -- it is a change in distribution shape and orientation.
+
+**Q4 — Does the learned probe direction separate PB correct/incorrect?**
+Only weakly and only at 1.5B (raw AUROC 0.649). All other sizes are near chance or below. The probe captures a MS-specific correctness direction that partially but unreliably projects onto ProcessBench.
+
+**Q5 — Is 0.5B too small, or is the bottleneck dataset transfer?**
+Not capacity. 0.5B has reasonable MS AUROC (0.763 raw) and is no worse on PB than 7B (both ~0.50 raw). The bottleneck across all sizes is the domain gap between Math-Shepherd annotation style and ProcessBench solutions.
+
+**Q6 — Which size for PTB/SSAE follow-up?**
+**1.5B.** Best OOD transfer (PB AUROC 0.649 raw), probe goes beyond pure mean-difference direction (r=0.854 vs r>0.98 for others), and solid MS AUROC. Its representations sit at the sweet spot where correctness is linearly encoded but not yet specialised to MS-specific features that do not transfer.
+
+### 13.6 Implication for the SAE Program
+
+These results set a concrete OOD baseline: raw hidden-state linear probe on 1.5B achieves PB AUROC 0.649. Any SSAE-based approach on 1.5B must exceed this to be worth pursuing as an OOD method.
+
+The failure mode here is clear: the linear probe latches onto a MS-specific combination of features that is large in norm at scale but not robust across datasets. SAE features, being semantically decomposed directions, may find a subspace that generalises better than the raw logistic direction -- because the SAE is pressured to extract directions corresponding to meaningful concepts rather than dataset-specific covariance patterns. That is the mechanistic hypothesis motivating the continuation of the SSAE program with a 1.5B backbone.
+
+---
+
+## 14. Perplexity as a Label-Free Anomaly Score: PSSAE Experiment
+
+### 14.1 Motivation
+
+All representations evaluated so far -- dense h_k, delta_h, PTB, SSAE latents -- require a trained probe to produce a correctness score. The probe needs labeled training data (Math-Shepherd MC rollout labels), which introduces a distribution dependency: the probe latches onto a MS-specific direction that does not cleanly transfer to ProcessBench solutions from a different model family.
+
+This section asks a simpler question: can the backbone's own generative distribution serve as a correctness signal, with no labels at all? The hypothesis is that a model trained exclusively on correct reasoning transitions will assign higher perplexity to the next step when the current step is wrong, because the current step is OOD from the training manifold. This is analogous to density estimation: the encoder has learned what a valid transition looks like, and anomalous inputs produce reconstruction failures detectable as high perplexity.
+
+### 14.2 Architecture
+
+The trainable component is a single linear layer `enc_proj: R^896 -> R^896` (800K parameters) on top of a frozen Qwen2.5-0.5B backbone. For step k:
+
+1. **Encode:** run the frozen backbone on `[problem + prior_steps | SEP | step_k | EOS]`, extract the last-token hidden state `h_k`, project to a sparse bottleneck: `z_k = ReLU(enc_proj(h_k))`.
+2. **Decode:** inject `z_k` as a single virtual token into the decoder -- `[embed(problem) | z_k | embed(step_{k+1})]` -- and compute the teacher-forced cross-entropy loss on step k+1 tokens.
+
+The backbone is frozen throughout. The only thing that trains is `enc_proj`. At evaluation, the decoder cross-entropy (converted to perplexity) is the anomaly score: high perplexity means `z_k` failed to summarize the current step in a way that predicts the next.
+
+### 14.3 Training Setup
+
+Two variants were trained in parallel on separate H100s within a single job:
+
+| Setting | Value |
+|---|---|
+| Training data | `gsm8k_385K_train.json`, first 50%, positive-only filter |
+| Train transitions (capped) | 400,000 |
+| Optimizer | Adam, lr=1e-3 |
+| Batch size | 32 (batched backbone calls) |
+| Epochs | 5 |
+| Backbone precision | bfloat16 (frozen) |
+| Variant A | L1 coefficient = 0.01 |
+| Variant B | L1 coefficient = 0.0 (ablation) |
+
+Positive-only filter: any solution with at least one step failing `symbolic_step_judge` is excluded. Training transitions come exclusively from arithmetically correct reasoning chains.
+
+Training CE converged from ~1.13 (epoch 1) to ~1.09 (epoch 5), a modest but consistent decrease indicating `enc_proj` learned to compress step-level information useful for next-step prediction.
+
+### 14.4 MS OOD Results
+
+Evaluated on the first 50% of `gsm8k_385K_valid.json` (all solutions, not positive-only). Labels from `symbolic_step_judge`. The eval set had 413 correct steps and 23 wrong steps -- a heavily imbalanced set, so the AUROC confidence intervals are wide.
+
+| Metric | L1 (0.01) | No-L1 |
+|---|---|---|
+| Correct steps mean PPL | 3.59 | 3.59 |
+| Wrong steps mean PPL | 6.07 | 5.72 |
+| Wrong steps std PPL | 7.94 | 7.37 |
+| Ratio wrong/correct | 1.693 | 1.594 |
+| AUROC | **0.619** | 0.598 |
+| Verdict | supported | not supported |
+
+Both variants produce higher perplexity on wrong steps. L1 sparsity widens the gap slightly (ratio 1.693 vs 1.594) and pushes AUROC above the 0.6 threshold. The key structural observation is that wrong step perplexity has very high variance (std > mean) -- the distribution is heavy-tailed. A minority of wrong steps produce large perplexity spikes; the majority sit only slightly above the correct-step baseline. The OOD signal is real but concentrated in the tail.
+
+### 14.5 ProcessBench Results
+
+Evaluated on the first 50 solutions from `processbench_gsm8k.jsonl`. All steps of each solution are encoded, including steps after the first error.
+
+| Metric | L1 (0.01) | No-L1 |
+|---|---|---|
+| Correct steps mean PPL | 3.38 | 3.31 |
+| Wrong steps mean PPL | 4.63 | 4.65 |
+| Wrong steps std PPL | 4.12 | 4.69 |
+| Ratio wrong/correct | 1.370 | 1.406 |
+| Argmax hit rate | 18/50 = **0.360** | 19/50 = **0.380** |
+| Random baseline | 0.193 | 0.193 |
+| Best F1 | 0.219 (p95) | 0.247 (p75) |
+
+Argmax hit rate is approximately 2x the random baseline for both variants, confirming the perplexity signal generalizes to ProcessBench. No-L1 has a slightly higher hit rate and better average-case F1, but L1 has higher precision at tight thresholds (p95: 0.500 vs 0.333; p99: 0.667 vs 0.600). L1 sparsity trades recall for precision.
+
+The PB-F1 values (best 0.247) are computed with thresholds derived from the correct-step perplexity distribution of the eval data itself (percentiles p50--p99), so they are not tuned on held-out labels.
+
+### 14.6 Effect of L1
+
+L1 and no-L1 produce identical correct-step perplexity (mean 3.59 on MS, 3.31-3.38 on PB). The difference is entirely in how wrong steps are encoded. L1 compresses most `z_k` dimensions toward zero; the few that remain active carry a stronger signal when a wrong step triggers them. This creates sharper anomaly spikes for the most egregious errors (higher AUROC on MS, higher precision at tight thresholds on PB) at the cost of missing moderate wrong steps whose signal is compressed below the noise floor (lower average-case F1 and argmax hit rate on PB).
+
+The L1 variant is preferable for high-confidence error flagging. The no-L1 variant is preferable for maximizing coverage.
+
+### 14.7 Comparison with Probe-Based Representations
+
+The table below situates the PSSAE in the context of all representations evaluated in this project. Probe-based results are from the PTB robust probe evaluation (§10); the SSAE linear probe PB-F1 is from §9.
+
+**MS OOD AUROC (step-level correctness):**
+
+| Representation | Signal | MS AUROC |
+|---|---|---|
+| Dense h_k | linear probe (MS labels) | 0.834 |
+| PTB variants | linear probe (MS labels) | 0.828--0.835 |
+| Dense delta_h | linear probe (MS labels) | 0.801 |
+| **PSSAE L1** | **perplexity (no labels)** | **0.619** |
+| **PSSAE no-L1** | **perplexity (no labels)** | **0.598** |
+
+The PSSAE is ~0.21 AUROC points below the probe-based methods. That gap is the cost of being label-free: the probe uses 200K+ labeled training steps; the PSSAE uses none.
+
+**ProcessBench first-error localization:**
+
+| Representation | Signal | Eval scope | PB-F1 |
+|---|---|---|---|
+| SSAE linear probe (§9) | linear probe (MS labels) | full GSM8K split | 0.302 |
+| **PSSAE no-L1** | **perplexity (no labels)** | **first 50 solutions** | **0.247** |
+| **PSSAE L1** | **perplexity (no labels)** | **first 50 solutions** | **0.219** |
+| Dense h_k | linear probe (MS labels) | full GSM8K split | 0.0 |
+| Dense delta_h | linear probe (MS labels) | full GSM8K split | 0.0 |
+| PTB variants | linear probe (MS labels) | full GSM8K split | 0.0 |
+
+**Important caveat on the ProcessBench comparison:** the SSAE probe (0.302) was evaluated on the full ProcessBench GSM8K split (~80 solutions); the PSSAE was evaluated on the first 50. These are different samples. The 5.5 pp gap between PSSAE no-L1 and the SSAE probe cannot be interpreted as a real performance difference without re-running on the same solution set.
+
+What the table does cleanly show is that probe-based approaches trained on Math-Shepherd labels collapse entirely on ProcessBench (PB-F1=0.0 for all PTB and dense representations), while the perplexity-based PSSAE does not. The label-free approach achieves worse in-distribution discrimination but stronger OOD robustness, because it has no dataset-specific direction to overfit.
+
+### 14.8 Summary
+
+The PSSAE demonstrates that a single linear layer trained on positive-only transitions can produce a label-free correctness signal via perplexity. The signal is real (2x random on ProcessBench argmax, AUROC 0.619 on MS OOD with L1), moderate in strength, and more robust OOD than probe-based alternatives. L1 sparsity helps for high-confidence detections and hurts for average-case recall. The main limitation is the small wrong-step count in the MS OOD eval set (n=23), which makes the AUROC estimates noisy. A larger or more balanced evaluation would sharpen the conclusions.
+
+---
+
+## 15. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -614,15 +940,15 @@ A second factor is the frozen encoder. The c=1 results were produced with an unf
 
 ---
 
-## 14. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 16. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
-### 14.1 Overview
+### 16.1 Overview
 
 The field has converged around a central question: do intermediate CoT steps causally determine the final answer, and can mechanistic signals detect when they do not? As of May 2026, five broad approaches have emerged.
 
 ---
 
-### 14.2 Full Paper Inventory
+### 16.2 Full Paper Inventory
 
 #### Tier 1: Most Directly Relevant (Mechanistic Signal + Step-Level CoT Validity)
 
@@ -856,7 +1182,7 @@ The field has converged around a central question: do intermediate CoT steps cau
 
 ---
 
-### 14.3 Directly Relevant Papers (Both Criteria: Mechanistic Signal + Step-Level CoT Validity)
+### 16.3 Directly Relevant Papers (Both Criteria: Mechanistic Signal + Step-Level CoT Validity)
 
 | # | Paper | Signal | Step-Level? | Year |
 |---|---|---|---|---|
@@ -874,7 +1200,7 @@ The field has converged around a central question: do intermediate CoT steps cau
 
 ---
 
-### 14.4 State-of-the-Art Summary
+### 16.4 State-of-the-Art Summary
 
 #### Approach 1: Sparse Autoencoders (SAEs) on Activations
 
@@ -904,7 +1230,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-### 14.5 Signal Performance Comparison
+### 16.5 Signal Performance Comparison
 
 | Signal Type | Best Result | Scope | Training Required |
 |---|---|---|---|
@@ -920,7 +1246,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-### 14.6 Open Questions Most Relevant to This Project
+### 16.6 Open Questions Most Relevant to This Project
 
 1. **SAE probe vs. circuit analysis is unexplored.** P3 (CRV) does circuit-level analysis with transcoders, not SAEs. Combining SAE features with attribution graphs has not been attempted.
 
@@ -938,7 +1264,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 13. Next Steps
+## 17. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

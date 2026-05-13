@@ -45,17 +45,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.saes.ssae import SSAE
 
 
-def build_records(row: dict, row_idx: int) -> list[dict]:
+def build_records(row: dict, row_idx: int, full_solution: bool = False) -> list[dict]:
     """Convert one ProcessBench row into per-step encoding records.
 
-    Includes steps up to and including the first error (or all steps if correct).
-    Steps after the first error are excluded.
+    By default, includes steps up to and including the first error (or all
+    steps if correct).  With full_solution=True, encodes all steps regardless
+    of label position -- required so that h_{k+1} exists for the error step.
+    Steps after the first error are labeled 0 (incorrect).
     """
     problem = row["problem"]
     steps = row["steps"]
     label = row["label"]  # -1 = all correct, k = 0-indexed first error position
 
-    n_include = len(steps) if label == -1 else label + 1
+    n_include = len(steps) if (label == -1 or full_solution) else label + 1
     records = []
     prior: list[str] = []
 
@@ -117,6 +119,10 @@ def parse_args():
                    help="Path to a pre-exported JSONL file (one ProcessBench row per line). "
                         "Use this on compute nodes that have no Hub access. "
                         "Export with: scripts/slurm/export_processbench.py")
+    p.add_argument("--full-solution", action="store_true",
+                   help="Encode all steps (including those after the first error). "
+                        "Required for PTB reconstruction-error anomaly detection so "
+                        "that h_{k+1} exists for the error step.")
     p.add_argument("--output", default="results/probe_data/processbench_gsm8k.npz")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--max-seq-len", type=int, default=2048)
@@ -156,7 +162,7 @@ def main():
 
     for row_idx, row in enumerate(ds):
         solution_labels[row_idx] = row["label"]
-        recs = build_records(row, row_idx)
+        recs = build_records(row, row_idx, full_solution=args.full_solution)
         n_steps_encoded[row_idx] = len(recs)
         all_records.extend(recs)
 

@@ -30,7 +30,7 @@ export TOKENIZERS_PARALLELISM=false
 
 COMMON_ARGS=(
     --backbone               "Qwen/Qwen2.5-0.5B"
-    --hf-cache               "$STORE/hf_cache"
+    --hf-cache               "$STORE/hf_cache/hub"
     --train-json             "$STORE/data/gsm8k_385K_train.json"
     --valid-json             "$STORE/data/gsm8k_385K_valid.json"
     --pb-jsonl               "$SCRATCH_BASE/processbench/processbench_gsm8k.jsonl"

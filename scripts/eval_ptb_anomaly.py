@@ -56,31 +56,36 @@ class LinearProbe(nn.Module):
 def load_pb_solutions(pb_path: str, n_solutions: int) -> dict[int, dict]:
     """Load ProcessBench dense npz, return dict keyed by solution_id."""
     d = np.load(pb_path)
-    h          = d["latents"].astype(np.float32)
-    sol_ids    = d["solution_ids"].astype(int)
-    step_pos   = d["step_positions"].astype(int)
-    step_lbls  = d["step_labels"].astype(int)    # 1=correct, 0=wrong
-    sol_lbls   = d["solution_labels"].astype(int) # 1=clean, 0=has error
+    h         = d["latents"].astype(np.float32)
+    sol_ids   = d["solution_ids"].astype(int)
+    step_pos  = d["step_positions"].astype(int)
+    step_lbls = d["step_labels"].astype(int)   # 1=correct, 0=wrong
 
-    # Group rows by solution
+    # solution_labels may be per-solution (size=n_solutions) or per-step.
+    # Derive robustly from step labels: sol_lbl=1 (clean) if all steps correct.
+    sol_lbls_arr = d["solution_labels"].astype(int) if "solution_labels" in d.files else None
+
     raw: dict[int, list] = {}
     for i in range(len(h)):
         sid = sol_ids[i]
         if sid not in raw:
             raw[sid] = []
-        raw[sid].append({
-            "h": h[i], "step_pos": step_pos[i],
-            "step_lbl": step_lbls[i], "sol_lbl": sol_lbls[i],
-        })
+        raw[sid].append({"h": h[i], "step_pos": step_pos[i], "step_lbl": step_lbls[i]})
 
     solutions: dict[int, dict] = {}
     for sid in sorted(raw.keys())[:n_solutions]:
-        rows = sorted(raw[sid], key=lambda r: r["step_pos"])
+        rows  = sorted(raw[sid], key=lambda r: r["step_pos"])
+        lbls  = np.array([r["step_lbl"] for r in rows], dtype=int)
+        # Prefer solution_labels array if safely indexable, else derive from steps
+        if sol_lbls_arr is not None and sid < len(sol_lbls_arr):
+            sol_lbl = int(sol_lbls_arr[sid])
+        else:
+            sol_lbl = int(np.all(lbls == 1))   # 1=clean, 0=has error
         solutions[sid] = {
-            "h":          np.stack([r["h"]        for r in rows]),
-            "step_pos":   np.array([r["step_pos"] for r in rows], dtype=int),
-            "step_lbls":  np.array([r["step_lbl"] for r in rows], dtype=int),
-            "sol_lbl":    rows[0]["sol_lbl"],
+            "h":         np.stack([r["h"]        for r in rows]),
+            "step_pos":  np.array([r["step_pos"] for r in rows], dtype=int),
+            "step_lbls": lbls,
+            "sol_lbl":   sol_lbl,
         }
     return solutions
 

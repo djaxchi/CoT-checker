@@ -5,8 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --gpus=h100:1
+#SBATCH --mem=64G
 #SBATCH --output=results/logs/%x-%j.out
 #SBATCH --error=results/logs/%x-%j.err
 
@@ -34,4 +33,4 @@ python scripts/eval_ptb_vs_probe.py \
     --ptb-ckpt    "$STORE/results/checkpoints/ptb_robust/no_l1/best.pt" \
     --probe-ckpt  "$STORE/results/ptb_robust_probes/dense_h_linear_probe_seed42.pt" \
     --n-solutions 50 \
-    --device      cuda
+    --device      cpu

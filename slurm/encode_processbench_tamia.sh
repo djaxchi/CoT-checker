@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=pb_encode
-#SBATCH --account=aip-${PI_NAME}
+#SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --gpus=h100:4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=0
 #SBATCH --time=01:00:00
 #SBATCH --output=%x-%j.out
 
@@ -12,16 +12,19 @@ set -euo pipefail
 
 module load StdEnv/2023 python/3.12
 
-PROJECT_ROOT="$HOME/cot-mech-benchmark"
+PROJECT_ROOT="$HOME/CoT-checker"
 RUN_ROOT="$SCRATCH/cot_mech/prestudy_v1"
 RAW_PB_FILE="$SCRATCH/cot_mech/raw/processbench/gsm8k.json"
 OUT_DIR="$RUN_ROOT/cache/qwen2_5_1_5b_processbench"
+
+# Path to pre-cached Qwen2.5-1.5B weights -- update if stored elsewhere
 MODEL_NAME_OR_PATH="Qwen/Qwen2.5-1.5B"
+HF_CACHE="$SCRATCH/hf_cache"
 
 mkdir -p "$OUT_DIR"
 
-export HF_HOME="$SCRATCH/hf_cache"
-export TRANSFORMERS_CACHE="$SCRATCH/hf_cache"
+export HF_HOME="$HF_CACHE"
+export TRANSFORMERS_CACHE="$HF_CACHE"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false

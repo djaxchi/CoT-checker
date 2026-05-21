@@ -45,9 +45,15 @@ out_dir.mkdir(parents=True, exist_ok=True)
 def _check_schema(path: Path) -> bool:
     if not path.exists():
         return False
-    with open(path) as f:
-        row = json.loads(f.readline())
-    return isinstance(row.get("question"), dict)
+    try:
+        with open(path) as f:
+            line = f.readline().strip()
+        if not line:
+            return False
+        row = json.loads(line)
+        return isinstance(row.get("question"), dict)
+    except (json.JSONDecodeError, OSError):
+        return False
 
 train_ok = _check_schema(out_dir / "train.jsonl")
 test_ok = _check_schema(out_dir / "test.jsonl")

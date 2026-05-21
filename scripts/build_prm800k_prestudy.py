@@ -355,7 +355,9 @@ def sample_disjoint_train_val(
             neg[:n_neg_val],
         )
 
-    # Strict problem-level disjointness
+    # Strict problem-level disjointness.
+    # Assign each problem_id to either val or train once, shared across pos and neg.
+    # This prevents a problem from appearing in pos_train and neg_val (or vice versa).
     pos_by_pid: dict[str, list[dict]] = defaultdict(list)
     neg_by_pid: dict[str, list[dict]] = defaultdict(list)
     for ex in pos_examples:
@@ -363,27 +365,26 @@ def sample_disjoint_train_val(
     for ex in neg_examples:
         neg_by_pid[ex["problem_id"]].append(ex)
 
-    all_pos_pids = list(pos_by_pid.keys())
-    all_neg_pids = list(neg_by_pid.keys())
-    rng.shuffle(all_pos_pids)
-    rng.shuffle(all_neg_pids)
+    all_pids = list(set(pos_by_pid.keys()) | set(neg_by_pid.keys()))
+    rng.shuffle(all_pids)
 
-    # Greedily allocate val problems first, then train
-    pos_val_pool: list[dict] = []
-    pos_train_pool: list[dict] = []
-    for pid in all_pos_pids:
-        if len(pos_val_pool) < n_pos_val:
-            pos_val_pool.extend(pos_by_pid[pid])
-        else:
-            pos_train_pool.extend(pos_by_pid[pid])
+    # Greedily fill val until both pos_val and neg_val quotas are met.
+    val_pids: set[str] = set()
+    val_pos_count = 0
+    val_neg_count = 0
+    for pid in all_pids:
+        if val_pos_count >= n_pos_val and val_neg_count >= n_neg_val:
+            break
+        val_pids.add(pid)
+        val_pos_count += len(pos_by_pid.get(pid, []))
+        val_neg_count += len(neg_by_pid.get(pid, []))
 
-    neg_val_pool: list[dict] = []
-    neg_train_pool: list[dict] = []
-    for pid in all_neg_pids:
-        if len(neg_val_pool) < n_neg_val:
-            neg_val_pool.extend(neg_by_pid[pid])
-        else:
-            neg_train_pool.extend(neg_by_pid[pid])
+    train_pids = [pid for pid in all_pids if pid not in val_pids]
+
+    pos_val_pool = [e for pid in val_pids for e in pos_by_pid.get(pid, [])]
+    neg_val_pool = [e for pid in val_pids for e in neg_by_pid.get(pid, [])]
+    pos_train_pool = [e for pid in train_pids for e in pos_by_pid.get(pid, [])]
+    neg_train_pool = [e for pid in train_pids for e in neg_by_pid.get(pid, [])]
 
     if len(pos_val_pool) < n_pos_val or len(pos_train_pool) < n_pos_train:
         sys.exit(

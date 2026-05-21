@@ -29,18 +29,27 @@ snapshot_download(
 print("Model done.\n")
 
 # ---------------------------------------------------------------------------
-# 2. PRM800K dataset
+# 2. PRM800K dataset (original OpenAI format with per-candidate ratings)
 # ---------------------------------------------------------------------------
-print("=== Downloading PRM800K ===")
+print("=== Downloading PRM800K (original OpenAI format) ===")
 out_dir = Path(f"{SCRATCH}/cot_mech/raw/prm800k")
 out_dir.mkdir(parents=True, exist_ok=True)
 
+# The original dataset has nested schema: question.problem / label.steps
+# with per-candidate ratings (+1, -1, 0).
 for split in ("train", "test"):
     out = out_dir / f"{split}.jsonl"
     if out.exists():
-        print(f"{split}: already exists at {out}, skipping.")
-        continue
-    ds = load_dataset("trl-lib/prm800k", split=split, trust_remote_code=True)
+        # Verify it has the right schema before skipping
+        with open(out) as f:
+            row = json.loads(f.readline())
+        if isinstance(row.get("question"), dict):
+            print(f"{split}: already exists with correct schema, skipping.")
+            continue
+        else:
+            print(f"{split}: exists but wrong schema ({list(row.keys())}), re-downloading.")
+
+    ds = load_dataset("openai/prm800k", split=split)
     with open(out, "w") as f:
         for row in ds:
             f.write(json.dumps(row) + "\n")

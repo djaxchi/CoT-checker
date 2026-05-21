@@ -62,21 +62,24 @@ else:
             "  module load git-lfs  OR  conda install git-lfs"
         )
 
+    # Enable git-lfs for the current user (idempotent)
+    subprocess.run(["git", "lfs", "install"], check=True)
+
     repo_tmp = Path(f"{SCRATCH}/cot_mech/raw/prm800k_repo")
-    if not repo_tmp.exists():
+    if repo_tmp.exists():
+        print(f"Repo already cloned at {repo_tmp}, ensuring LFS objects are present...")
+        # In case the previous clone skipped LFS, install and pull inside the repo
+        subprocess.run(["git", "lfs", "install"], cwd=str(repo_tmp), check=True)
+        result = subprocess.run(["git", "lfs", "pull"], cwd=str(repo_tmp))
+        if result.returncode != 0:
+            sys.exit("git lfs pull failed. Check your git-lfs installation and network access.")
+    else:
         print("Cloning openai/prm800k from GitHub (this downloads ~1 GB via git-lfs)...")
         subprocess.run(
             ["git", "clone", "--depth=1",
              "https://github.com/openai/prm800k.git", str(repo_tmp)],
             check=True,
         )
-    else:
-        print(f"Repo already cloned at {repo_tmp}, pulling LFS objects...")
-
-    # Ensure LFS objects are present
-    result = subprocess.run(["git", "lfs", "pull"], cwd=str(repo_tmp))
-    if result.returncode != 0:
-        sys.exit("git lfs pull failed. Check your git-lfs installation and network access.")
 
     data_dir = repo_tmp / "prm800k" / "data"
 

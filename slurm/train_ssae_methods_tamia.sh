@@ -19,7 +19,7 @@
 # memory. If this still OOMs, the approved next fallback is bs=4 x accum=32.
 
 #SBATCH --job-name=ssae_methods
-#SBATCH --account=aip-${PI_NAME}
+#SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
 #SBATCH --gpus=h100:4
 #SBATCH --cpus-per-task=16
@@ -37,7 +37,7 @@ set -euo pipefail
 
 module load StdEnv/2023 python/3.12
 
-PROJECT_ROOT="$HOME/Code/CoT-checker"
+PROJECT_ROOT="$HOME/CoT-checker"
 RUN_ROOT="$SCRATCH/cot_mech/prestudy_v1"
 DATA_DIR="$RUN_ROOT/data"
 OUT_ROOT="$RUN_ROOT/runs"

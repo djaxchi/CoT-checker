@@ -101,11 +101,36 @@ class QwenSSAE(nn.Module):
         # Phase 1: freeze hints_encoder (matches official phase-1 branch).
         self.hints_encoder.requires_grad_(False)
 
+        # Caching is incompatible with gradient checkpointing and useless
+        # during teacher-forced training; disable on the decoder so HF does
+        # not pre-allocate KV-cache buffers.
+        if hasattr(self.decoder, "config"):
+            self.decoder.config.use_cache = False
+
         # Auxiliary BCE head, only for ssae_contrastive representation
         # training. Discarded before linear probing (spec section 19).
         self.aux_head: nn.Module | None = None
         if self.contrastive:
             self.aux_head = nn.Linear(self.n_latents, 1)
+
+    def enable_gradient_checkpointing(self) -> None:
+        """Turn on HF gradient checkpointing for encoder and decoder.
+
+        Trades extra compute for activation memory: intermediate transformer
+        block activations are not retained, they are recomputed on backward.
+        hints_encoder is frozen and untouched. Caching must be off when
+        checkpointing is on.
+        """
+        for sub in (self.encoder, self.decoder):
+            if hasattr(sub, "gradient_checkpointing_enable"):
+                try:
+                    sub.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={"use_reentrant": False}
+                    )
+                except TypeError:
+                    sub.gradient_checkpointing_enable()
+            if hasattr(sub, "config"):
+                sub.config.use_cache = False
 
     # ------------------------------------------------------------------ utils
     def get_last_token_embeddings(self, encoder_outputs: torch.Tensor,

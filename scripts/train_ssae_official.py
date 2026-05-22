@@ -99,6 +99,13 @@ def parse_args() -> argparse.Namespace:
                         "tokens during training only (mirror of official phase-1 "
                         "papers/SSAE/train.py mask=True path). Default 0.1 for "
                         "faithful SSAE reproduction. Set to 0 to disable.")
+    p.add_argument("--gradient_checkpointing", action="store_true",
+                   help="Enable HF gradient checkpointing on encoder and "
+                        "decoder. Recommended for Qwen2.5-1.5B SSAE training.")
+    p.add_argument("--ce_chunk_size", type=int, default=2048,
+                   help="Max number of active tokens per CE chunk. Larger "
+                        "values reduce loop overhead; smaller values reduce "
+                        "peak intermediate memory inside cross_entropy.")
     return p.parse_args()
 
 
@@ -145,9 +152,32 @@ def maybe_log(master: bool, logger, msg: str) -> None:
         logger.info(msg)
 
 
+def _chunked_ce_sum(active_logits: torch.Tensor, active_labels: torch.Tensor,
+                    chunk_size: int) -> torch.Tensor:
+    """Sum of per-token CE over active positions, computed in chunks.
+
+    Mathematically equivalent to F.cross_entropy(active_logits, active_labels,
+    reduction='sum'): summation just splits into contiguous chunks. Reduces
+    peak memory inside log_softmax/softmax intermediates.
+    """
+    n = active_logits.size(0)
+    if n == 0:
+        return torch.zeros((), device=active_logits.device, dtype=torch.float32)
+    if chunk_size <= 0 or n <= chunk_size:
+        return F.cross_entropy(active_logits, active_labels, reduction="sum")
+    total = torch.zeros((), device=active_logits.device, dtype=torch.float32)
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        total = total + F.cross_entropy(
+            active_logits[start:end], active_labels[start:end], reduction="sum"
+        )
+    return total
+
+
 def compute_loss(model, batch, device, sparsity_factor: int,
                  l1_weight: float, bce_weight: float, contrastive: bool,
-                 train_attn_mask_ratio: float = 0.0):
+                 train_attn_mask_ratio: float = 0.0,
+                 ce_chunk_size: int = 2048):
     input_ids = batch["input_ids"].to(device, non_blocking=True)
     attention_mask = batch["attention_mask"].to(device, non_blocking=True)
     loss_mask = batch["loss_mask"].to(device, non_blocking=True)
@@ -178,14 +208,22 @@ def compute_loss(model, batch, device, sparsity_factor: int,
             f"input_ids {tuple(input_ids.shape)}"
         )
 
-    ce_per_tok = F.cross_entropy(
-        logits_for_labels.reshape(-1, logits_for_labels.size(-1)),
-        input_ids.reshape(-1),
-        reduction="none",
-    ).view(input_ids.shape)
-    ce_masked = ce_per_tok * loss_mask
-    n_loss_tokens = loss_mask.sum().clamp_min(1)
-    loss_nll = ce_masked.sum() / n_loss_tokens
+    # Memory-efficient CE: gather active (step + eos, non-pad) positions before
+    # log_softmax so the V-wide softmax is only computed over loss-relevant
+    # tokens. Equivalent to (per-token CE * loss_mask).sum() / loss_mask.sum().
+    vocab_size = logits_for_labels.size(-1)
+    flat_logits = logits_for_labels.reshape(-1, vocab_size)
+    flat_labels = input_ids.reshape(-1)
+    active_mask = loss_mask.reshape(-1).bool()
+    active_logits = flat_logits[active_mask]
+    active_labels = flat_labels[active_mask]
+    n_active = active_logits.size(0)
+    n_loss_tokens = torch.tensor(max(n_active, 1), device=device, dtype=torch.float32)
+    if n_active == 0:
+        loss_nll = torch.zeros((), device=device, dtype=torch.float32)
+    else:
+        ce_sum = _chunked_ce_sum(active_logits, active_labels, ce_chunk_size)
+        loss_nll = ce_sum / n_loss_tokens
 
     batch_size = input_ids.size(0)
     loss_spa = sparsity_loss_sum / batch_size  # mean L1 per example
@@ -346,6 +384,16 @@ def main() -> None:
         contrastive=contrastive,
     ).to(device)
 
+    if args.gradient_checkpointing:
+        model.enable_gradient_checkpointing()
+        if master:
+            logger.info("Enabled gradient checkpointing on encoder + decoder; "
+                        "decoder use_cache=False.")
+
+    if torch.cuda.is_available():
+        mem_after_load = torch.cuda.max_memory_allocated() / 1e9
+        logger.info(f"[mem] rank {rank} after model load: max_allocated={mem_after_load:.2f} GB")
+
     if args.torch_compile:
         model = torch.compile(model)
 
@@ -410,10 +458,19 @@ def main() -> None:
                         model, batch, device, args.sparsity_factor,
                         args.l1_weight, args.bce_weight, contrastive,
                         train_attn_mask_ratio=args.train_attn_mask_ratio,
+                        ce_chunk_size=args.ce_chunk_size,
                     )
                 # Scale loss for accumulation
                 loss_scaled = out["loss"] / args.grad_accum_steps
                 scaler.scale(loss_scaled).backward()
+
+            # Log peak memory once after the very first backward on every rank.
+            if global_step == 0 and micro_step == 0 and torch.cuda.is_available():
+                mem_after_step1 = torch.cuda.max_memory_allocated() / 1e9
+                logger.info(
+                    f"[mem] rank {rank} after first fwd+bwd: "
+                    f"max_allocated={mem_after_step1:.2f} GB"
+                )
 
             epoch_nll += out["loss_nll"].item()
             epoch_spa += out["loss_spa"].item()
@@ -470,6 +527,7 @@ def main() -> None:
                         args.l1_weight, args.bce_weight,
                         contrastive=False,  # do not require labels on val
                         train_attn_mask_ratio=0.0,  # mask disabled for eval
+                        ce_chunk_size=args.ce_chunk_size,
                     )
                     v_nll += vout["loss_nll"].item()
                     v_spa += vout["loss_spa"].item()

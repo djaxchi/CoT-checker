@@ -63,10 +63,14 @@ pip install --no-index torch numpy tqdm pyyaml transformers
 
 MODEL_PATH="Qwen/Qwen2.5-1.5B"
 MAX_ITERS="${MAX_ITERS:-30}"
-# Post-OOM defaults: per-GPU bs=8, accum=16 -> effective global batch = 128.
-# Approved next fallback if this still OOMs: BATCH_SIZE=4 GRAD_ACCUM=32.
-BATCH_SIZE="${BATCH_SIZE:-8}"
-GRAD_ACCUM="${GRAD_ACCUM:-16}"
+# Post-OOM defaults after second OOM at bs=8/accum=16: per-GPU bs=4 x accum=32
+# -> effective global batch = 128. Combined with gradient_checkpointing on
+# encoder+decoder, active-token CE, and ce_chunk_size=2048, peak memory must
+# stay well under 80 GB. Override at submission time if needed:
+#   sbatch --export=ALL,BATCH_SIZE=4,GRAD_ACCUM=32 slurm/train_ssae_methods_tamia.sh
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
+CE_CHUNK_SIZE="${CE_CHUNK_SIZE:-2048}"
 LR="${LEARNING_RATE:-1e-6}"
 
 run_method () {
@@ -93,6 +97,8 @@ run_method () {
     --warmup_iters 2 \
     --max_iters "$MAX_ITERS" \
     --nproc_per_node "$nproc" \
+    --gradient_checkpointing \
+    --ce_chunk_size "$CE_CHUNK_SIZE" \
     --seed 42 \
     "$@"
   echo "[$(date)] === END   $method ==="
@@ -150,6 +156,8 @@ python scripts/run_ssae_method.py \
   --warmup_iters 0 \
   --max_iters 1 \
   --nproc_per_node 4 \
+  --gradient_checkpointing \
+  --ce_chunk_size "$CE_CHUNK_SIZE" \
   --skip_extract \
   --skip_probe \
   --seed 42

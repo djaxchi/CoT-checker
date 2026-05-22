@@ -54,6 +54,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr_decay_iters", type=int, default=-1)
     p.add_argument("--train_attn_mask_ratio", type=float, default=0.1,
                    help="Official phase-1 step-token masking ratio.")
+    p.add_argument("--gradient_checkpointing", action="store_true",
+                   help="Enable HF gradient checkpointing on encoder+decoder.")
+    p.add_argument("--ce_chunk_size", type=int, default=2048,
+                   help="Active-token CE chunk size (memory knob).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nproc_per_node", type=int, default=1,
                    help="Number of GPUs for torchrun. Use 4 in production, 1 for smoke.")
@@ -130,10 +134,13 @@ def main() -> None:
             "--max_iters", str(args.max_iters),
             "--lr_decay_iters", str(args.lr_decay_iters),
             "--train_attn_mask_ratio", str(args.train_attn_mask_ratio),
+            "--ce_chunk_size", str(args.ce_chunk_size),
             "--seed", str(args.seed),
         ]
         if args.local_files_only:
             cmd.append("--local_files_only")
+        if args.gradient_checkpointing:
+            cmd.append("--gradient_checkpointing")
         if args.smoke:
             cmd.extend([
                 "--smoke",

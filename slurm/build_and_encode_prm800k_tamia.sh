@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-module load StdEnv/2023 python/3.12
+module load StdEnv/2023 python/3.12 gcc arrow/17.0.0
 
 PROJECT_ROOT="$HOME/CoT-checker"
 RUN_NAME="prestudy_v1_qwen2_5_1_5b_prm800k_40k_seed42"

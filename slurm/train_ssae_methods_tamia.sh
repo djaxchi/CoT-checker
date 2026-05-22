@@ -133,35 +133,41 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0 functional smoke complete"
 
-# ---- Wave 0b: production-memory smoke (DDP, same bs/accum as production) --
-# Runs the actual production memory configuration (4-GPU DDP, bs=8, accum=16)
-# for max_iters=1 so we catch any OOM here instead of after a 30-iter wait.
-# `set -e` will abort the job if this step fails.
-echo "[$(date)] Wave 0b: production-memory smoke (DDP, bs=$BATCH_SIZE accum=$GRAD_ACCUM)"
-python scripts/run_ssae_method.py \
-  --method ssae_mixed \
-  --data_dir "$DATA_DIR" \
-  --out_dir "$MEM_SMOKE_OUT" \
-  --model_name_or_path "$MODEL_PATH" \
-  --local_files_only \
-  --phase 1 \
-  --sparsity_factor 1 \
-  --l1_weight 1e-4 \
-  --bce_weight 0.1 \
-  --max_seq_len 2048 \
-  --batch_size "$BATCH_SIZE" \
-  --grad_accum_steps "$GRAD_ACCUM" \
-  --learning_rate 1e-6 \
-  --min_lr 1e-7 \
-  --warmup_iters 0 \
-  --max_iters 1 \
-  --nproc_per_node 4 \
-  --gradient_checkpointing \
-  --ce_chunk_size "$CE_CHUNK_SIZE" \
-  --skip_extract \
-  --skip_probe \
-  --seed 42
-echo "[$(date)] Wave 0b production-memory smoke complete"
+# ---- Wave 0b: production-memory + finite smoke (DDP, prod bs/accum) --------
+# Runs ssae_positive AND ssae_mixed for max_iters=2 at the production memory
+# configuration. Any non-finite intermediate (encoder outputs, latents,
+# logits, CE, sparsity, total loss, aux BCE) raises NonFiniteError and
+# `set -e` aborts the job BEFORE the three full method waves. Final
+# checkpoints, latents, probes, and leaderboard are never produced on a NaN
+# run.
+for smoke_method in ssae_positive ssae_mixed; do
+  smoke_out="$OUT_ROOT/ssae_finite_smoke/${smoke_method}"
+  echo "[$(date)] Wave 0b: finite smoke ($smoke_method, DDP, bs=$BATCH_SIZE accum=$GRAD_ACCUM)"
+  python scripts/run_ssae_method.py \
+    --method "$smoke_method" \
+    --data_dir "$DATA_DIR" \
+    --out_dir "$smoke_out" \
+    --model_name_or_path "$MODEL_PATH" \
+    --local_files_only \
+    --phase 1 \
+    --sparsity_factor 1 \
+    --l1_weight 1e-4 \
+    --bce_weight 0.1 \
+    --max_seq_len 2048 \
+    --batch_size "$BATCH_SIZE" \
+    --grad_accum_steps "$GRAD_ACCUM" \
+    --learning_rate 1e-6 \
+    --min_lr 1e-7 \
+    --warmup_iters 0 \
+    --max_iters 2 \
+    --nproc_per_node 4 \
+    --gradient_checkpointing \
+    --ce_chunk_size "$CE_CHUNK_SIZE" \
+    --skip_extract \
+    --skip_probe \
+    --seed 42
+  echo "[$(date)] Wave 0b $smoke_method complete (finite)"
+done
 
 # ---- Wave 1-3: SSAE methods, DDP over all 4 H100 GPUs ----------------------
 run_method ssae_positive    4

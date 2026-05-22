@@ -152,6 +152,43 @@ def maybe_log(master: bool, logger, msg: str) -> None:
         logger.info(msg)
 
 
+class NonFiniteError(RuntimeError):
+    """Raised when a tensor contains NaN/Inf during SSAE training."""
+
+
+def _assert_finite(name: str, t: torch.Tensor, *, method: str, rank: int,
+                   iter_num: int, micro_step: int | None = None) -> None:
+    """Raise NonFiniteError if any element is NaN or Inf. Synchronizes once.
+
+    Cost is one all-reduce-free .item() per tensor per micro-step, which is
+    cheap relative to the H100 forward we just finished. We want fail-fast,
+    so the synchronization is intentional.
+    """
+    if t is None:
+        return
+    finite_mask = torch.isfinite(t)
+    n_total = finite_mask.numel()
+    n_finite = int(finite_mask.sum().item())
+    if n_finite == n_total:
+        return
+    non_finite_frac = 1.0 - (n_finite / max(n_total, 1))
+    # Compute summary stats only over finite values (if any).
+    finite_vals = t[finite_mask]
+    if finite_vals.numel() > 0:
+        mn = float(finite_vals.min().item())
+        mx = float(finite_vals.max().item())
+        mean = float(finite_vals.mean().item())
+        stats = f"min={mn:.4e} max={mx:.4e} mean={mean:.4e}"
+    else:
+        stats = "no finite values"
+    raise NonFiniteError(
+        f"[non-finite] method={method} rank={rank} iter={iter_num}"
+        + (f" micro_step={micro_step}" if micro_step is not None else "")
+        + f" tensor={name} shape={tuple(t.shape)} dtype={t.dtype} "
+        + f"non_finite_frac={non_finite_frac:.4f} ({stats})"
+    )
+
+
 def _chunked_ce_sum(active_logits: torch.Tensor, active_labels: torch.Tensor,
                     chunk_size: int) -> torch.Tensor:
     """Sum of per-token CE over active positions, computed in chunks.
@@ -177,7 +214,13 @@ def _chunked_ce_sum(active_logits: torch.Tensor, active_labels: torch.Tensor,
 def compute_loss(model, batch, device, sparsity_factor: int,
                  l1_weight: float, bce_weight: float, contrastive: bool,
                  train_attn_mask_ratio: float = 0.0,
-                 ce_chunk_size: int = 2048):
+                 ce_chunk_size: int = 2048,
+                 *,
+                 method: str = "ssae",
+                 rank: int = 0,
+                 iter_num: int = -1,
+                 micro_step: int | None = None,
+                 finite_checks: bool = True):
     input_ids = batch["input_ids"].to(device, non_blocking=True)
     attention_mask = batch["attention_mask"].to(device, non_blocking=True)
     loss_mask = batch["loss_mask"].to(device, non_blocking=True)
@@ -195,9 +238,19 @@ def compute_loss(model, batch, device, sparsity_factor: int,
         keep = torch.rand(bsz, seq_len, device=device) >= train_attn_mask_ratio
         attention_mask = attention_mask & (~interval | keep).to(attention_mask.dtype)
 
-    _latents, _latents_clean, sparsity_loss_sum, logits, aux_logit = model(
-        input_ids, attention_mask
-    )
+    out = model(input_ids, attention_mask)
+    if finite_checks:
+        for _name in (
+            "encoder_last_hidden", "last_token_embeddings",
+            "latents_pre", "latents_relu", "latent_norm",
+            "latents_normed", "proj_out", "logits",
+        ):
+            _assert_finite(_name, out[_name], method=method, rank=rank,
+                           iter_num=iter_num, micro_step=micro_step)
+    sparsity_loss_sum = out["sparsity_loss_sum"]
+    logits = out["logits"]
+    aux_logit = out["aux_logit"]
+    zero_norm_frac = out["zero_norm_frac"]
 
     # Align logits with input_ids per spec section 9.
     logits_for_labels = logits[:, sparsity_factor - 1:, :]
@@ -224,11 +277,21 @@ def compute_loss(model, batch, device, sparsity_factor: int,
     else:
         ce_sum = _chunked_ce_sum(active_logits, active_labels, ce_chunk_size)
         loss_nll = ce_sum / n_loss_tokens
+        if finite_checks:
+            _assert_finite("ce_sum", ce_sum, method=method, rank=rank,
+                           iter_num=iter_num, micro_step=micro_step)
+            _assert_finite("loss_nll", loss_nll, method=method, rank=rank,
+                           iter_num=iter_num, micro_step=micro_step)
 
     batch_size = input_ids.size(0)
     loss_spa = sparsity_loss_sum / batch_size  # mean L1 per example
 
     loss = loss_nll + l1_weight * loss_spa
+    if finite_checks:
+        _assert_finite("sparsity_loss_sum", sparsity_loss_sum, method=method,
+                       rank=rank, iter_num=iter_num, micro_step=micro_step)
+        _assert_finite("loss_spa", loss_spa, method=method, rank=rank,
+                       iter_num=iter_num, micro_step=micro_step)
 
     aux_bce = torch.tensor(0.0, device=device)
     if contrastive:
@@ -243,7 +306,16 @@ def compute_loss(model, batch, device, sparsity_factor: int,
         aux_bce = F.binary_cross_entropy_with_logits(
             aux_logit.squeeze(-1), labels.float()
         )
+        if finite_checks:
+            _assert_finite("aux_logit", aux_logit, method=method, rank=rank,
+                           iter_num=iter_num, micro_step=micro_step)
+            _assert_finite("aux_bce", aux_bce, method=method, rank=rank,
+                           iter_num=iter_num, micro_step=micro_step)
         loss = loss + bce_weight * aux_bce
+
+    if finite_checks:
+        _assert_finite("total_loss", loss, method=method, rank=rank,
+                       iter_num=iter_num, micro_step=micro_step)
 
     return {
         "loss": loss,
@@ -253,6 +325,7 @@ def compute_loss(model, batch, device, sparsity_factor: int,
         "sparsity_sum": sparsity_loss_sum.detach(),
         "n_loss_tokens": n_loss_tokens.detach(),
         "batch_size": batch_size,
+        "zero_norm_frac": zero_norm_frac.detach(),
     }
 
 
@@ -448,6 +521,7 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
 
         epoch_nll, epoch_spa, epoch_aux, epoch_tokens, n_micro = 0.0, 0.0, 0.0, 0, 0
+        epoch_zero_norm = 0.0
         micro_step = 0
         for batch in train_loader:
             sync_grads = (micro_step == args.grad_accum_steps - 1) or (not ddp)
@@ -459,6 +533,8 @@ def main() -> None:
                         args.l1_weight, args.bce_weight, contrastive,
                         train_attn_mask_ratio=args.train_attn_mask_ratio,
                         ce_chunk_size=args.ce_chunk_size,
+                        method=args.method, rank=rank, iter_num=it,
+                        micro_step=micro_step, finite_checks=True,
                     )
                 # Scale loss for accumulation
                 loss_scaled = out["loss"] / args.grad_accum_steps
@@ -475,6 +551,7 @@ def main() -> None:
             epoch_nll += out["loss_nll"].item()
             epoch_spa += out["loss_spa"].item()
             epoch_aux += out["aux_bce"].item()
+            epoch_zero_norm += out["zero_norm_frac"].item()
             epoch_tokens += int(out["n_loss_tokens"].item())
             examples_seen += out["batch_size"] * world_size
             tokens_seen += int(out["n_loss_tokens"].item()) * world_size
@@ -505,15 +582,18 @@ def main() -> None:
         mean_nll = epoch_nll / max(n_micro, 1)
         mean_spa = epoch_spa / max(n_micro, 1)
         mean_aux = epoch_aux / max(n_micro, 1) if contrastive else None
+        mean_zero_norm = epoch_zero_norm / max(n_micro, 1)
         if master:
             logger.info(
                 f"iter {it} lr {lr:.2e} train_nll {mean_nll:.4f} "
-                f"train_l1_mean {mean_spa:.4f}"
+                f"train_l1_mean {mean_spa:.4f} "
+                f"zero_norm_frac {mean_zero_norm:.4f}"
                 + (f" train_aux_bce {mean_aux:.4f}" if mean_aux is not None else "")
             )
         train_metrics_history.append({
             "iter": it, "lr": lr, "loss_nll": mean_nll, "loss_spa": mean_spa,
-            "aux_bce": mean_aux, "n_loss_tokens_in_epoch": epoch_tokens,
+            "aux_bce": mean_aux, "zero_norm_frac": mean_zero_norm,
+            "n_loss_tokens_in_epoch": epoch_tokens,
         })
 
         # ---- Validation ---------------------------------------------------
@@ -528,6 +608,8 @@ def main() -> None:
                         contrastive=False,  # do not require labels on val
                         train_attn_mask_ratio=0.0,  # mask disabled for eval
                         ce_chunk_size=args.ce_chunk_size,
+                        method=args.method, rank=rank, iter_num=it,
+                        finite_checks=True,
                     )
                     v_nll += vout["loss_nll"].item()
                     v_spa += vout["loss_spa"].item()

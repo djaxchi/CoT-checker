@@ -180,22 +180,37 @@ class QwenSSAE(nn.Module):
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         """Phase-1 forward.
 
-        Returns:
-            latents:        (B, 1, n_latents)  -- post-noise, used for inspection only
-            latents_clean:  (B, 1, n_latents)  -- pre-noise, post-normalize; for aux head
-            sparsity_loss:  scalar (sum over batch of L1)
-            logits:         (B, seq_len + sparsity_factor - 1, vocab)
-            aux_logit:      (B, 1) or None
+        Returns a dict with intermediate tensors so the trainer can run
+        fail-fast finite checks at every stage and log the zero-latent rate.
         """
         batch_size = input_ids.shape[0]
-        encoder_outputs = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
-        last_token_embeddings = self.get_last_token_embeddings(encoder_outputs, attention_mask)
-        latents = self.autoencoder(last_token_embeddings)
-        # Official comments this as "L1 normalize" but it is p=2; mirror literally.
-        latents = F.normalize(latents, p=2, dim=-1)
-        sparsity_loss = latents.abs().sum(dim=(1, 2))  # (B,)
+        encoder_outputs = self.encoder(
+            input_ids, attention_mask=attention_mask
+        ).last_hidden_state
+        last_token_embeddings = self.get_last_token_embeddings(
+            encoder_outputs, attention_mask
+        )
 
-        latents_clean = latents
+        # Autoencoder: linear + bias + ReLU. We split it so the trainer can
+        # see both pre-activation and post-activation tensors.
+        latents_pre = (
+            self.autoencoder.encoder(last_token_embeddings)
+            + self.autoencoder.latent_bias
+        )
+        latents_relu = self.autoencoder.activation(latents_pre)
+
+        # Stable L2 normalization with eps=1e-8. Equivalent to the official
+        # F.normalize(p=2) on non-zero vectors; on (near-)zero rows it
+        # divides by eps instead of by 0, which prevents NaN propagation.
+        latent_norm = latents_relu.norm(p=2, dim=-1, keepdim=True)
+        # zero_norm_frac: fraction of (batch, sparsity_factor) latent vectors
+        # whose pre-normalize L2 norm is below 1e-8 -- collapsed latents.
+        zero_norm_frac = (latent_norm.detach() < 1e-8).float().mean()
+        safe_norm = latent_norm.clamp_min(1e-8)
+        latents_normed = latents_relu / safe_norm
+
+        sparsity_loss = latents_normed.abs().sum(dim=(1, 2))  # (B,)
+        latents_clean = latents_normed
 
         aux_logit: torch.Tensor | None = None
         if self.contrastive and self.aux_head is not None:
@@ -203,14 +218,30 @@ class QwenSSAE(nn.Module):
             aux_logit = self.aux_head(latents_clean.squeeze(1).float())  # (B, 1)
 
         if self.training:
-            noise = torch.randn_like(latents) * 0.01
-            latents = latents + noise
+            noise = torch.randn_like(latents_normed) * 0.01
+            latents = latents_normed + noise
+        else:
+            latents = latents_normed
 
-        recons = self.projection_mlp(latents)  # (B, 1, n_latents)
-        recons = recons.view(batch_size, self.sparsity_factor, self.n_inputs)
+        proj_out = self.projection_mlp(latents)  # (B, 1, n_latents)
+        recons = proj_out.view(batch_size, self.sparsity_factor, self.n_inputs)
         logits = self.decode(recons, input_ids, attention_mask)
 
-        return latents, latents_clean, sparsity_loss.sum(), logits, aux_logit
+        return {
+            "encoder_last_hidden": encoder_outputs,
+            "last_token_embeddings": last_token_embeddings,
+            "latents_pre": latents_pre,
+            "latents_relu": latents_relu,
+            "latent_norm": latent_norm,
+            "latents_normed": latents_normed,
+            "latents": latents,
+            "latents_clean": latents_clean,
+            "proj_out": proj_out,
+            "logits": logits,
+            "sparsity_loss_sum": sparsity_loss.sum(),
+            "aux_logit": aux_logit,
+            "zero_norm_frac": zero_norm_frac,
+        }
 
     # --------------------------------------------------- inference for latents
     @torch.no_grad()
@@ -220,5 +251,7 @@ class QwenSSAE(nn.Module):
         encoder_outputs = self.encoder(input_ids, attention_mask=attention_mask).last_hidden_state
         last_token_embeddings = self.get_last_token_embeddings(encoder_outputs, attention_mask)
         latents = self.autoencoder(last_token_embeddings)
-        latents = F.normalize(latents, p=2, dim=-1)
+        # Use the same eps-stabilized normalize as the training forward.
+        norm = latents.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-8)
+        latents = latents / norm
         return latents.squeeze(1)

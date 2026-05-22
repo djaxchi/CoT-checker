@@ -87,7 +87,7 @@ Seed: 42. All shuffles use a single `random.Random(42)` instance initialized at 
 | `prm800k_pos_base_20k.jsonl` | Train positive examples (label=0) | 20,000 |
 | `prm800k_neg_base_20k.jsonl` | Train negative examples (label=1) | 20,000 |
 | `prm800k_probe_train_40k.jsonl` | Balanced train set (pos+neg interleaved) | 40,000 |
-| `prm800k_mixed_train_40k.jsonl` | Same examples, shuffled ordering | 40,000 |
+| `prm800k_mixed_train_40k.jsonl` | Same 40k examples as `probe_train_40k` (reserved for future SAE training) | 40,000 |
 | `prm800k_val_1k.jsonl` | Balanced validation set | 1,000 |
 | `prm800k_contrastive_forks_20.jsonl` | Nested fork records | 20 |
 | `prm800k_contrastive_forks_20_flat.jsonl` | Flat fork records (one row per completion) | 40 |
@@ -152,7 +152,7 @@ The checker runs as the final step of the SLURM job and returns a non-zero exit 
 
 **Cluster:** TamIA (Mila/CC SLURM)  
 **Job:** `slurm/build_and_encode_prm800k_tamia.sh`  
-**Resources:** 1 GPU, 8 CPU cores, 96 GB RAM, 6-hour wall time
+**Resources:** 4x NVIDIA H100 80GB, 48 CPU cores, full node memory (`--mem=0`), 6-hour wall time
 
 The job runs fully offline (`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`). The Qwen2.5-1.5B model weights must be pre-cached to `$SCRATCH/hf_cache` before job submission.
 

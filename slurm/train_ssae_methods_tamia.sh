@@ -145,21 +145,23 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0 functional smoke complete"
 
-# ---- Wave 0b: finite smoke E2 (eager attention) ---------------------------
-# Audit step E2: SDPA bf16 backward is suspected after E1 (use_cache=False
-# on all three Qwen sub-models) failed with the same per-rank, data-pattern
-# triggered NaN on encoder + decoder grads simultaneously. Switching to
-# attn_implementation=eager eliminates SDPA's fused bf16 backward and uses
-# vanilla PyTorch attention math. All other knobs match the prior smoke:
-# mask_ratio=0.0, no gradient_checkpointing, bs=4 accum=32, max_iters=2,
+# ---- Wave 0b: finite smoke P1 (eager + gradient_checkpointing) ------------
+# Audit step P1: E2 (attn=eager, no ckpt) ran with finite forward losses
+# and finite per-micro-step grads on rank 0 through micro_step=10, but OOMed
+# inside HF Qwen2's eager_attention_forward at the fp32 softmax cast on
+# rank 2. This is a memory failure, not a numerical one, and is the
+# expected cost of dropping the memory-fused SDPA path. Re-enable
+# gradient_checkpointing on encoder+decoder (Wave 0c earlier confirmed it
+# is not the source of NaN by itself), keep everything else identical to
+# E2: attn=eager, mask_ratio=0.0, bs=4 accum=32, max_iters=2,
 # latent_norm_eps=$LATENT_NORM_EPS. Any non-finite tensor / gradient /
 # parameter raises NonFiniteError; `set -e` aborts the job BEFORE the
 # three full method waves.
-echo "[$(date)] Wave 0b: finite smoke E2 (ssae_positive, attn=eager)"
+echo "[$(date)] Wave 0b: finite smoke P1 (ssae_positive, attn=eager + ckpt)"
 python scripts/run_ssae_method.py \
   --method ssae_positive \
   --data_dir "$DATA_DIR" \
-  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_e2_eager" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_p1_eager_ckpt" \
   --model_name_or_path "$MODEL_PATH" \
   --local_files_only \
   --phase 1 \
@@ -179,12 +181,13 @@ python scripts/run_ssae_method.py \
   --attn_implementation eager \
   --latent_norm_eps "$LATENT_NORM_EPS" \
   --max_grad_norm "$MAX_GRAD_NORM" \
+  --gradient_checkpointing \
   --debug_attn_mask \
   --debug_grad_check \
   --skip_extract \
   --skip_probe \
   --seed 42
-echo "[$(date)] Wave 0b E2 complete"
+echo "[$(date)] Wave 0b P1 complete"
 
 # ---- Wave 1-3: SSAE methods, DDP over all 4 H100 GPUs ----------------------
 run_method ssae_positive    4

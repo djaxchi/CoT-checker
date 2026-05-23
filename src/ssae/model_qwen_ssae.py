@@ -118,8 +118,14 @@ class QwenSSAE(nn.Module):
         self.hints_encoder.requires_grad_(False)
 
         # Caching is incompatible with gradient checkpointing and useless
-        # during teacher-forced training; disable on the decoder so HF does
-        # not pre-allocate KV-cache buffers.
+        # during teacher-forced training. Disable on ALL three sub-models so
+        # HF does not pre-allocate KV-cache buffers and does not return
+        # past_key_values as forward outputs that linger in the autograd
+        # graph under DDP find_unused_parameters=True. (Audit E1.)
+        if hasattr(self.encoder, "config"):
+            self.encoder.config.use_cache = False
+        if hasattr(self.hints_encoder, "config"):
+            self.hints_encoder.config.use_cache = False
         if hasattr(self.decoder, "config"):
             self.decoder.config.use_cache = False
 

@@ -709,6 +709,11 @@ def main() -> None:
             f"decoder._attn_implementation={dec_attn}"
         )
         logger.info(f"[latent-norm-eps] {args.latent_norm_eps:.2e}")
+        logger.info(
+            f"[use_cache] encoder={getattr(model.encoder.config, 'use_cache', 'unknown')} "
+            f"hints_encoder={getattr(model.hints_encoder.config, 'use_cache', 'unknown')} "
+            f"decoder={getattr(model.decoder.config, 'use_cache', 'unknown')}"
+        )
     if args.debug_grad_check:
         model.enable_latent_relu_grad_capture(True)
 

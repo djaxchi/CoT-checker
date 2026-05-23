@@ -56,6 +56,7 @@ class QwenSSAE(nn.Module):
         local_files_only: bool = True,
         activation: nn.Module | None = None,
         contrastive: bool = False,
+        attn_implementation: str | None = None,
     ) -> None:
         super().__init__()
         if phase != 1:
@@ -65,17 +66,24 @@ class QwenSSAE(nn.Module):
         self.phase = phase
         self.contrastive = contrastive
         self.model_name_or_path = model_name_or_path
+        self.attn_implementation = attn_implementation
 
-        # Three Qwen instances, matching official MyModel.
-        self.encoder = AutoModel.from_pretrained(
-            model_name_or_path, local_files_only=local_files_only
-        )
-        self.hints_encoder = AutoModel.from_pretrained(
-            model_name_or_path, local_files_only=local_files_only
-        )
-        self.decoder = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path, local_files_only=local_files_only
-        )
+        # Three Qwen instances, matching official MyModel. attn_implementation
+        # is forwarded when requested ("eager" / "sdpa" / "flash_attention_2");
+        # older transformers builds that do not accept it fall back silently.
+        def _load(cls, *, causal: bool):
+            kwargs = {"local_files_only": local_files_only}
+            if attn_implementation is not None:
+                kwargs["attn_implementation"] = attn_implementation
+            try:
+                return cls.from_pretrained(model_name_or_path, **kwargs)
+            except TypeError:
+                kwargs.pop("attn_implementation", None)
+                return cls.from_pretrained(model_name_or_path, **kwargs)
+
+        self.encoder = _load(AutoModel, causal=False)
+        self.hints_encoder = _load(AutoModel, causal=False)
+        self.decoder = _load(AutoModelForCausalLM, causal=True)
 
         new_vocab_size = len(tokenizer)
         self.encoder.resize_token_embeddings(new_vocab_size)

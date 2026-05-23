@@ -64,6 +64,9 @@ def parse_args() -> argparse.Namespace:
                    help="Fail-fast on any NaN/Inf grad or param.")
     p.add_argument("--max_grad_norm", type=float, default=1.0,
                    help="Gradient clip norm threshold (canonical).")
+    p.add_argument("--attn_implementation", type=str, default="eager",
+                   choices=["eager", "sdpa", "flash_attention_2", "default"],
+                   help="HF attention backend (eager bypasses SDPA quirks).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nproc_per_node", type=int, default=1,
                    help="Number of GPUs for torchrun. Use 4 in production, 1 for smoke.")
@@ -142,6 +145,7 @@ def main() -> None:
             "--train_attn_mask_ratio", str(args.train_attn_mask_ratio),
             "--ce_chunk_size", str(args.ce_chunk_size),
             "--max_grad_norm", str(args.max_grad_norm),
+            "--attn_implementation", args.attn_implementation,
             "--seed", str(args.seed),
         ]
         if args.local_files_only:

@@ -117,6 +117,12 @@ def parse_args() -> argparse.Namespace:
                    help="After every backward and every optimizer.step, walk "
                         "named_parameters() and abort on any NaN/Inf grad or "
                         "param. Heavy; enable for finite smoke only.")
+    p.add_argument("--attn_implementation", type=str, default="eager",
+                   choices=["eager", "sdpa", "flash_attention_2", "default"],
+                   help="Attention backend forwarded to HF from_pretrained. "
+                        "Default 'eager' avoids SDPA quirks with non-right-"
+                        "contiguous attention masks (i.e., when "
+                        "train_attn_mask_ratio > 0).")
     return p.parse_args()
 
 
@@ -168,7 +174,13 @@ class NonFiniteError(RuntimeError):
 
 
 def _module_prefix(name: str) -> str:
-    """Top-level sub-module bucket for grouped grad/param diagnostics."""
+    """Top-level sub-module bucket for grouped grad/param diagnostics.
+
+    Strips the DDP wrapper prefix 'module.' so DDP-wrapped names like
+    'module.encoder.embed_tokens.weight' bucket as 'encoder', not 'other'.
+    """
+    if name.startswith("module."):
+        name = name[len("module."):]
     for prefix in ("encoder", "decoder", "autoencoder", "projection_mlp",
                    "aux_head", "hints_encoder"):
         if name.startswith(prefix):
@@ -668,6 +680,7 @@ def main() -> None:
     )
 
     # ---- Model ------------------------------------------------------------
+    attn_impl_arg = None if args.attn_implementation == "default" else args.attn_implementation
     model = QwenSSAE(
         tokenizer=tokenizer,
         model_name_or_path=args.model_name_or_path,
@@ -675,7 +688,16 @@ def main() -> None:
         phase=1,
         local_files_only=args.local_files_only,
         contrastive=contrastive,
+        attn_implementation=attn_impl_arg,
     ).to(device)
+    if master:
+        enc_attn = getattr(model.encoder.config, "_attn_implementation", "unknown")
+        dec_attn = getattr(model.decoder.config, "_attn_implementation", "unknown")
+        logger.info(
+            f"[attn-backend] requested={args.attn_implementation} "
+            f"encoder._attn_implementation={enc_attn} "
+            f"decoder._attn_implementation={dec_attn}"
+        )
 
     if args.gradient_checkpointing:
         model.enable_gradient_checkpointing()
@@ -798,11 +820,26 @@ def main() -> None:
                     )
                     raise NonFiniteError("non-finite total grad norm")
 
-            epoch_nll += out["loss_nll"].item()
-            epoch_spa += out["loss_spa"].item()
-            epoch_aux += out["aux_bce"].item()
-            epoch_zero_norm += out["zero_norm_frac"].item()
-            epoch_tokens += int(out["n_loss_tokens"].item())
+            _loss_nll_v = out["loss_nll"].item()
+            _loss_spa_v = out["loss_spa"].item()
+            _aux_bce_v = out["aux_bce"].item()
+            _zero_norm_v = out["zero_norm_frac"].item()
+            _n_tok_v = int(out["n_loss_tokens"].item())
+            _total_v = out["loss"].item()
+            epoch_nll += _loss_nll_v
+            epoch_spa += _loss_spa_v
+            epoch_aux += _aux_bce_v
+            epoch_zero_norm += _zero_norm_v
+            epoch_tokens += _n_tok_v
+
+            if args.debug_grad_check and master:
+                logger.info(
+                    f"[micro] iter={it} micro_step={micro_step} "
+                    f"loss_nll={_loss_nll_v:.4e} loss_spa={_loss_spa_v:.4e} "
+                    f"l1_mean={_loss_spa_v:.4e} total={_total_v:.4e} "
+                    f"n_loss_tokens={_n_tok_v} zero_norm_frac={_zero_norm_v:.4f}"
+                    + (f" aux_bce={_aux_bce_v:.4e}" if contrastive else "")
+                )
             examples_seen += out["batch_size"] * world_size
             tokens_seen += int(out["n_loss_tokens"].item()) * world_size
             n_micro += 1

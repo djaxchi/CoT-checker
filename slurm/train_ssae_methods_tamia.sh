@@ -76,6 +76,7 @@ LR="${LEARNING_RATE:-1e-6}"
 # waves below run BOTH off and on regardless of this knob.
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
 MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
+ATTN_IMPL="${ATTN_IMPL:-eager}"
 
 run_method () {
   local method="$1"
@@ -103,6 +104,7 @@ run_method () {
     --nproc_per_node "$nproc" \
     --ce_chunk_size "$CE_CHUNK_SIZE" \
     --max_grad_norm "$MAX_GRAD_NORM" \
+    --attn_implementation "$ATTN_IMPL" \
     --seed 42 \
     $( [[ "$GRADIENT_CHECKPOINTING" == "1" ]] && echo "--gradient_checkpointing" ) \
     "$@"
@@ -138,17 +140,20 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0 functional smoke complete"
 
-# ---- Wave 0b: finite smoke A (no checkpointing) ---------------------------
+# ---- Wave 0b: finite smoke A (no mask, default attention backend) ---------
 # Two finite smokes on ssae_positive at the production memory configuration,
-# one without gradient checkpointing (A) and one with (B). Any non-finite
-# tensor, gradient, or parameter raises NonFiniteError; `set -e` aborts the
-# job BEFORE the three full method waves. Final checkpoints / latents /
-# probes / leaderboard are never produced on a NaN run.
-echo "[$(date)] Wave 0b: finite smoke A (ssae_positive, NO gradient_checkpointing)"
+# both without gradient_checkpointing. A isolates the attention masking
+# variable (ratio=0.0 with SDPA default backend); B re-enables the official
+# 0.1 mask but switches to eager attention to avoid SDPA quirks with
+# non-right-contiguous attention masks. Any non-finite tensor / gradient /
+# parameter raises NonFiniteError; `set -e` aborts the job BEFORE the three
+# full method waves. Final checkpoints / latents / probes / leaderboard are
+# never produced on a NaN run.
+echo "[$(date)] Wave 0b: finite smoke A (ssae_positive, mask_ratio=0.0, attn=sdpa)"
 python scripts/run_ssae_method.py \
   --method ssae_positive \
   --data_dir "$DATA_DIR" \
-  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_no_ckpt" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_no_mask_sdpa" \
   --model_name_or_path "$MODEL_PATH" \
   --local_files_only \
   --phase 1 \
@@ -164,7 +169,8 @@ python scripts/run_ssae_method.py \
   --max_iters 2 \
   --nproc_per_node 4 \
   --ce_chunk_size "$CE_CHUNK_SIZE" \
-  --train_attn_mask_ratio 0.1 \
+  --train_attn_mask_ratio 0.0 \
+  --attn_implementation sdpa \
   --max_grad_norm "$MAX_GRAD_NORM" \
   --debug_attn_mask \
   --debug_grad_check \
@@ -173,12 +179,12 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0b A complete"
 
-# ---- Wave 0c: finite smoke B (with checkpointing) -------------------------
-echo "[$(date)] Wave 0c: finite smoke B (ssae_positive, gradient_checkpointing ON)"
+# ---- Wave 0c: finite smoke B (official mask + eager attention) ------------
+echo "[$(date)] Wave 0c: finite smoke B (ssae_positive, mask_ratio=0.1, attn=eager)"
 python scripts/run_ssae_method.py \
   --method ssae_positive \
   --data_dir "$DATA_DIR" \
-  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_with_ckpt" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_mask_eager" \
   --model_name_or_path "$MODEL_PATH" \
   --local_files_only \
   --phase 1 \
@@ -193,9 +199,9 @@ python scripts/run_ssae_method.py \
   --warmup_iters 0 \
   --max_iters 2 \
   --nproc_per_node 4 \
-  --gradient_checkpointing \
   --ce_chunk_size "$CE_CHUNK_SIZE" \
   --train_attn_mask_ratio 0.1 \
+  --attn_implementation eager \
   --max_grad_norm "$MAX_GRAD_NORM" \
   --debug_attn_mask \
   --debug_grad_check \

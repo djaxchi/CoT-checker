@@ -72,6 +72,10 @@ BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-32}"
 CE_CHUNK_SIZE="${CE_CHUNK_SIZE:-2048}"
 LR="${LEARNING_RATE:-1e-6}"
+# Toggle gradient checkpointing for production methods. The finite smoke
+# waves below run BOTH off and on regardless of this knob.
+GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
+MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 
 run_method () {
   local method="$1"
@@ -97,9 +101,10 @@ run_method () {
     --warmup_iters 2 \
     --max_iters "$MAX_ITERS" \
     --nproc_per_node "$nproc" \
-    --gradient_checkpointing \
     --ce_chunk_size "$CE_CHUNK_SIZE" \
+    --max_grad_norm "$MAX_GRAD_NORM" \
     --seed 42 \
+    $( [[ "$GRADIENT_CHECKPOINTING" == "1" ]] && echo "--gradient_checkpointing" ) \
     "$@"
   echo "[$(date)] === END   $method ==="
 }
@@ -133,42 +138,71 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0 functional smoke complete"
 
-# ---- Wave 0b: production-memory + finite smoke (DDP, prod bs/accum) --------
-# Runs ssae_positive AND ssae_mixed for max_iters=2 at the production memory
-# configuration. Any non-finite intermediate (encoder outputs, latents,
-# logits, CE, sparsity, total loss, aux BCE) raises NonFiniteError and
-# `set -e` aborts the job BEFORE the three full method waves. Final
-# checkpoints, latents, probes, and leaderboard are never produced on a NaN
-# run.
-for smoke_method in ssae_positive ssae_mixed; do
-  smoke_out="$OUT_ROOT/ssae_finite_smoke/${smoke_method}"
-  echo "[$(date)] Wave 0b: finite smoke ($smoke_method, DDP, bs=$BATCH_SIZE accum=$GRAD_ACCUM)"
-  python scripts/run_ssae_method.py \
-    --method "$smoke_method" \
-    --data_dir "$DATA_DIR" \
-    --out_dir "$smoke_out" \
-    --model_name_or_path "$MODEL_PATH" \
-    --local_files_only \
-    --phase 1 \
-    --sparsity_factor 1 \
-    --l1_weight 1e-4 \
-    --bce_weight 0.1 \
-    --max_seq_len 2048 \
-    --batch_size "$BATCH_SIZE" \
-    --grad_accum_steps "$GRAD_ACCUM" \
-    --learning_rate 1e-6 \
-    --min_lr 1e-7 \
-    --warmup_iters 0 \
-    --max_iters 2 \
-    --nproc_per_node 4 \
-    --gradient_checkpointing \
-    --ce_chunk_size "$CE_CHUNK_SIZE" \
-    --debug_attn_mask \
-    --skip_extract \
-    --skip_probe \
-    --seed 42
-  echo "[$(date)] Wave 0b $smoke_method complete (finite)"
-done
+# ---- Wave 0b: finite smoke A (no checkpointing) ---------------------------
+# Two finite smokes on ssae_positive at the production memory configuration,
+# one without gradient checkpointing (A) and one with (B). Any non-finite
+# tensor, gradient, or parameter raises NonFiniteError; `set -e` aborts the
+# job BEFORE the three full method waves. Final checkpoints / latents /
+# probes / leaderboard are never produced on a NaN run.
+echo "[$(date)] Wave 0b: finite smoke A (ssae_positive, NO gradient_checkpointing)"
+python scripts/run_ssae_method.py \
+  --method ssae_positive \
+  --data_dir "$DATA_DIR" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_no_ckpt" \
+  --model_name_or_path "$MODEL_PATH" \
+  --local_files_only \
+  --phase 1 \
+  --sparsity_factor 1 \
+  --l1_weight 1e-4 \
+  --bce_weight 0.1 \
+  --max_seq_len 2048 \
+  --batch_size "$BATCH_SIZE" \
+  --grad_accum_steps "$GRAD_ACCUM" \
+  --learning_rate 1e-6 \
+  --min_lr 1e-7 \
+  --warmup_iters 0 \
+  --max_iters 2 \
+  --nproc_per_node 4 \
+  --ce_chunk_size "$CE_CHUNK_SIZE" \
+  --train_attn_mask_ratio 0.1 \
+  --max_grad_norm "$MAX_GRAD_NORM" \
+  --debug_attn_mask \
+  --debug_grad_check \
+  --skip_extract \
+  --skip_probe \
+  --seed 42
+echo "[$(date)] Wave 0b A complete"
+
+# ---- Wave 0c: finite smoke B (with checkpointing) -------------------------
+echo "[$(date)] Wave 0c: finite smoke B (ssae_positive, gradient_checkpointing ON)"
+python scripts/run_ssae_method.py \
+  --method ssae_positive \
+  --data_dir "$DATA_DIR" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_with_ckpt" \
+  --model_name_or_path "$MODEL_PATH" \
+  --local_files_only \
+  --phase 1 \
+  --sparsity_factor 1 \
+  --l1_weight 1e-4 \
+  --bce_weight 0.1 \
+  --max_seq_len 2048 \
+  --batch_size "$BATCH_SIZE" \
+  --grad_accum_steps "$GRAD_ACCUM" \
+  --learning_rate 1e-6 \
+  --min_lr 1e-7 \
+  --warmup_iters 0 \
+  --max_iters 2 \
+  --nproc_per_node 4 \
+  --gradient_checkpointing \
+  --ce_chunk_size "$CE_CHUNK_SIZE" \
+  --train_attn_mask_ratio 0.1 \
+  --max_grad_norm "$MAX_GRAD_NORM" \
+  --debug_attn_mask \
+  --debug_grad_check \
+  --skip_extract \
+  --skip_probe \
+  --seed 42
+echo "[$(date)] Wave 0c B complete"
 
 # ---- Wave 1-3: SSAE methods, DDP over all 4 H100 GPUs ----------------------
 run_method ssae_positive    4

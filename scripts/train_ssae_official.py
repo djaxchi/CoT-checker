@@ -110,6 +110,13 @@ def parse_args() -> argparse.Namespace:
                    help="Log per-row attention-mask diagnostics before each "
                         "encoder forward (very verbose, single-batch dump on "
                         "the first non-finite encoder output).")
+    p.add_argument("--max_grad_norm", type=float, default=1.0,
+                   help="Gradient L2 norm clip threshold (canonical name for "
+                        "--grad_clip; if both given, max_grad_norm wins).")
+    p.add_argument("--debug_grad_check", action="store_true",
+                   help="After every backward and every optimizer.step, walk "
+                        "named_parameters() and abort on any NaN/Inf grad or "
+                        "param. Heavy; enable for finite smoke only.")
     return p.parse_args()
 
 
@@ -158,6 +165,89 @@ def maybe_log(master: bool, logger, msg: str) -> None:
 
 class NonFiniteError(RuntimeError):
     """Raised when a tensor contains NaN/Inf during SSAE training."""
+
+
+def _module_prefix(name: str) -> str:
+    """Top-level sub-module bucket for grouped grad/param diagnostics."""
+    for prefix in ("encoder", "decoder", "autoencoder", "projection_mlp",
+                   "aux_head", "hints_encoder"):
+        if name.startswith(prefix):
+            return prefix
+    return "other"
+
+
+def _grad_finite_summary(model, *, method: str, rank: int, iter_num: int,
+                         micro_step: int | None) -> dict:
+    """Walk model.named_parameters() once. Return total grad norm, the first
+    non-finite parameter name (if any), per-bucket max |grad|, and per-bucket
+    non-finite counts.
+
+    Cost: ~one .all()/.norm() per parameter tensor, all on GPU, then a
+    single .item() at the end. Acceptable inside the audit smoke; in
+    production we should gate this behind a flag.
+    """
+    total_sq = None
+    first_bad = None
+    per_bucket_max_abs: dict[str, torch.Tensor] = {}
+    per_bucket_nonfinite_count: dict[str, int] = {}
+    for name, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        g = p.grad
+        bucket = _module_prefix(name)
+        # Aggregate norm in fp32 to avoid bf16 over/underflow.
+        g32 = g.detach().float()
+        sq = g32.pow(2).sum()
+        total_sq = sq if total_sq is None else (total_sq + sq)
+        ab = g32.abs()
+        cur_max = per_bucket_max_abs.get(bucket)
+        new_max = ab.max() if cur_max is None else torch.maximum(cur_max, ab.max())
+        per_bucket_max_abs[bucket] = new_max
+        finite_all = torch.isfinite(g32).all()
+        if not bool(finite_all.item()):
+            per_bucket_nonfinite_count[bucket] = per_bucket_nonfinite_count.get(bucket, 0) + 1
+            if first_bad is None:
+                first_bad = name
+    if total_sq is None:
+        return {
+            "grad_total_norm": 0.0,
+            "first_bad_param": None,
+            "per_bucket_max_abs_grad": {},
+            "per_bucket_nonfinite_grad_count": {},
+        }
+    total_norm = float(total_sq.sqrt().item())
+    return {
+        "grad_total_norm": total_norm,
+        "first_bad_param": first_bad,
+        "per_bucket_max_abs_grad": {k: float(v.item()) for k, v in per_bucket_max_abs.items()},
+        "per_bucket_nonfinite_grad_count": per_bucket_nonfinite_count,
+    }
+
+
+def _param_finite_summary(model) -> dict:
+    """Walk model.named_parameters() to find the first parameter tensor that
+    contains NaN/Inf, and per-bucket max |param|.
+    """
+    first_bad = None
+    per_bucket_max_abs: dict[str, torch.Tensor] = {}
+    per_bucket_nonfinite_count: dict[str, int] = {}
+    for name, p in model.named_parameters():
+        bucket = _module_prefix(name)
+        p32 = p.detach().float()
+        ab = p32.abs()
+        cur_max = per_bucket_max_abs.get(bucket)
+        new_max = ab.max() if cur_max is None else torch.maximum(cur_max, ab.max())
+        per_bucket_max_abs[bucket] = new_max
+        finite_all = torch.isfinite(p32).all()
+        if not bool(finite_all.item()):
+            per_bucket_nonfinite_count[bucket] = per_bucket_nonfinite_count.get(bucket, 0) + 1
+            if first_bad is None:
+                first_bad = name
+    return {
+        "first_bad_param": first_bad,
+        "per_bucket_max_abs_param": {k: float(v.item()) for k, v in per_bucket_max_abs.items()},
+        "per_bucket_nonfinite_param_count": per_bucket_nonfinite_count,
+    }
 
 
 def _safe_train_attn_mask(
@@ -459,6 +549,11 @@ def main() -> None:
 
     contrastive = (args.method == "ssae_contrastive")
     lr_decay_iters = args.lr_decay_iters if args.lr_decay_iters > 0 else args.max_iters
+    # max_grad_norm supersedes the legacy --grad_clip when explicitly set;
+    # they default to the same value (1.0).
+    effective_max_grad_norm = (
+        args.max_grad_norm if args.max_grad_norm is not None else args.grad_clip
+    )
 
     # --length_audit_only must not run under torchrun/DDP: a rank-0 sys.exit()
     # would strand the other ranks. Refuse early with a clear message.
@@ -675,6 +770,34 @@ def main() -> None:
                     f"max_allocated={mem_after_step1:.2f} GB"
                 )
 
+            # Fail-fast on non-finite gradients. With DDP, grads are only
+            # all-reduced on the sync step; pre-sync checks still catch any
+            # corruption produced by THIS rank's backward.
+            if args.debug_grad_check:
+                gsum = _grad_finite_summary(
+                    model, method=args.method, rank=rank,
+                    iter_num=it, micro_step=micro_step,
+                )
+                if gsum["first_bad_param"] is not None:
+                    logger.error(
+                        f"[grad-check] rank={rank} iter={it} "
+                        f"micro_step={micro_step} (pre-step): "
+                        f"first_bad_param={gsum['first_bad_param']} "
+                        f"grad_total_norm={gsum['grad_total_norm']:.4e} "
+                        f"per_bucket_max_abs_grad={gsum['per_bucket_max_abs_grad']} "
+                        f"per_bucket_nonfinite_grad_count={gsum['per_bucket_nonfinite_grad_count']}"
+                    )
+                    raise NonFiniteError(
+                        f"non-finite gradient at iter={it} "
+                        f"micro_step={micro_step} param={gsum['first_bad_param']}"
+                    )
+                if not math.isfinite(gsum["grad_total_norm"]):
+                    logger.error(
+                        f"[grad-check] non-finite grad_total_norm="
+                        f"{gsum['grad_total_norm']} iter={it} micro_step={micro_step}"
+                    )
+                    raise NonFiniteError("non-finite total grad norm")
+
             epoch_nll += out["loss_nll"].item()
             epoch_spa += out["loss_spa"].item()
             epoch_aux += out["aux_bce"].item()
@@ -686,22 +809,79 @@ def main() -> None:
             micro_step += 1
 
             if micro_step == args.grad_accum_steps:
-                if args.grad_clip > 0:
+                pre_clip_norm = float("nan")
+                if effective_max_grad_norm > 0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                    pre_clip_norm = float(
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            max_norm=effective_max_grad_norm,
+                            error_if_nonfinite=False,
+                        ).item()
+                    )
+                if master and (it < 2 or args.debug_grad_check):
+                    post_clip = min(pre_clip_norm, effective_max_grad_norm) \
+                        if math.isfinite(pre_clip_norm) else float("nan")
+                    logger.info(
+                        f"[grad-norm] iter={it} pre_clip={pre_clip_norm:.4e} "
+                        f"clip={effective_max_grad_norm:.4e} "
+                        f"post_clip~{post_clip:.4e}"
+                    )
+                if not math.isfinite(pre_clip_norm) and effective_max_grad_norm > 0:
+                    raise NonFiniteError(
+                        f"non-finite pre-clip grad norm at iter={it} "
+                        f"global_step={global_step}: {pre_clip_norm}"
+                    )
                 scaler.step(optimizer)
                 scaler.update()
+                if args.debug_grad_check:
+                    psum = _param_finite_summary(model)
+                    if psum["first_bad_param"] is not None:
+                        logger.error(
+                            f"[param-check] rank={rank} iter={it} "
+                            f"global_step={global_step} (post-step): "
+                            f"first_bad_param={psum['first_bad_param']} "
+                            f"per_bucket_max_abs_param={psum['per_bucket_max_abs_param']} "
+                            f"per_bucket_nonfinite_param_count={psum['per_bucket_nonfinite_param_count']}"
+                        )
+                        raise NonFiniteError(
+                            f"non-finite parameter after optimizer.step at "
+                            f"iter={it} param={psum['first_bad_param']}"
+                        )
+                    if master:
+                        logger.info(
+                            f"[param-check] iter={it} global_step={global_step} "
+                            f"per_bucket_max_abs_param={psum['per_bucket_max_abs_param']}"
+                        )
                 optimizer.zero_grad(set_to_none=True)
                 micro_step = 0
                 global_step += 1
 
         # Flush any trailing micro-steps so no batch is wasted.
         if micro_step > 0:
-            if args.grad_clip > 0:
+            if effective_max_grad_norm > 0:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                pre_clip_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=effective_max_grad_norm,
+                        error_if_nonfinite=False,
+                    ).item()
+                )
+                if not math.isfinite(pre_clip_norm):
+                    raise NonFiniteError(
+                        f"non-finite pre-clip grad norm at trailing flush "
+                        f"iter={it}: {pre_clip_norm}"
+                    )
             scaler.step(optimizer)
             scaler.update()
+            if args.debug_grad_check:
+                psum = _param_finite_summary(model)
+                if psum["first_bad_param"] is not None:
+                    raise NonFiniteError(
+                        f"non-finite parameter after trailing flush "
+                        f"iter={it} param={psum['first_bad_param']}"
+                    )
             optimizer.zero_grad(set_to_none=True)
             micro_step = 0
             global_step += 1

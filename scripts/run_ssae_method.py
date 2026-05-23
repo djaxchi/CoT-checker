@@ -60,6 +60,10 @@ def parse_args() -> argparse.Namespace:
                    help="Active-token CE chunk size (memory knob).")
     p.add_argument("--debug_attn_mask", action="store_true",
                    help="Pass --debug_attn_mask to the trainer (verbose).")
+    p.add_argument("--debug_grad_check", action="store_true",
+                   help="Fail-fast on any NaN/Inf grad or param.")
+    p.add_argument("--max_grad_norm", type=float, default=1.0,
+                   help="Gradient clip norm threshold (canonical).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nproc_per_node", type=int, default=1,
                    help="Number of GPUs for torchrun. Use 4 in production, 1 for smoke.")
@@ -137,6 +141,7 @@ def main() -> None:
             "--lr_decay_iters", str(args.lr_decay_iters),
             "--train_attn_mask_ratio", str(args.train_attn_mask_ratio),
             "--ce_chunk_size", str(args.ce_chunk_size),
+            "--max_grad_norm", str(args.max_grad_norm),
             "--seed", str(args.seed),
         ]
         if args.local_files_only:
@@ -145,6 +150,8 @@ def main() -> None:
             cmd.append("--gradient_checkpointing")
         if args.debug_attn_mask:
             cmd.append("--debug_attn_mask")
+        if args.debug_grad_check:
+            cmd.append("--debug_grad_check")
         if args.smoke:
             cmd.extend([
                 "--smoke",

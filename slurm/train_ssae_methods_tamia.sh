@@ -145,20 +145,21 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0 functional smoke complete"
 
-# ---- Wave 0b: finite smoke D1 (latent_norm_eps=1e-2) ----------------------
-# Single finite smoke testing audit hypothesis D1: raise the latent-norm
-# clamp_min from 1e-8 to 1e-2 to bound the 1/eps amplification on backward
-# through (near-)collapsed latent rows. All other knobs are the previously
-# failing config: mask_ratio=0.0, attn=sdpa, no gradient_checkpointing, bs=4
-# accum=32, max_iters=2. Any non-finite tensor / gradient / parameter
-# raises NonFiniteError; `set -e` aborts the job BEFORE the three full
-# method waves. Final checkpoints / latents / probes / leaderboard are
-# never produced on a NaN run.
-echo "[$(date)] Wave 0b: finite smoke D1 (ssae_positive, latent_norm_eps=$LATENT_NORM_EPS)"
+# ---- Wave 0b: finite smoke E2 (eager attention) ---------------------------
+# Audit step E2: SDPA bf16 backward is suspected after E1 (use_cache=False
+# on all three Qwen sub-models) failed with the same per-rank, data-pattern
+# triggered NaN on encoder + decoder grads simultaneously. Switching to
+# attn_implementation=eager eliminates SDPA's fused bf16 backward and uses
+# vanilla PyTorch attention math. All other knobs match the prior smoke:
+# mask_ratio=0.0, no gradient_checkpointing, bs=4 accum=32, max_iters=2,
+# latent_norm_eps=$LATENT_NORM_EPS. Any non-finite tensor / gradient /
+# parameter raises NonFiniteError; `set -e` aborts the job BEFORE the
+# three full method waves.
+echo "[$(date)] Wave 0b: finite smoke E2 (ssae_positive, attn=eager)"
 python scripts/run_ssae_method.py \
   --method ssae_positive \
   --data_dir "$DATA_DIR" \
-  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_d1_eps${LATENT_NORM_EPS}" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_e2_eager" \
   --model_name_or_path "$MODEL_PATH" \
   --local_files_only \
   --phase 1 \
@@ -175,7 +176,7 @@ python scripts/run_ssae_method.py \
   --nproc_per_node 4 \
   --ce_chunk_size "$CE_CHUNK_SIZE" \
   --train_attn_mask_ratio 0.0 \
-  --attn_implementation sdpa \
+  --attn_implementation eager \
   --latent_norm_eps "$LATENT_NORM_EPS" \
   --max_grad_norm "$MAX_GRAD_NORM" \
   --debug_attn_mask \
@@ -183,7 +184,7 @@ python scripts/run_ssae_method.py \
   --skip_extract \
   --skip_probe \
   --seed 42
-echo "[$(date)] Wave 0b D1 complete"
+echo "[$(date)] Wave 0b E2 complete"
 
 # ---- Wave 1-3: SSAE methods, DDP over all 4 H100 GPUs ----------------------
 run_method ssae_positive    4

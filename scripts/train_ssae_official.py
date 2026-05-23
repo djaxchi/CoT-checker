@@ -106,6 +106,10 @@ def parse_args() -> argparse.Namespace:
                    help="Max number of active tokens per CE chunk. Larger "
                         "values reduce loop overhead; smaller values reduce "
                         "peak intermediate memory inside cross_entropy.")
+    p.add_argument("--debug_attn_mask", action="store_true",
+                   help="Log per-row attention-mask diagnostics before each "
+                        "encoder forward (very verbose, single-batch dump on "
+                        "the first non-finite encoder output).")
     return p.parse_args()
 
 
@@ -154,6 +158,100 @@ def maybe_log(master: bool, logger, msg: str) -> None:
 
 class NonFiniteError(RuntimeError):
     """Raised when a tensor contains NaN/Inf during SSAE training."""
+
+
+def _safe_train_attn_mask(
+    attention_mask: torch.Tensor,
+    sep_pos: torch.Tensor,
+    val_len: torch.Tensor,
+    ratio: float,
+    *,
+    method: str,
+    rank: int,
+    iter_num: int,
+    micro_step: int | None,
+    debug: bool = False,
+    logger=None,
+):
+    """Reproduce papers/SSAE/train.py mask=True semantics, with three safety
+    guarantees on top:
+
+      1. The last non-pad token (position val_len-1) is always kept.
+         For us that is the EOS appended after the candidate step, which is
+         the position we read for the SSAE last-token latent. Masking it
+         would silently corrupt the representation.
+
+      2. If random sampling masks every step token in a row, force the
+         first step token (position sep_pos) back on. This guarantees the
+         step interval [sep_pos, val_len) always retains at least one
+         attended key, preserving causal legality for queries inside the
+         interval.
+
+      3. Defensive: every row of the resulting mask must have at least one
+         attended key. Raises if not.
+
+    These guarantees only affect rows where unconstrained random masking
+    would have erased information the model needs to remain well-defined.
+    For all other rows the behavior is bit-identical to the official
+    formula `attention_mask & (~interval | keep)`.
+    """
+    bsz, seq_len = attention_mask.shape
+    device = attention_mask.device
+
+    pos = torch.arange(seq_len, device=device).unsqueeze(0)
+    interval = (pos >= sep_pos.unsqueeze(1)) & (pos < val_len.unsqueeze(1))
+    keep = torch.rand(bsz, seq_len, device=device) >= ratio  # bool
+
+    # Safety 1: keep last non-pad token (EOS).
+    last_idx = (val_len - 1).clamp_min(0).unsqueeze(1)
+    keep = keep | (pos == last_idx)
+
+    # Safety 2: every row must retain >=1 step-interval token.
+    interval_kept = interval & keep
+    n_interval_total = interval.sum(dim=1)
+    n_interval_kept = interval_kept.sum(dim=1)
+    rows_without_step = (n_interval_total > 0) & (n_interval_kept == 0)
+    n_forced_step_rows = int(rows_without_step.sum().item())
+    if n_forced_step_rows > 0:
+        force_pos = sep_pos.unsqueeze(1)
+        force_mask = (pos == force_pos) & rows_without_step.unsqueeze(1)
+        keep = keep | force_mask
+
+    new_attn = attention_mask & (~interval | keep).to(attention_mask.dtype)
+
+    # Safety 3: no all-zero rows.
+    row_sums = new_attn.sum(dim=1)
+    min_valid = int(row_sums.min().item())
+    n_zero_valid = int((row_sums == 0).sum().item())
+    if n_zero_valid > 0:
+        # Should be unreachable given safeties 1+2; report rather than continue.
+        raise RuntimeError(
+            f"[attn-mask] method={method} rank={rank} iter={iter_num} "
+            f"micro_step={micro_step}: {n_zero_valid} row(s) ended up with "
+            f"zero attended keys after safety patching. ratio={ratio}, "
+            f"bsz={bsz}, seq_len={seq_len}."
+        )
+
+    if debug and logger is not None and rank == 0:
+        per_row_valid = row_sums.tolist()
+        orig_valid = attention_mask.sum(dim=1).tolist()
+        interval_lens = n_interval_total.tolist()
+        interval_kept_lens = n_interval_kept.tolist()
+        logger.info(
+            f"[attn-mask] iter={iter_num} micro_step={micro_step} "
+            f"shape={tuple(attention_mask.shape)} dtype={attention_mask.dtype} "
+            f"min_valid={min_valid} n_zero_valid={n_zero_valid} "
+            f"n_forced_step_rows={n_forced_step_rows} "
+            f"orig_valid={orig_valid} masked_valid={per_row_valid} "
+            f"interval_len={interval_lens} interval_kept={interval_kept_lens}"
+        )
+
+    return new_attn, {
+        "min_valid": min_valid,
+        "n_zero_valid": n_zero_valid,
+        "n_forced_step_rows": n_forced_step_rows,
+        "fraction_zero_valid_examples": n_zero_valid / max(bsz, 1),
+    }
 
 
 def _assert_finite(name: str, t: torch.Tensor, *, method: str, rank: int,
@@ -220,7 +318,9 @@ def compute_loss(model, batch, device, sparsity_factor: int,
                  rank: int = 0,
                  iter_num: int = -1,
                  micro_step: int | None = None,
-                 finite_checks: bool = True):
+                 finite_checks: bool = True,
+                 debug_attn_mask: bool = False,
+                 logger=None):
     input_ids = batch["input_ids"].to(device, non_blocking=True)
     attention_mask = batch["attention_mask"].to(device, non_blocking=True)
     loss_mask = batch["loss_mask"].to(device, non_blocking=True)
@@ -229,14 +329,15 @@ def compute_loss(model, batch, device, sparsity_factor: int,
     # only, randomly drop attention to step tokens (between sep_pos and
     # val_len) with probability train_attn_mask_ratio. Disabled at eval time
     # (caller passes train_attn_mask_ratio=0.0).
+    attn_diag: dict = {}
     if train_attn_mask_ratio > 0:
         sep_pos = batch["sep_pos"].to(device, non_blocking=True)
         val_len = batch["val_len"].to(device, non_blocking=True)
-        bsz, seq_len = attention_mask.shape
-        pos = torch.arange(seq_len, device=device).unsqueeze(0)
-        interval = (pos >= sep_pos.unsqueeze(1)) & (pos < val_len.unsqueeze(1))
-        keep = torch.rand(bsz, seq_len, device=device) >= train_attn_mask_ratio
-        attention_mask = attention_mask & (~interval | keep).to(attention_mask.dtype)
+        attention_mask, attn_diag = _safe_train_attn_mask(
+            attention_mask, sep_pos, val_len, train_attn_mask_ratio,
+            method=method, rank=rank, iter_num=iter_num,
+            micro_step=micro_step, debug=debug_attn_mask, logger=logger,
+        )
 
     out = model(input_ids, attention_mask)
     if finite_checks:
@@ -245,8 +346,32 @@ def compute_loss(model, batch, device, sparsity_factor: int,
             "latents_pre", "latents_relu", "latent_norm",
             "latents_normed", "proj_out", "logits",
         ):
-            _assert_finite(_name, out[_name], method=method, rank=rank,
-                           iter_num=iter_num, micro_step=micro_step)
+            try:
+                _assert_finite(_name, out[_name], method=method, rank=rank,
+                               iter_num=iter_num, micro_step=micro_step)
+            except NonFiniteError as e:
+                # Dump everything we know about THIS batch so the failure is
+                # reproducible from logs alone.
+                if logger is not None:
+                    sep_pos_list = batch["sep_pos"].tolist()
+                    val_len_list = batch["val_len"].tolist()
+                    orig_valid = batch["attention_mask"].sum(dim=1).tolist()
+                    masked_valid = attention_mask.sum(dim=1).tolist()
+                    metas = batch.get("meta", [])
+                    sample_ids = [
+                        (m or {}).get("uid") or (m or {}).get("id") for m in metas
+                    ]
+                    logger.error(
+                        f"[debug_attn_mask] failure context: method={method} "
+                        f"rank={rank} iter={iter_num} micro_step={micro_step} "
+                        f"failing_tensor={_name} "
+                        f"input_ids.shape={tuple(input_ids.shape)} "
+                        f"sep_pos={sep_pos_list} val_len={val_len_list} "
+                        f"orig_valid_per_row={orig_valid} "
+                        f"masked_valid_per_row={masked_valid} "
+                        f"attn_diag={attn_diag} sample_ids={sample_ids}"
+                    )
+                raise
     sparsity_loss_sum = out["sparsity_loss_sum"]
     logits = out["logits"]
     aux_logit = out["aux_logit"]
@@ -535,6 +660,8 @@ def main() -> None:
                         ce_chunk_size=args.ce_chunk_size,
                         method=args.method, rank=rank, iter_num=it,
                         micro_step=micro_step, finite_checks=True,
+                        debug_attn_mask=args.debug_attn_mask,
+                        logger=logger,
                     )
                 # Scale loss for accumulation
                 loss_scaled = out["loss"] / args.grad_accum_steps
@@ -610,6 +737,8 @@ def main() -> None:
                         ce_chunk_size=args.ce_chunk_size,
                         method=args.method, rank=rank, iter_num=it,
                         finite_checks=True,
+                        debug_attn_mask=args.debug_attn_mask,
+                        logger=logger,
                     )
                     v_nll += vout["loss_nll"].item()
                     v_spa += vout["loss_spa"].item()

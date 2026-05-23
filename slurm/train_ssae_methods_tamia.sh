@@ -163,6 +163,7 @@ for smoke_method in ssae_positive ssae_mixed; do
     --nproc_per_node 4 \
     --gradient_checkpointing \
     --ce_chunk_size "$CE_CHUNK_SIZE" \
+    --debug_attn_mask \
     --skip_extract \
     --skip_probe \
     --seed 42

@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
                    help="Enable HF gradient checkpointing on encoder+decoder.")
     p.add_argument("--ce_chunk_size", type=int, default=2048,
                    help="Active-token CE chunk size (memory knob).")
+    p.add_argument("--debug_attn_mask", action="store_true",
+                   help="Pass --debug_attn_mask to the trainer (verbose).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nproc_per_node", type=int, default=1,
                    help="Number of GPUs for torchrun. Use 4 in production, 1 for smoke.")
@@ -141,6 +143,8 @@ def main() -> None:
             cmd.append("--local_files_only")
         if args.gradient_checkpointing:
             cmd.append("--gradient_checkpointing")
+        if args.debug_attn_mask:
+            cmd.append("--debug_attn_mask")
         if args.smoke:
             cmd.extend([
                 "--smoke",

@@ -123,6 +123,11 @@ def parse_args() -> argparse.Namespace:
                         "Default 'eager' avoids SDPA quirks with non-right-"
                         "contiguous attention masks (i.e., when "
                         "train_attn_mask_ratio > 0).")
+    p.add_argument("--latent_norm_eps", type=float, default=1e-8,
+                   help="Eps used in clamp_min(norm) during latent "
+                        "normalization (Audit D1). 1e-8 matches F.normalize "
+                        "default; raise to e.g. 1e-2 to bound 1/eps "
+                        "amplification on backward through collapsed rows.")
     return p.parse_args()
 
 
@@ -553,6 +558,10 @@ def compute_loss(model, batch, device, sparsity_factor: int,
         "n_loss_tokens": n_loss_tokens.detach(),
         "batch_size": batch_size,
         "zero_norm_frac": zero_norm_frac.detach(),
+        "latent_norm_min": out["latent_norm_min"],
+        "latent_norm_p01": out["latent_norm_p01"],
+        "latent_norm_mean": out["latent_norm_mean"],
+        "latent_norm_max": out["latent_norm_max"],
     }
 
 
@@ -689,6 +698,7 @@ def main() -> None:
         local_files_only=args.local_files_only,
         contrastive=contrastive,
         attn_implementation=attn_impl_arg,
+        latent_norm_eps=args.latent_norm_eps,
     ).to(device)
     if master:
         enc_attn = getattr(model.encoder.config, "_attn_implementation", "unknown")
@@ -698,6 +708,9 @@ def main() -> None:
             f"encoder._attn_implementation={enc_attn} "
             f"decoder._attn_implementation={dec_attn}"
         )
+        logger.info(f"[latent-norm-eps] {args.latent_norm_eps:.2e}")
+    if args.debug_grad_check:
+        model.enable_latent_relu_grad_capture(True)
 
     if args.gradient_checkpointing:
         model.enable_gradient_checkpointing()
@@ -833,12 +846,29 @@ def main() -> None:
             epoch_tokens += _n_tok_v
 
             if args.debug_grad_check and master:
+                ln_min = float(out["latent_norm_min"].item())
+                ln_p01 = float(out["latent_norm_p01"].item())
+                ln_mean = float(out["latent_norm_mean"].item())
+                ln_max = float(out["latent_norm_max"].item())
+                latent_grad_max = (
+                    model_module.last_latent_relu_max_abs_grad()
+                    if hasattr(model_module, "last_latent_relu_max_abs_grad")
+                    else float("nan")
+                )
                 logger.info(
                     f"[micro] iter={it} micro_step={micro_step} "
                     f"loss_nll={_loss_nll_v:.4e} loss_spa={_loss_spa_v:.4e} "
                     f"l1_mean={_loss_spa_v:.4e} total={_total_v:.4e} "
                     f"n_loss_tokens={_n_tok_v} zero_norm_frac={_zero_norm_v:.4f}"
                     + (f" aux_bce={_aux_bce_v:.4e}" if contrastive else "")
+                )
+                logger.info(
+                    f"[norm-stats] iter={it} micro_step={micro_step} "
+                    f"latent_norm_min={ln_min:.4e} p01={ln_p01:.4e} "
+                    f"mean={ln_mean:.4e} max={ln_max:.4e} "
+                    f"latent_norm_eps={args.latent_norm_eps:.2e} "
+                    f"frac_below_eps={_zero_norm_v:.4f} "
+                    f"latent_relu_max_abs_grad={latent_grad_max:.4e}"
                 )
             examples_seen += out["batch_size"] * world_size
             tokens_seen += int(out["n_loss_tokens"].item()) * world_size

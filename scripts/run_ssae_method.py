@@ -67,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--attn_implementation", type=str, default="eager",
                    choices=["eager", "sdpa", "flash_attention_2", "default"],
                    help="HF attention backend (eager bypasses SDPA quirks).")
+    p.add_argument("--latent_norm_eps", type=float, default=1e-8,
+                   help="Normalize eps (audit D1).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nproc_per_node", type=int, default=1,
                    help="Number of GPUs for torchrun. Use 4 in production, 1 for smoke.")
@@ -146,6 +148,7 @@ def main() -> None:
             "--ce_chunk_size", str(args.ce_chunk_size),
             "--max_grad_norm", str(args.max_grad_norm),
             "--attn_implementation", args.attn_implementation,
+            "--latent_norm_eps", str(args.latent_norm_eps),
             "--seed", str(args.seed),
         ]
         if args.local_files_only:

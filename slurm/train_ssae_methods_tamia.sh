@@ -77,6 +77,10 @@ LR="${LEARNING_RATE:-1e-6}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
 MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 ATTN_IMPL="${ATTN_IMPL:-eager}"
+# Audit D1: eps used in clamp_min(latent_norm). 1e-8 reproduces the
+# previous behavior; 1e-2 bounds backward amplification at 1/1e-2=1e2 on
+# collapsed rows.
+LATENT_NORM_EPS="${LATENT_NORM_EPS:-1e-2}"
 
 run_method () {
   local method="$1"
@@ -105,6 +109,7 @@ run_method () {
     --ce_chunk_size "$CE_CHUNK_SIZE" \
     --max_grad_norm "$MAX_GRAD_NORM" \
     --attn_implementation "$ATTN_IMPL" \
+    --latent_norm_eps "$LATENT_NORM_EPS" \
     --seed 42 \
     $( [[ "$GRADIENT_CHECKPOINTING" == "1" ]] && echo "--gradient_checkpointing" ) \
     "$@"
@@ -140,20 +145,20 @@ python scripts/run_ssae_method.py \
   --seed 42
 echo "[$(date)] Wave 0 functional smoke complete"
 
-# ---- Wave 0b: finite smoke A (no mask, default attention backend) ---------
-# Two finite smokes on ssae_positive at the production memory configuration,
-# both without gradient_checkpointing. A isolates the attention masking
-# variable (ratio=0.0 with SDPA default backend); B re-enables the official
-# 0.1 mask but switches to eager attention to avoid SDPA quirks with
-# non-right-contiguous attention masks. Any non-finite tensor / gradient /
-# parameter raises NonFiniteError; `set -e` aborts the job BEFORE the three
-# full method waves. Final checkpoints / latents / probes / leaderboard are
+# ---- Wave 0b: finite smoke D1 (latent_norm_eps=1e-2) ----------------------
+# Single finite smoke testing audit hypothesis D1: raise the latent-norm
+# clamp_min from 1e-8 to 1e-2 to bound the 1/eps amplification on backward
+# through (near-)collapsed latent rows. All other knobs are the previously
+# failing config: mask_ratio=0.0, attn=sdpa, no gradient_checkpointing, bs=4
+# accum=32, max_iters=2. Any non-finite tensor / gradient / parameter
+# raises NonFiniteError; `set -e` aborts the job BEFORE the three full
+# method waves. Final checkpoints / latents / probes / leaderboard are
 # never produced on a NaN run.
-echo "[$(date)] Wave 0b: finite smoke A (ssae_positive, mask_ratio=0.0, attn=sdpa)"
+echo "[$(date)] Wave 0b: finite smoke D1 (ssae_positive, latent_norm_eps=$LATENT_NORM_EPS)"
 python scripts/run_ssae_method.py \
   --method ssae_positive \
   --data_dir "$DATA_DIR" \
-  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_no_mask_sdpa" \
+  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_d1_eps${LATENT_NORM_EPS}" \
   --model_name_or_path "$MODEL_PATH" \
   --local_files_only \
   --phase 1 \
@@ -171,44 +176,14 @@ python scripts/run_ssae_method.py \
   --ce_chunk_size "$CE_CHUNK_SIZE" \
   --train_attn_mask_ratio 0.0 \
   --attn_implementation sdpa \
+  --latent_norm_eps "$LATENT_NORM_EPS" \
   --max_grad_norm "$MAX_GRAD_NORM" \
   --debug_attn_mask \
   --debug_grad_check \
   --skip_extract \
   --skip_probe \
   --seed 42
-echo "[$(date)] Wave 0b A complete"
-
-# ---- Wave 0c: finite smoke B (official mask + eager attention) ------------
-echo "[$(date)] Wave 0c: finite smoke B (ssae_positive, mask_ratio=0.1, attn=eager)"
-python scripts/run_ssae_method.py \
-  --method ssae_positive \
-  --data_dir "$DATA_DIR" \
-  --out_dir "$OUT_ROOT/ssae_finite_smoke/ssae_positive_mask_eager" \
-  --model_name_or_path "$MODEL_PATH" \
-  --local_files_only \
-  --phase 1 \
-  --sparsity_factor 1 \
-  --l1_weight 1e-4 \
-  --bce_weight 0.1 \
-  --max_seq_len 2048 \
-  --batch_size "$BATCH_SIZE" \
-  --grad_accum_steps "$GRAD_ACCUM" \
-  --learning_rate 1e-6 \
-  --min_lr 1e-7 \
-  --warmup_iters 0 \
-  --max_iters 2 \
-  --nproc_per_node 4 \
-  --ce_chunk_size "$CE_CHUNK_SIZE" \
-  --train_attn_mask_ratio 0.1 \
-  --attn_implementation eager \
-  --max_grad_norm "$MAX_GRAD_NORM" \
-  --debug_attn_mask \
-  --debug_grad_check \
-  --skip_extract \
-  --skip_probe \
-  --seed 42
-echo "[$(date)] Wave 0c B complete"
+echo "[$(date)] Wave 0b D1 complete"
 
 # ---- Wave 1-3: SSAE methods, DDP over all 4 H100 GPUs ----------------------
 run_method ssae_positive    4

@@ -57,6 +57,7 @@ class QwenSSAE(nn.Module):
         activation: nn.Module | None = None,
         contrastive: bool = False,
         attn_implementation: str | None = None,
+        latent_norm_eps: float = 1e-8,
     ) -> None:
         super().__init__()
         if phase != 1:
@@ -67,6 +68,13 @@ class QwenSSAE(nn.Module):
         self.contrastive = contrastive
         self.model_name_or_path = model_name_or_path
         self.attn_implementation = attn_implementation
+        # Eps used in clamp_min(norm) during latent normalization. Raising
+        # this bounds the 1/eps amplification on backward through collapsed
+        # latent rows. Default 1e-8 matches torch.nn.functional.normalize.
+        self.latent_norm_eps = float(latent_norm_eps)
+        # Set by enable_latent_relu_grad_capture(); reset every forward.
+        self._capture_latent_relu_grad: bool = False
+        self._last_latent_relu_max_abs_grad: float = float("nan")
 
         # Three Qwen instances, matching official MyModel. attn_implementation
         # is forwarded when requested ("eager" / "sdpa" / "flash_attention_2");
@@ -120,6 +128,16 @@ class QwenSSAE(nn.Module):
         self.aux_head: nn.Module | None = None
         if self.contrastive:
             self.aux_head = nn.Linear(self.n_latents, 1)
+
+    def enable_latent_relu_grad_capture(self, on: bool = True) -> None:
+        """When on, register a backward hook on latents_relu so the trainer
+        can read max |grad on latents_relu| after each backward via
+        last_latent_relu_max_abs_grad(). No cost when off.
+        """
+        self._capture_latent_relu_grad = bool(on)
+
+    def last_latent_relu_max_abs_grad(self) -> float:
+        return float(self._last_latent_relu_max_abs_grad)
 
     def enable_gradient_checkpointing(self) -> None:
         """Turn on HF gradient checkpointing for encoder and decoder.
@@ -207,15 +225,42 @@ class QwenSSAE(nn.Module):
         )
         latents_relu = self.autoencoder.activation(latents_pre)
 
-        # Stable L2 normalization with eps=1e-8. Equivalent to the official
-        # F.normalize(p=2) on non-zero vectors; on (near-)zero rows it
-        # divides by eps instead of by 0, which prevents NaN propagation.
+        # Stable L2 normalization with eps=self.latent_norm_eps. Equivalent
+        # to the official F.normalize(p=2) on non-zero vectors; on rows
+        # whose L2 norm falls below eps, divides by eps instead, which
+        # caps the 1/eps amplification on the backward (see SSAE audit
+        # hypothesis A).
         latent_norm = latents_relu.norm(p=2, dim=-1, keepdim=True)
-        # zero_norm_frac: fraction of (batch, sparsity_factor) latent vectors
-        # whose pre-normalize L2 norm is below 1e-8 -- collapsed latents.
-        zero_norm_frac = (latent_norm.detach() < 1e-8).float().mean()
-        safe_norm = latent_norm.clamp_min(1e-8)
+        eps = self.latent_norm_eps
+        # zero_norm_frac is now "fraction of rows that hit the eps floor".
+        zero_norm_frac = (latent_norm.detach() < eps).float().mean()
+        # Per-micro-step distribution of the pre-normalize norm.
+        norm_flat = latent_norm.detach().float().flatten()
+        if norm_flat.numel() > 0:
+            sorted_norm = torch.sort(norm_flat).values
+            p01_idx = max(0, int(0.01 * (sorted_norm.numel() - 1)))
+            latent_norm_min = sorted_norm[0]
+            latent_norm_p01 = sorted_norm[p01_idx]
+            latent_norm_mean = norm_flat.mean()
+            latent_norm_max = sorted_norm[-1]
+        else:
+            latent_norm_min = latent_norm_p01 = latent_norm_mean = latent_norm_max = \
+                torch.tensor(0.0, device=latent_norm.device)
+        safe_norm = latent_norm.clamp_min(eps)
         latents_normed = latents_relu / safe_norm
+
+        # Optional grad-capture for D1 diagnostics: reset per forward, the
+        # hook fires during backward and stores max |grad| on a Python attr.
+        if self._capture_latent_relu_grad and latents_relu.requires_grad:
+            self._last_latent_relu_max_abs_grad = float("nan")
+            def _grad_hook(g, _model=self):
+                try:
+                    _model._last_latent_relu_max_abs_grad = float(
+                        g.detach().abs().max().item()
+                    )
+                except Exception:
+                    _model._last_latent_relu_max_abs_grad = float("nan")
+            latents_relu.register_hook(_grad_hook)
 
         sparsity_loss = latents_normed.abs().sum(dim=(1, 2))  # (B,)
         latents_clean = latents_normed
@@ -249,6 +294,10 @@ class QwenSSAE(nn.Module):
             "sparsity_loss_sum": sparsity_loss.sum(),
             "aux_logit": aux_logit,
             "zero_norm_frac": zero_norm_frac,
+            "latent_norm_min": latent_norm_min.detach(),
+            "latent_norm_p01": latent_norm_p01.detach(),
+            "latent_norm_mean": latent_norm_mean.detach(),
+            "latent_norm_max": latent_norm_max.detach(),
         }
 
     # --------------------------------------------------- inference for latents
@@ -260,6 +309,6 @@ class QwenSSAE(nn.Module):
         last_token_embeddings = self.get_last_token_embeddings(encoder_outputs, attention_mask)
         latents = self.autoencoder(last_token_embeddings)
         # Use the same eps-stabilized normalize as the training forward.
-        norm = latents.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-8)
+        norm = latents.norm(p=2, dim=-1, keepdim=True).clamp_min(self.latent_norm_eps)
         latents = latents / norm
         return latents.squeeze(1)

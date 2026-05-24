@@ -2,9 +2,9 @@
 #SBATCH --job-name=dense_linear_full
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
-#SBATCH --gpus=h100:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=128G
+#SBATCH --gpus-per-node=h100:4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=0
 #SBATCH --time=05:00:00
 #SBATCH --output=%x-%j.out
 

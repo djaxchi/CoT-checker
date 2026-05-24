@@ -48,6 +48,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--grad_accum_steps", type=int, default=8)
     p.add_argument("--learning_rate", type=float, default=1e-6)
+    p.add_argument("--aux_learning_rate", type=float, default=None,
+                   help="LR for the ssae_contrastive aux_head param group. "
+                        "Defaults to --learning_rate. Recommended ~1e-3.")
     p.add_argument("--min_lr", type=float, default=1e-7)
     p.add_argument("--warmup_iters", type=int, default=2)
     p.add_argument("--max_iters", type=int, default=30)
@@ -142,6 +145,10 @@ def main() -> None:
             "--learning_rate", str(args.learning_rate),
             "--min_lr", str(args.min_lr),
             "--warmup_iters", str(args.warmup_iters),
+        ]
+        if args.aux_learning_rate is not None:
+            cmd += ["--aux_learning_rate", str(args.aux_learning_rate)]
+        cmd += [
             "--max_iters", str(args.max_iters),
             "--lr_decay_iters", str(args.lr_decay_iters),
             "--train_attn_mask_ratio", str(args.train_attn_mask_ratio),

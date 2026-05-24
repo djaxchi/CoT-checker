@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
                    help="Per-GPU micro-batch size.")
     p.add_argument("--grad_accum_steps", type=int, default=8)
     p.add_argument("--learning_rate", type=float, default=1e-6)
+    p.add_argument("--aux_learning_rate", type=float, default=None,
+                   help="LR for the ssae_contrastive aux_head param group. "
+                        "Defaults to --learning_rate (legacy behavior). "
+                        "Recommended: 1e-3 so the freshly-initialized aux "
+                        "head can actually move when the trunk LR is ~1e-6.")
     p.add_argument("--min_lr", type=float, default=1e-7)
     p.add_argument("--warmup_iters", type=int, default=2)
     p.add_argument("--max_iters", type=int, default=30)
@@ -526,6 +531,12 @@ def compute_loss(model, batch, device, sparsity_factor: int,
                        iter_num=iter_num, micro_step=micro_step)
 
     aux_bce = torch.tensor(0.0, device=device)
+    aux_logit_mean = torch.tensor(float("nan"), device=device)
+    aux_logit_std = torch.tensor(float("nan"), device=device)
+    aux_logit_min = torch.tensor(float("nan"), device=device)
+    aux_logit_max = torch.tensor(float("nan"), device=device)
+    label_mean = torch.tensor(float("nan"), device=device)
+    weighted_bce = torch.tensor(0.0, device=device)
     if contrastive:
         labels = batch["labels"].to(device, non_blocking=True)
         if (labels < 0).any():
@@ -543,7 +554,15 @@ def compute_loss(model, batch, device, sparsity_factor: int,
                            iter_num=iter_num, micro_step=micro_step)
             _assert_finite("aux_bce", aux_bce, method=method, rank=rank,
                            iter_num=iter_num, micro_step=micro_step)
-        loss = loss + bce_weight * aux_bce
+        weighted_bce = bce_weight * aux_bce
+        loss = loss + weighted_bce
+        with torch.no_grad():
+            _l = aux_logit.detach().float().reshape(-1)
+            aux_logit_mean = _l.mean()
+            aux_logit_std = _l.std(unbiased=False) if _l.numel() > 1 else torch.tensor(0.0, device=device)
+            aux_logit_min = _l.min()
+            aux_logit_max = _l.max()
+            label_mean = labels.detach().float().mean()
 
     if finite_checks:
         _assert_finite("total_loss", loss, method=method, rank=rank,
@@ -554,6 +573,12 @@ def compute_loss(model, batch, device, sparsity_factor: int,
         "loss_nll": loss_nll.detach(),
         "loss_spa": loss_spa.detach(),
         "aux_bce": aux_bce.detach(),
+        "weighted_bce": weighted_bce.detach(),
+        "aux_logit_mean": aux_logit_mean.detach(),
+        "aux_logit_std": aux_logit_std.detach(),
+        "aux_logit_min": aux_logit_min.detach(),
+        "aux_logit_max": aux_logit_max.detach(),
+        "label_mean": label_mean.detach(),
         "sparsity_sum": sparsity_loss_sum.detach(),
         "n_loss_tokens": n_loss_tokens.detach(),
         "batch_size": batch_size,
@@ -748,17 +773,47 @@ def main() -> None:
     )
     scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # Two param groups so the freshly-initialized aux_head can use a
+    # probe-style LR (~1e-3) while the trunk (encoder/decoder/autoencoder/
+    # projection_mlp) stays at args.learning_rate (~1e-6). With a single
+    # group at 1e-6, AdamW updates to aux_head are bounded by ~lr per step,
+    # which over 30 iters is far smaller than the Linear init scale of
+    # 1/sqrt(n_latents) ~= 0.025 -- the head cannot escape ~0.5 sigmoid /
+    # 0.693 BCE.
+    aux_lr = (
+        args.aux_learning_rate if args.aux_learning_rate is not None
+        else args.learning_rate
+    )
+    aux_params, base_params = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if "aux_head" in n:
+            aux_params.append(p)
+        else:
+            base_params.append(p)
+    param_groups = [
+        {"params": base_params, "lr": args.learning_rate,
+         "base_lr": args.learning_rate, "name": "base"},
+    ]
+    if aux_params:
+        param_groups.append(
+            {"params": aux_params, "lr": aux_lr,
+             "base_lr": aux_lr, "name": "aux_head"}
+        )
     optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=args.learning_rate,
+        param_groups,
         betas=(args.beta1, args.beta2),
         weight_decay=args.weight_decay,
     )
 
     if master:
-        n_trainable = sum(p.numel() for p in trainable_params)
-        logger.info(f"trainable params: {n_trainable / 1e6:.2f}M")
+        n_base = sum(p.numel() for p in base_params)
+        n_aux = sum(p.numel() for p in aux_params)
+        logger.info(
+            f"trainable params: base={n_base / 1e6:.2f}M aux_head={n_aux} "
+            f"(base_lr={args.learning_rate:.2e}, aux_lr={aux_lr:.2e})"
+        )
 
     # ---- Training loop ----------------------------------------------------
     train_metrics_history: list[dict] = []
@@ -774,8 +829,14 @@ def main() -> None:
             train_sampler.set_epoch(it)
         lr = get_lr(it, args.warmup_iters, lr_decay_iters,
                     args.learning_rate, args.min_lr)
+        # Preserve the per-group LR ratio: scale each group's stored
+        # base_lr by the same warmup/decay multiplier (lr / args.learning_rate).
+        # This keeps aux_head ~1e-3 even when trunk lr is on its warmup ramp
+        # or decay tail, instead of clobbering both groups to the trunk lr.
+        lr_mult = (lr / args.learning_rate) if args.learning_rate > 0 else 1.0
         for pg in optimizer.param_groups:
-            pg["lr"] = lr
+            base = pg.get("base_lr", args.learning_rate)
+            pg["lr"] = base * lr_mult
 
         model.train()
         optimizer.zero_grad(set_to_none=True)
@@ -850,6 +911,28 @@ def main() -> None:
             epoch_zero_norm += _zero_norm_v
             epoch_tokens += _n_tok_v
 
+            # Aux diagnostics: distinguish "logits never move" (head LR too
+            # low / head stuck near init) from "logits move but BCE is flat"
+            # (label-vs-representation mismatch). Logged once per micro_step
+            # on master only.
+            if contrastive and master:
+                aux_w = getattr(model_module, "aux_head", None)
+                aux_w_norm = (
+                    float(aux_w.weight.detach().float().norm().item())
+                    if aux_w is not None else float("nan")
+                )
+                logger.info(
+                    f"[aux-diag] iter={it} micro_step={micro_step} "
+                    f"aux_bce={_aux_bce_v:.4e} "
+                    f"weighted_bce={float(out['weighted_bce'].item()):.4e} "
+                    f"logit_mean={float(out['aux_logit_mean'].item()):.4e} "
+                    f"logit_std={float(out['aux_logit_std'].item()):.4e} "
+                    f"logit_min={float(out['aux_logit_min'].item()):.4e} "
+                    f"logit_max={float(out['aux_logit_max'].item()):.4e} "
+                    f"label_mean={float(out['label_mean'].item()):.4f} "
+                    f"aux_head_w_norm={aux_w_norm:.4e}"
+                )
+
             if args.debug_grad_check and master:
                 ln_min = float(out["latent_norm_min"].item())
                 ln_p01 = float(out["latent_norm_p01"].item())
@@ -891,6 +974,20 @@ def main() -> None:
                             error_if_nonfinite=False,
                         ).item()
                     )
+                # Aux head grad norm, post-unscale, pre-step. Reads the
+                # accumulated, all-reduced gradient on aux_head.weight/bias.
+                # If this stays ~0 the BCE signal never reaches the head.
+                if contrastive and master:
+                    _aux_h = getattr(model_module, "aux_head", None)
+                    if _aux_h is not None:
+                        _sq = 0.0
+                        for _p in _aux_h.parameters():
+                            if _p.grad is not None:
+                                _sq += float(_p.grad.detach().float().pow(2).sum().item())
+                        logger.info(
+                            f"[aux-grad] iter={it} global_step={global_step} "
+                            f"aux_head_grad_norm={_sq ** 0.5:.4e}"
+                        )
                 if master and (it < 2 or args.debug_grad_check):
                     post_clip = min(pre_clip_norm, effective_max_grad_norm) \
                         if math.isfinite(pre_clip_norm) else float("nan")

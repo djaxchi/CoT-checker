@@ -121,6 +121,20 @@ def tokenize_step(
 # Encoding
 # ---------------------------------------------------------------------------
 
+def load_trace_file(path: Path) -> list[dict]:
+    """Load ProcessBench traces from either a JSON list or a JSONL file."""
+    text = path.read_text(encoding="utf-8")
+    s = text.lstrip()
+    if s.startswith("["):
+        return json.loads(text)
+    rows: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
 def encode_all_steps(
     traces: list[dict],
     tokenizer,
@@ -158,7 +172,8 @@ def encode_all_steps(
             })
             prefix_parts.append(step_text)
 
-    hidden_dim = model.config.hidden_size
+    base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    hidden_dim = base_model.config.hidden_size
     np_dtype = np.float16 if save_dtype == torch.float16 else np.float32
     n = len(flat)
     all_hidden = np.zeros((n, hidden_dim), dtype=np_dtype)
@@ -182,6 +197,8 @@ def encode_all_steps(
                 batch_ids.append(ids)
                 batch_cand_idx.append(cand_idx)
                 batch_valid.append(True)
+                # carry subset tag through if present
+                ex.setdefault("pb_subset", ex.get("pb_subset"))
             except ValueError as e:
                 print(
                     f"[encode] SKIP overlength step: id={ex['id']} step={ex['step_idx']}: {e}",
@@ -219,7 +236,7 @@ def encode_all_steps(
             if valid:
                 vec = last_layer[b_idx, cand_idx, :].detach().to(save_dtype).cpu().numpy()
                 all_hidden[i + b_idx] = vec
-            all_meta.append({
+            meta_row = {
                 "id": ex["id"],
                 "step_idx": ex["step_idx"],
                 "label": ex["label"],
@@ -228,7 +245,10 @@ def encode_all_steps(
                 "n_tokens": n_tokens if valid else -1,
                 "was_truncated": False,
                 "skipped": not valid,
-            })
+            }
+            if ex.get("pb_subset"):
+                meta_row["pb_subset"] = ex["pb_subset"]
+            all_meta.append(meta_row)
 
         del last_layer
         i += len(batch)
@@ -259,6 +279,12 @@ def main() -> None:
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     p.add_argument("--save_dtype", choices=["float16", "float32"], default="float16")
+    p.add_argument("--subset_name", type=str, default=None,
+                   help="If set, write a 'pb_subset' field on every meta row.")
+    p.add_argument("--output_layout", choices=["legacy", "generic"], default="legacy",
+                   help="legacy=pb_gsm8k_step_*; generic=pb_step_* (new layout).")
+    p.add_argument("--force", action="store_true",
+                   help="Overwrite existing output files.")
     args = p.parse_args()
 
     if not args.raw_file.exists():
@@ -273,8 +299,11 @@ def main() -> None:
     model_dtype = dtype_map[args.model_dtype]
     save_dtype = dtype_map[args.save_dtype]
 
-    print(f"[encode_pb] Loading {len(json.loads(args.raw_file.read_text()))} traces from {args.raw_file}", flush=True)
-    traces: list[dict] = json.loads(args.raw_file.read_text())
+    traces: list[dict] = load_trace_file(args.raw_file)
+    print(f"[encode_pb] Loaded {len(traces)} traces from {args.raw_file}", flush=True)
+    if args.subset_name:
+        for t in traces:
+            t.setdefault("pb_subset", args.subset_name)
 
     # Validate expected fields
     required = {"id", "problem", "steps", "label"}
@@ -316,9 +345,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
-
     hidden_dim = model.config.hidden_size
-    print(f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, device={device}", flush=True)
+
+    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
+    if n_gpus > 1:
+        print(f"[encode_pb] Wrapping model in DataParallel across {n_gpus} GPUs", flush=True)
+        model = torch.nn.DataParallel(model)
+    print(f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, device={device}, n_gpus={n_gpus}", flush=True)
 
     t_start = time.perf_counter()
     all_hidden, all_meta, n_skipped = encode_all_steps(
@@ -334,8 +367,14 @@ def main() -> None:
     t_end = time.perf_counter()
 
     n_total = len(all_meta)
-    h_path = args.out_dir / "pb_gsm8k_step_h.npy"
-    meta_path = args.out_dir / "pb_gsm8k_step_meta.jsonl"
+    if args.output_layout == "legacy":
+        h_path = args.out_dir / "pb_gsm8k_step_h.npy"
+        meta_path = args.out_dir / "pb_gsm8k_step_meta.jsonl"
+    else:
+        h_path = args.out_dir / "pb_step_h.npy"
+        meta_path = args.out_dir / "pb_step_meta.jsonl"
+    if h_path.exists() and not args.force:
+        sys.exit(f"[encode_pb] Refusing to overwrite {h_path}. Pass --force.")
 
     np.save(h_path, all_hidden)
     write_jsonl(meta_path, all_meta)

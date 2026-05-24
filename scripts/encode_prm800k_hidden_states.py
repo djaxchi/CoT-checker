@@ -157,7 +157,8 @@ def encode_file(
     n = len(examples)
     print(f"[encode] {stem}: {n} examples", flush=True)
 
-    hidden_dim = model.config.hidden_size
+    base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+    hidden_dim = base_model.config.hidden_size
     np_dtype = np.float16 if save_dtype == torch.float16 else np.float32
     all_hidden = np.zeros((n, hidden_dim), dtype=np_dtype)
     all_labels = np.zeros(n, dtype=np.int32)
@@ -300,6 +301,31 @@ FILE_STEMS = [
 ]
 
 
+def parse_splits_arg(splits: list[str], data_dir: Path) -> list[tuple[str, str]]:
+    """Parse --splits entries of the form 'input.jsonl:stem'.
+
+    The input portion may be a basename (resolved under data_dir) or an
+    absolute/relative path containing '/' (used as-is). The stem is the
+    output prefix for {stem}_h.npy, {stem}_y.npy, {stem}_meta.jsonl.
+    """
+    parsed: list[tuple[str, str]] = []
+    for entry in splits:
+        if ":" not in entry:
+            sys.exit(f"--splits entry malformed (expected input:stem): {entry!r}")
+        inp, stem = entry.rsplit(":", 1)
+        inp = inp.strip()
+        stem = stem.strip()
+        if not inp or not stem:
+            sys.exit(f"--splits entry malformed (empty input or stem): {entry!r}")
+        if "/" not in inp and not inp.startswith("."):
+            # Treat as basename under data_dir
+            inp_path = str((data_dir / inp).resolve())
+        else:
+            inp_path = inp
+        parsed.append((inp_path, stem))
+    return parsed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Encode PRM800K hidden states with Qwen2.5-1.5B.")
     parser.add_argument("--data_dir", type=Path, required=True)
@@ -313,6 +339,16 @@ def main() -> None:
     parser.add_argument("--save_dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--limit_per_file", type=int, default=None,
                         help="Debug: encode only the first N examples per file.")
+    parser.add_argument(
+        "--splits", nargs="+", default=None,
+        help="Optional list of <input.jsonl>:<stem> pairs. If omitted, the "
+             "original 40k FILE_STEMS layout is used. The input may be a "
+             "basename (resolved under --data_dir) or a path with '/'.",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing {stem}_h.npy outputs. Default refuses.",
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -358,9 +394,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
     model.eval()
-
     hidden_dim = model.config.hidden_size
-    print(f"[encode] Model loaded. hidden_dim={hidden_dim}, device={device}", flush=True)
+
+    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
+    if n_gpus > 1:
+        print(f"[encode] Wrapping model in DataParallel across {n_gpus} GPUs", flush=True)
+        model = torch.nn.DataParallel(model)
+    print(f"[encode] Model loaded. hidden_dim={hidden_dim}, device={device}, n_gpus={n_gpus}", flush=True)
 
     gpu_info = get_gpu_info()
     t_all_start = time.perf_counter()
@@ -370,10 +410,21 @@ def main() -> None:
     truncated_by_file: dict[str, int] = {}
     skipped_by_file: dict[str, int] = {}
 
-    for filename, stem in FILE_STEMS:
-        jsonl_path = args.data_dir / filename
+    if args.splits is not None:
+        split_specs = [(Path(p), stem) for p, stem in parse_splits_arg(args.splits, args.data_dir)]
+    else:
+        split_specs = [(args.data_dir / fn, stem) for fn, stem in FILE_STEMS]
+
+    for jsonl_path, stem in split_specs:
         if not jsonl_path.exists():
             sys.exit(f"Required file not found: {jsonl_path}")
+
+        existing_h = args.out_dir / f"{stem}_h.npy"
+        if existing_h.exists() and not args.force:
+            sys.exit(
+                f"[encode] Refusing to overwrite existing {existing_h}. "
+                "Pass --force to overwrite."
+            )
 
         stats = encode_file(
             jsonl_path=jsonl_path,

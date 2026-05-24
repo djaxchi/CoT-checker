@@ -57,9 +57,31 @@ def load_npy_pair(cache_dir: Path, stem: str) -> tuple[np.ndarray, np.ndarray]:
     return h.astype(np.float32), y
 
 
-def require_pb_cache(pb_cache_dir: Path) -> tuple[np.ndarray, list[dict]]:
-    h_path = pb_cache_dir / "pb_gsm8k_step_h.npy"
-    meta_path = pb_cache_dir / "pb_gsm8k_step_meta.jsonl"
+def require_pb_cache(
+    pb_cache_dir: Path | None = None,
+    pb_h: Path | None = None,
+    pb_meta: Path | None = None,
+) -> tuple[np.ndarray, list[dict]]:
+    """Load ProcessBench hidden states + meta.
+
+    Either pass --pb_h/--pb_meta explicitly, or pass --pb_cache_dir and we
+    will look for the legacy pb_gsm8k_step_* names, falling back to generic
+    pb_step_* names emitted by the new multi-subset encoder.
+    """
+    if pb_h is not None and pb_meta is not None:
+        h_path = pb_h
+        meta_path = pb_meta
+    else:
+        if pb_cache_dir is None:
+            raise ValueError("Must provide pb_cache_dir or (pb_h, pb_meta)")
+        legacy_h = pb_cache_dir / "pb_gsm8k_step_h.npy"
+        legacy_meta = pb_cache_dir / "pb_gsm8k_step_meta.jsonl"
+        new_h = pb_cache_dir / "pb_step_h.npy"
+        new_meta = pb_cache_dir / "pb_step_meta.jsonl"
+        if legacy_h.exists() and legacy_meta.exists():
+            h_path, meta_path = legacy_h, legacy_meta
+        else:
+            h_path, meta_path = new_h, new_meta
     if not h_path.exists() or not meta_path.exists():
         raise FileNotFoundError(
             f"ProcessBench cached hidden states missing: expected\n"
@@ -284,11 +306,14 @@ def probe_scores(probe: LinearProbe, z: np.ndarray, batch_size: int, device: tor
 # Threshold selection
 # ---------------------------------------------------------------------------
 
-def select_threshold(scores: np.ndarray, y: np.ndarray) -> tuple[float, float, float]:
-    best_t = THRESHOLD_GRID[0]
+def select_threshold(
+    scores: np.ndarray, y: np.ndarray, grid: list[float] | None = None
+) -> tuple[float, float, float]:
+    grid = grid if grid is not None else THRESHOLD_GRID
+    best_t = grid[0]
     best_bacc = -1.0
     best_f1 = 0.0
-    for t in THRESHOLD_GRID:
+    for t in grid:
         pred = (scores > t).astype(np.int64)
         tp = int(((pred == 1) & (y == 1)).sum())
         tn = int(((pred == 0) & (y == 0)).sum())
@@ -384,7 +409,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--method", required=True, choices=METHODS)
     p.add_argument("--cache_dir", required=True, type=Path)
-    p.add_argument("--pb_cache_dir", required=True, type=Path)
+    p.add_argument("--pb_cache_dir", required=False, type=Path, default=None,
+                   help="Legacy: directory with pb_gsm8k_step_* (or pb_step_*). "
+                        "If omitted, use --pb_h/--pb_meta or --pb_specs.")
     p.add_argument("--out_dir", required=True, type=Path)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--epochs_sae", type=int, default=20)
@@ -398,7 +425,59 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--latent_dim", type=int, default=None,
                    help="Default: hidden_dim (no overcomplete unless explicitly set).")
     p.add_argument("--early_stopping_patience", type=int, default=5)
+    # ---- Generalized cache stems --------------------------------------
+    p.add_argument("--probe_train_stem", type=str, default="probe_train_40k",
+                   help="Stem under --cache_dir loaded as probe training data.")
+    p.add_argument("--val_stem", type=str, default="val_1k",
+                   help="Stem under --cache_dir loaded as validation data.")
+    # ---- Single explicit PB target ------------------------------------
+    p.add_argument("--pb_h", type=Path, default=None,
+                   help="Explicit path to ProcessBench hidden states .npy.")
+    p.add_argument("--pb_meta", type=Path, default=None,
+                   help="Explicit path to ProcessBench step meta .jsonl.")
+    p.add_argument("--pb_name", type=str, default="gsm8k",
+                   help="Tag for output filenames (pb_step_scores_<pb_name>.jsonl etc).")
+    # ---- Multiple PB targets in one run -------------------------------
+    p.add_argument(
+        "--pb_specs", type=str, nargs="+", default=None,
+        help="Optional list of 'name:h_path:meta_path' triples. When set, the "
+             "trained probe is evaluated against every PB target sequentially.",
+    )
+    # ---- Threshold grid -----------------------------------------------
+    p.add_argument(
+        "--threshold_grid", type=str, default=None,
+        help="Either a float step size in (0,1) (e.g. 0.001) or a comma-"
+             "separated list of explicit thresholds (e.g. '0.3,0.5,0.7'). "
+             "Default: 0.1..1.0 by 0.1 (legacy).",
+    )
+    # ---- Sanity / compatibility ---------------------------------------
+    p.add_argument("--skip_size_asserts", action="store_true",
+                   help="Skip the legacy 40k/1k size assertions (required for "
+                        "any non-default --probe_train_stem / --val_stem).")
     return p.parse_args()
+
+
+def resolve_threshold_grid(arg: str | None) -> list[float]:
+    if arg is None:
+        return THRESHOLD_GRID
+    if "," in arg:
+        return [float(t) for t in arg.split(",") if t.strip()]
+    step = float(arg)
+    if step <= 0 or step >= 1:
+        raise SystemExit(f"--threshold_grid step must be in (0,1), got {step}")
+    n = int(round(1.0 / step))
+    return [round(step * i, 6) for i in range(1, n)]
+
+
+def parse_pb_specs(specs: list[str]) -> list[tuple[str, Path, Path]]:
+    out: list[tuple[str, Path, Path]] = []
+    for s in specs:
+        parts = s.split(":")
+        if len(parts) != 3:
+            raise SystemExit(f"--pb_specs entry must be name:h:meta, got {s!r}")
+        name, h, meta = parts
+        out.append((name, Path(h), Path(meta)))
+    return out
 
 
 def main() -> None:
@@ -417,23 +496,41 @@ def main() -> None:
     (args.out_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=True))
 
     # Load PRM800K data
-    probe_train_h, probe_train_y = load_npy_pair(args.cache_dir, "probe_train_40k")
-    val_h, val_y = load_npy_pair(args.cache_dir, "val_1k")
+    probe_train_h, probe_train_y = load_npy_pair(args.cache_dir, args.probe_train_stem)
+    val_h, val_y = load_npy_pair(args.cache_dir, args.val_stem)
     hidden_dim = probe_train_h.shape[1]
     latent_dim = args.latent_dim if args.latent_dim is not None else hidden_dim
 
-    assert probe_train_h.shape[0] == 40000, (
-        f"probe_train_40k must have 40000 rows, got {probe_train_h.shape[0]}"
-    )
-    assert val_h.shape[0] == 1000, (
-        f"val_1k must have 1000 rows, got {val_h.shape[0]}"
-    )
+    legacy_default = (args.probe_train_stem == "probe_train_40k" and args.val_stem == "val_1k")
+    if legacy_default and not args.skip_size_asserts:
+        assert probe_train_h.shape[0] == 40000, (
+            f"probe_train_40k must have 40000 rows, got {probe_train_h.shape[0]}"
+        )
+        assert val_h.shape[0] == 1000, (
+            f"val_1k must have 1000 rows, got {val_h.shape[0]}"
+        )
 
-    # Require ProcessBench cache up-front
-    pb_h, pb_meta = require_pb_cache(args.pb_cache_dir)
-    assert pb_h.shape[1] == hidden_dim, (
-        f"ProcessBench hidden_dim ({pb_h.shape[1]}) != PRM800K hidden_dim ({hidden_dim})"
-    )
+    # Resolve ProcessBench targets
+    pb_targets: list[tuple[str, np.ndarray, list[dict]]] = []
+    if args.pb_specs:
+        for name, h_path, meta_path in parse_pb_specs(args.pb_specs):
+            h, meta = require_pb_cache(pb_h=h_path, pb_meta=meta_path)
+            assert h.shape[1] == hidden_dim, (
+                f"PB[{name}] hidden_dim ({h.shape[1]}) != PRM800K ({hidden_dim})"
+            )
+            pb_targets.append((name, h, meta))
+    elif args.pb_h is not None and args.pb_meta is not None:
+        h, meta = require_pb_cache(pb_h=args.pb_h, pb_meta=args.pb_meta)
+        assert h.shape[1] == hidden_dim
+        pb_targets.append((args.pb_name, h, meta))
+    elif args.pb_cache_dir is not None:
+        h, meta = require_pb_cache(pb_cache_dir=args.pb_cache_dir)
+        assert h.shape[1] == hidden_dim
+        pb_targets.append((args.pb_name, h, meta))
+    else:
+        raise SystemExit("Provide one of: --pb_specs, --pb_h+--pb_meta, or --pb_cache_dir")
+
+    threshold_grid = resolve_threshold_grid(args.threshold_grid)
 
     method = args.method
 
@@ -523,84 +620,136 @@ def main() -> None:
 
     # ---- Threshold selection ----------------------------------------------
     np.save(args.out_dir / "val_scores.npy", val_scores)
-    threshold, best_bacc, val_f1 = select_threshold(val_scores, val_y)
+    val_selected_threshold, best_bacc, val_f1 = select_threshold(
+        val_scores, val_y, threshold_grid
+    )
     (args.out_dir / "threshold.json").write_text(
         json.dumps(
             {
-                "selected_threshold": threshold,
+                "selected_threshold": val_selected_threshold,
                 "selection_metric": "balanced_accuracy",
                 "best_val_balanced_accuracy": best_bacc,
                 "val_f1_binary": val_f1,
-                "threshold_grid": THRESHOLD_GRID,
+                "threshold_grid": threshold_grid,
+                "fixed_threshold_0p5": 0.5,
             },
             indent=2,
         )
     )
 
-    # ---- ProcessBench eval ------------------------------------------------
-    # eval_time_sec includes: SAE encoding of pb_h (when applicable),
-    # probe inference on pb_z, and per-trace aggregation/prediction.
-    # Excludes: PRM800K data load, training, disk I/O for outputs.
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    eval_t0 = time.time()
+    # ---- ProcessBench eval (loop over targets, emit per-name files) -------
+    all_eval_summaries: list[dict] = []
+    for pb_name, pb_h_arr, pb_meta_rows in pb_targets:
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        eval_t0 = time.time()
 
-    if sae is not None:
-        z_pb = encode_with_sae(sae, pb_h, args.batch_size, device)
-    else:
-        z_pb = pb_h
+        if sae is not None:
+            z_pb = encode_with_sae(sae, pb_h_arr, args.batch_size, device)
+        else:
+            z_pb = pb_h_arr
 
-    if method == "random":
-        # Deterministic random scores; counted in eval timing as the
-        # "inference" step for consistency with other methods.
-        pb_rng = np.random.default_rng(args.seed + 1)
-        pb_scores = pb_rng.uniform(0.0, 1.0, size=pb_h.shape[0]).astype(np.float32)
-    else:
-        pb_scores = probe_scores(probe, z_pb, args.batch_size, device)
+        if method == "random":
+            pb_rng = np.random.default_rng(args.seed + 1)
+            pb_scores = pb_rng.uniform(0.0, 1.0, size=pb_h_arr.shape[0]).astype(np.float32)
+        else:
+            pb_scores = probe_scores(probe, z_pb, args.batch_size, device)
 
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    pb_rows, pb_metrics = evaluate_processbench(pb_scores, pb_meta, threshold)
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    eval_time = time.time() - eval_t0
+        if device.type == "cuda":
+            torch.cuda.synchronize()
 
-    with (args.out_dir / "pb_step_scores.jsonl").open("w") as f:
-        for row in pb_rows:
-            f.write(json.dumps(row) + "\n")
-    with (args.out_dir / "pb_predictions.jsonl").open("w") as f:
-        for row in pb_rows:
-            f.write(
-                json.dumps(
-                    {
-                        "id": row["id"],
-                        "label": row["label"],
-                        "prediction": row["prediction"],
-                        "threshold": row["threshold"],
-                    }
-                )
-                + "\n"
+        # Oracle threshold = grid-search on PB itself (per-step labels: is this
+        # step the first error?). For trace-level F1_PB the oracle is computed
+        # below by scanning the same grid for the value that maximizes F1_PB.
+        eval_time_inference = time.time() - eval_t0
+
+        # First-error step labels per row, used for diagnostic stepwise selection.
+        # row['label'] is trace-level first-error idx; per-step "is-error" label is
+        # 1 iff row['step_idx'] == row['label'].
+        step_is_error = np.array(
+            [int(int(r["step_idx"]) == int(r["label"])) for r in pb_meta_rows],
+            dtype=np.int64,
+        )
+
+        def eval_at(t: float) -> tuple[list[dict], dict, float]:
+            t0 = time.time()
+            rows, m = evaluate_processbench(pb_scores, pb_meta_rows, t)
+            return rows, m, time.time() - t0
+
+        # 1. fixed t=0.5
+        rows_fixed, m_fixed, dt_fixed = eval_at(0.5)
+        # 2. val-selected
+        rows_val, m_val, dt_val = eval_at(val_selected_threshold)
+        # 3. oracle on PB (grid-search by F1_PB)
+        best_oracle_t = threshold_grid[0]
+        best_oracle_f1 = -1.0
+        for t in threshold_grid:
+            _, m_try = evaluate_processbench(pb_scores, pb_meta_rows, t)
+            if m_try["F1_PB"] > best_oracle_f1:
+                best_oracle_f1 = m_try["F1_PB"]
+                best_oracle_t = t
+        rows_oracle, m_oracle, dt_oracle = eval_at(best_oracle_t)
+
+        # Persist scoring artifacts (use val-selected as the canonical scores file)
+        with (args.out_dir / f"pb_step_scores_{pb_name}.jsonl").open("w") as f:
+            for row in rows_val:
+                f.write(json.dumps(row) + "\n")
+        with (args.out_dir / f"pb_predictions_{pb_name}.jsonl").open("w") as f:
+            for row in rows_val:
+                f.write(json.dumps({
+                    "id": row["id"], "label": row["label"],
+                    "prediction": row["prediction"], "threshold": row["threshold"],
+                }) + "\n")
+
+        n_steps_total = pb_h_arr.shape[0]
+
+        def make_metrics(tag: str, t: float, m: dict, dt: float, src: str) -> dict:
+            eval_time = eval_time_inference + dt
+            return {
+                "method": method,
+                "pb_name": pb_name,
+                "threshold_type": tag,
+                "threshold": t,
+                "threshold_selection_source": src,
+                **m,
+                "eval_time_sec": eval_time,
+                "mean_step_latency_ms": eval_time * 1000.0 / max(n_steps_total, 1),
+                "mean_trace_latency_ms": eval_time * 1000.0 / max(m["n_traces"], 1),
+            }
+
+        em_fixed = make_metrics("fixed_t0.5", 0.5, m_fixed, dt_fixed, "fixed")
+        em_val = make_metrics("val_selected", val_selected_threshold, m_val, dt_val, "val_balanced_accuracy")
+        em_oracle = make_metrics("oracle", best_oracle_t, m_oracle, dt_oracle,
+                                 "oracle_grid_max_F1_PB_on_processbench (NOT DEPLOYABLE)")
+
+        for em, suffix in [
+            (em_fixed, "fixed_t0.5"),
+            (em_val, "val_selected"),
+            (em_oracle, "oracle"),
+        ]:
+            (args.out_dir / f"eval_metrics_{pb_name}_{suffix}.json").write_text(
+                json.dumps(em, indent=2)
             )
+            all_eval_summaries.append(em)
 
-    n_steps_total = pb_h.shape[0]
-    n_traces = pb_metrics["n_traces"]
-    mean_step_latency_ms = (eval_time * 1000.0 / max(n_steps_total, 1))
-    mean_trace_latency_ms = (eval_time * 1000.0 / max(n_traces, 1))
+        print(
+            f"[{method}|{pb_name}] "
+            f"t0.5 F1={em_fixed['F1_PB']:.4f}  "
+            f"val(t={val_selected_threshold}) F1={em_val['F1_PB']:.4f}  "
+            f"oracle(t={best_oracle_t}) F1={em_oracle['F1_PB']:.4f}"
+        )
 
-    eval_metrics = {
-        "method": method,
-        "threshold": threshold,
-        **pb_metrics,
-        "eval_time_sec": eval_time,
-        "mean_step_latency_ms": mean_step_latency_ms,
-        "mean_trace_latency_ms": mean_trace_latency_ms,
-        "latency_scope": (
-            "includes: representation encoding of ProcessBench hidden states, "
-            "probe scoring, and trace aggregation. "
-            "excludes: disk loading and training."
-        ),
-    }
-    (args.out_dir / "eval_metrics.json").write_text(json.dumps(eval_metrics, indent=2))
+    # Aggregate eval summary (for downstream leaderboard merge)
+    (args.out_dir / "eval_summary.json").write_text(
+        json.dumps({"runs": all_eval_summaries}, indent=2)
+    )
+    # Preserve a representative legacy file for callers that still look for it:
+    if all_eval_summaries:
+        primary = next(
+            (e for e in all_eval_summaries if e["threshold_type"] == "val_selected"),
+            all_eval_summaries[0],
+        )
+        (args.out_dir / "eval_metrics.json").write_text(json.dumps(primary, indent=2))
 
     # ---- Train metrics ----------------------------------------------------
     total_time = time.time() - total_t0
@@ -638,11 +787,17 @@ def main() -> None:
     }
     (args.out_dir / "train_metrics.json").write_text(json.dumps(train_metrics, indent=2))
 
-    print(
-        f"[{method}] threshold={threshold} F1_PB={eval_metrics['F1_PB']:.4f} "
-        f"Acc_err={eval_metrics['Acc_error']:.4f} Acc_corr={eval_metrics['Acc_correct']:.4f} "
-        f"val_bacc={best_bacc:.4f}"
-    )
+    if all_eval_summaries:
+        primary = next(
+            (e for e in all_eval_summaries if e["threshold_type"] == "val_selected"),
+            all_eval_summaries[0],
+        )
+        print(
+            f"[{method}|{primary['pb_name']}|val_selected] "
+            f"threshold={primary['threshold']} F1_PB={primary['F1_PB']:.4f} "
+            f"Acc_err={primary['Acc_error']:.4f} Acc_corr={primary['Acc_correct']:.4f} "
+            f"val_bacc={best_bacc:.4f}"
+        )
 
 
 if __name__ == "__main__":

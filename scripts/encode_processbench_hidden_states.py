@@ -172,8 +172,7 @@ def encode_all_steps(
             })
             prefix_parts.append(step_text)
 
-    base_model = model.module if isinstance(model, torch.nn.DataParallel) else model
-    hidden_dim = base_model.config.hidden_size
+    hidden_dim = model.config.hidden_size
     np_dtype = np.float16 if save_dtype == torch.float16 else np.float32
     n = len(flat)
     all_hidden = np.zeros((n, hidden_dim), dtype=np_dtype)
@@ -346,12 +345,7 @@ def main() -> None:
     model = model.to(device)
     model.eval()
     hidden_dim = model.config.hidden_size
-
-    n_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
-    if n_gpus > 1:
-        print(f"[encode_pb] Wrapping model in DataParallel across {n_gpus} GPUs", flush=True)
-        model = torch.nn.DataParallel(model)
-    print(f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, device={device}, n_gpus={n_gpus}", flush=True)
+    print(f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, device={device}", flush=True)
 
     t_start = time.perf_counter()
     all_hidden, all_meta, n_skipped = encode_all_steps(

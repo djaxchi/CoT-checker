@@ -22,9 +22,7 @@ HF_CACHE="${HF_CACHE:-$SCRATCH/hf_cache}"
 # Choose which splits to encode. Defaults to 400k train + 10k val.
 TRAIN_STEM="${TRAIN_STEM:-probe_train_400k}"
 VAL_STEM="${VAL_STEM:-val_10k}"
-BATCH_SIZE="${BATCH_SIZE:-32}"   # 4× H100 via DataParallel: 8 per GPU (conservative;
-                                  # the 40k prestudy ran 16 on a single GPU. Set 64 = 16/GPU
-                                  # to match proven per-card memory, or lower if OOM.)
+BATCH_SIZE="${BATCH_SIZE:-16}"   # single-GPU (matches proven prestudy 40k throughput)
 
 mkdir -p "$CACHE_DIR" "$LOG_DIR" "$HF_CACHE"
 export HF_HOME="$HF_CACHE"

@@ -19,7 +19,7 @@ OUT_ROOT="$RUN_ROOT/cache/qwen2_5_1_5b_processbench"
 LOG_DIR="$RUN_ROOT/logs"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen2.5-1.5B}"
 HF_CACHE="${HF_CACHE:-$SCRATCH/hf_cache}"
-BATCH_SIZE="${BATCH_SIZE:-32}"   # 4× H100 via DataParallel: 8 per GPU (conservative)
+BATCH_SIZE="${BATCH_SIZE:-16}"   # single-GPU (matches proven prestudy)
 
 mkdir -p "$OUT_ROOT" "$LOG_DIR" "$HF_CACHE"
 export HF_HOME="$HF_CACHE"

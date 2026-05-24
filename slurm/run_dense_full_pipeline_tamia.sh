@@ -18,7 +18,7 @@ ACTION="${1:-all}"
 submit() {
   local script="$1"; shift
   local extras=("$@")
-  echo "[submit] sbatch ${extras[*]} $script"
+  echo "[submit] sbatch ${extras[*]} $script" >&2
   sbatch "${extras[@]}" "$script"
 }
 

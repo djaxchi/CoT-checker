@@ -144,14 +144,22 @@ def encode_all_steps(
     batch_size: int,
     save_dtype: torch.dtype,
     pad_token_id: int,
+    shard_idx: int = 0,
+    num_shards: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, list[dict], int]:
     """
     Flatten all steps from all traces, encode in batches.
 
     Returns (hidden_states, labels_per_step, meta_rows, n_skipped).
     hidden_states shape: (N_steps, hidden_dim).
+
+    When num_shards > 1, only steps whose deterministic global_step_index
+    satisfies (global_step_index % num_shards == shard_idx) are encoded,
+    and each meta row carries its global_step_index so the shard merger
+    can reconstruct the original order.
     """
-    # Flatten: one entry per (trace, step_idx)
+    # Flatten: one entry per (trace, step_idx), then assign a deterministic
+    # global_step_index BEFORE sharding so every worker agrees on the ordering.
     flat: list[dict] = []
     for trace in traces:
         problem = trace["problem"]
@@ -171,6 +179,14 @@ def encode_all_steps(
                 "current_step": step_text,
             })
             prefix_parts.append(step_text)
+    for gi, rec in enumerate(flat):
+        rec["global_step_index"] = gi
+    if num_shards > 1:
+        flat = [r for r in flat if r["global_step_index"] % num_shards == shard_idx]
+        print(
+            f"[encode] shard {shard_idx}/{num_shards}: {len(flat)} step(s) selected",
+            flush=True,
+        )
 
     hidden_dim = model.config.hidden_size
     np_dtype = np.float16 if save_dtype == torch.float16 else np.float32
@@ -244,6 +260,7 @@ def encode_all_steps(
                 "n_tokens": n_tokens if valid else -1,
                 "was_truncated": False,
                 "skipped": not valid,
+                "global_step_index": ex.get("global_step_index"),
             }
             if ex.get("pb_subset"):
                 meta_row["pb_subset"] = ex["pb_subset"]
@@ -282,6 +299,12 @@ def main() -> None:
                    help="If set, write a 'pb_subset' field on every meta row.")
     p.add_argument("--output_layout", choices=["legacy", "generic"], default="legacy",
                    help="legacy=pb_gsm8k_step_*; generic=pb_step_* (new layout).")
+    p.add_argument("--shard_idx", type=int, default=0,
+                   help="Worker shard index in [0, num_shards). Each shard "
+                        "encodes steps whose deterministic global_step_index "
+                        "satisfies (gi %% num_shards == shard_idx).")
+    p.add_argument("--num_shards", type=int, default=1,
+                   help="Total number of shards (e.g. 4 for 4-GPU encoding).")
     p.add_argument("--force", action="store_true",
                    help="Overwrite existing output files.")
     args = p.parse_args()
@@ -347,6 +370,16 @@ def main() -> None:
     hidden_dim = model.config.hidden_size
     print(f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, device={device}", flush=True)
 
+    if args.num_shards < 1 or not (0 <= args.shard_idx < args.num_shards):
+        sys.exit(
+            f"[encode_pb] invalid shard config: shard_idx={args.shard_idx} "
+            f"num_shards={args.num_shards}"
+        )
+    print(
+        f"[encode_pb] shard config: shard_idx={args.shard_idx} "
+        f"num_shards={args.num_shards}",
+        flush=True,
+    )
     t_start = time.perf_counter()
     all_hidden, all_meta, n_skipped = encode_all_steps(
         traces=traces,
@@ -357,6 +390,8 @@ def main() -> None:
         batch_size=args.batch_size,
         save_dtype=save_dtype,
         pad_token_id=pad_token_id,
+        shard_idx=args.shard_idx,
+        num_shards=args.num_shards,
     )
     t_end = time.perf_counter()
 

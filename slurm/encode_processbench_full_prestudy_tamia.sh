@@ -2,26 +2,30 @@
 # Encode every available ProcessBench subset into dense Qwen2.5-1.5B hidden
 # states using ALL 4 H100 GPUs (per-subset 4-way sharding).
 #
-# This script targets the dense_full_v1 run root by default. The
-# prestudy_v1 sibling is slurm/encode_processbench_full_prestudy_tamia.sh.
-# Both share identical orchestration logic.
-#
 # Layout per subset:
-#   <out_root>/<subset>/shards/shard_NN/pb_step_h.npy   (one per GPU)
+#   <out_root>/<subset>/shards/shard_00/pb_step_h.npy   (GPU 0)
+#   <out_root>/<subset>/shards/shard_01/pb_step_h.npy   (GPU 1)
+#   <out_root>/<subset>/shards/shard_02/pb_step_h.npy   (GPU 2)
+#   <out_root>/<subset>/shards/shard_03/pb_step_h.npy   (GPU 3)
 #   <out_root>/<subset>/pb_step_h.npy                   (merged, sorted by
 #                                                        global_step_index)
-#   <out_root>/<subset>/pb_step_meta.jsonl
-#   <out_root>/combined/pb_step_h.npy + meta            (ids prefixed
-#                                                        "<sub>::")
+#   <out_root>/<subset>/pb_step_meta.jsonl              (merged)
+#   <out_root>/<subset>/encoding_manifest_pb.json
+#   <out_root>/combined/pb_step_h.npy + meta            (concat of subsets,
+#                                                        ids prefixed "<sub>::")
+#
+# Each subset is encoded by launching 4 parallel Python workers, one per
+# GPU, pinned with CUDA_VISIBLE_DEVICES=k. Workers write to disjoint shard
+# dirs; deterministic sharding by (global_step_index % 4 == shard_idx).
+# After workers complete, we merge with scripts/merge_processbench_encoded_shards.py.
 #
 # Override knobs:
-#   RUN_ROOT=...         # default: $SCRATCH/cot_mech/dense_full_v1
 #   PB_DIR=...           # processbench_<subset>.jsonl root
 #   FORCE=1              # allow re-encoding existing per-subset outputs
 #   BATCH_SIZE=...       # per-GPU batch size (default 16)
 #   NUM_SHARDS=...       # default 4
 
-#SBATCH --job-name=pb_encode_full
+#SBATCH --job-name=pb_encode_full_prestudy
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
 #SBATCH --gpus=h100:4
@@ -34,10 +38,10 @@ set -euo pipefail
 module load StdEnv/2023 python/3.12
 
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
-RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/dense_full_v1}"
+RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/prestudy_v1}"
 PB_DIR_DEFAULT="/scratch/d/dchikhi/cot-checker/processbench"
 PB_DIR="${PB_DIR:-$PB_DIR_DEFAULT}"
-export OUT_ROOT="$RUN_ROOT/cache/qwen2_5_1_5b_processbench"
+export OUT_ROOT="$RUN_ROOT/cache/qwen2_5_1_5b_processbench_full"
 LOG_DIR="$RUN_ROOT/logs"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen2.5-1.5B}"
 HF_CACHE="${HF_CACHE:-$SCRATCH/hf_cache}"
@@ -54,11 +58,11 @@ export TOKENIZERS_PARALLELISM=false
 cd "$PROJECT_ROOT"
 GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 JID="${SLURM_JOB_ID:-$$}"
-LOG_FILE="$LOG_DIR/pb_encode_full-${JID}.log"
+LOG_FILE="$LOG_DIR/pb_encode_full_prestudy-${JID}.log"
 
 cat <<BANNER | tee -a "$LOG_FILE"
 ================================================================
-job          : ${SLURM_JOB_NAME:-pb_encode_full}
+job          : ${SLURM_JOB_NAME:-pb_encode_full_prestudy}
 job_id       : ${JID}
 hostname     : $(hostname)
 date         : $(date -Iseconds)
@@ -81,11 +85,13 @@ source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
 pip install --no-index torch transformers numpy
 
+# ---- Discover PB subsets via the standalone utility ----------------------
 python scripts/list_processbench_subsets.py \
     --pb_root "$PB_DIR" \
     --out_manifest "$RUN_ROOT/processbench_full_manifest.json" \
     --quiet 2>&1 | tee -a "$LOG_FILE"
 
+# Build a name->path map from the manifest
 mapfile -t PB_PAIRS < <(python - <<'PY' "$RUN_ROOT/processbench_full_manifest.json"
 import json, sys
 m = json.load(open(sys.argv[1]))
@@ -97,12 +103,14 @@ if [[ ${#PB_PAIRS[@]} -eq 0 ]]; then
   echo "[FATAL] No PB subsets discovered under $PB_DIR" | tee -a "$LOG_FILE"
   exit 2
 fi
+
 echo "[plan] subsets to encode (${#PB_PAIRS[@]}):" | tee -a "$LOG_FILE"
 printf '   %s\n' "${PB_PAIRS[@]}" | tee -a "$LOG_FILE"
 
 FORCE_FLAG=""
 if [[ "${FORCE:-0}" == "1" ]]; then FORCE_FLAG="--force"; fi
 
+# ---- For each subset: fan out N shard workers, then merge ---------------
 for PAIR in "${PB_PAIRS[@]}"; do
   NAME="${PAIR%%:*}"
   SRC="${PAIR#*:}"
@@ -134,7 +142,7 @@ for PAIR in "${PB_PAIRS[@]}"; do
         --raw_file "$SRC" \
         --out_dir "$SHARD_DIR" \
         --model_name_or_path "$MODEL_NAME_OR_PATH" \
-        --run_name "dense_full_v1_pb__${NAME}__shard${SHARD}" \
+        --run_name "prestudy_v1_pb_full__${NAME}__shard${SHARD}" \
         --max_seq_len 2048 \
         --batch_size "$BATCH_SIZE" \
         --model_dtype float16 \
@@ -152,6 +160,7 @@ for PAIR in "${PB_PAIRS[@]}"; do
 "pid=${WORKER_PIDS[-1]} log=$WLOG" | tee -a "$LOG_FILE"
   done
 
+  # Wait for all workers; if any fails, abort the whole job.
   FAIL=0
   for PID in "${WORKER_PIDS[@]}"; do
     if ! wait "$PID"; then
@@ -180,6 +189,7 @@ for PAIR in "${PB_PAIRS[@]}"; do
     $FORCE_FLAG 2>&1 | tee -a "$LOG_FILE"
 done
 
+# ---- Combined view across subsets ----------------------------------------
 echo "[$(date -Iseconds)] building combined view across subsets" \
   | tee -a "$LOG_FILE"
 python - <<'PY' 2>&1 | tee -a "$LOG_FILE"
@@ -216,4 +226,4 @@ with (combined / "pb_step_meta.jsonl").open("w") as f:
 print(f"[combined] {big.shape[0]} rows across {len(subset_dirs)} subsets -> {combined / 'pb_step_h.npy'}")
 PY
 
-echo "[$(date -Iseconds)] pb_encode_full done" | tee -a "$LOG_FILE"
+echo "[$(date -Iseconds)] pb_encode_full_prestudy done" | tee -a "$LOG_FILE"

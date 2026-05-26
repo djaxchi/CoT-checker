@@ -49,7 +49,54 @@ from src.ssae.dataset import (  # noqa: E402
 from src.ssae.model_qwen_ssae import QwenSSAE  # noqa: E402
 
 
-METHODS = ("ssae_positive", "ssae_mixed", "ssae_contrastive")
+METHODS = (
+    "ssae_positive", "ssae_mixed", "ssae_contrastive",
+    # Audit-only methods. Same training graph as ssae_mixed (no aux head);
+    # the DWA controller and a longer iteration budget are enabled via CLI.
+    "ssae_mixed_dwa_lr1e-4_iter3000",
+)
+
+
+class DWAController:
+    """Dynamic Weight Adjuster for the L1 sparsity penalty.
+
+    Verbatim mirror of papers/SSAE/train.py::DWAController. After every
+    ``update_freq`` micro-steps, multiplicatively nudges the L1 weight by
+    ``(1 +/- alpha)`` so the running mean of the per-example sparsity loss
+    moves toward ``target``. Clamped to [min_w, max_w].
+    """
+
+    def __init__(self, target: float, init_weight: float, update_freq: int,
+                 alpha: float, min_w: float, max_w: float) -> None:
+        self.target = float(target)
+        self.weight = float(init_weight)
+        self.update_freq = int(update_freq)
+        self.alpha = float(alpha)
+        self.min_w = float(min_w)
+        self.max_w = float(max_w)
+        self._acc = 0.0
+        self._steps = 0
+        self._last_avg = float("nan")
+
+    def step(self, sparsity_loss_value: float) -> float:
+        self._acc += float(sparsity_loss_value)
+        self._steps += 1
+        if self._steps < self.update_freq:
+            return self.weight
+        avg = self._acc / self._steps
+        self._last_avg = avg
+        if avg > self.target:
+            self.weight *= (1.0 + self.alpha)
+        else:
+            self.weight *= (1.0 - self.alpha)
+        self.weight = max(self.min_w, min(self.max_w, self.weight))
+        self._acc = 0.0
+        self._steps = 0
+        return self.weight
+
+    @property
+    def last_avg(self) -> float:
+        return self._last_avg
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,7 +112,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--local_files_only", action="store_true")
     p.add_argument("--phase", type=int, default=1)
     p.add_argument("--sparsity_factor", type=int, default=1)
-    p.add_argument("--l1_weight", type=float, default=1e-4)
+    p.add_argument("--l1_weight", type=float, default=1e-4,
+                   help="Initial L1 weight. When --use_dwa is set, this is the "
+                        "starting value before the DWA controller adapts it.")
+    p.add_argument("--use_dwa", action="store_true",
+                   help="Enable the DWA controller from papers/SSAE/train.py "
+                        "(adaptively scales l1_weight toward --l1_target).")
+    p.add_argument("--l1_target", type=float, default=3.0,
+                   help="DWA target for the mean per-example L1 (post-normalize "
+                        "sparsity sum). Paper default is 3.0.")
+    p.add_argument("--dwa_update_interval", type=int, default=100,
+                   help="DWA controller update interval in micro-steps "
+                        "(paper default 100).")
+    p.add_argument("--dwa_min_w", type=float, default=1e-6)
+    p.add_argument("--dwa_max_w", type=float, default=0.1)
+    p.add_argument("--dwa_alpha", type=float, default=0.01,
+                   help="Multiplicative step size per DWA update (paper: 1%).")
     p.add_argument("--bce_weight", type=float, default=0.1)
     p.add_argument("--max_seq_len", type=int, default=2048)
     p.add_argument("--batch_size", type=int, default=16,
@@ -823,6 +885,25 @@ def main() -> None:
     examples_seen = 0
     tokens_seen = 0
     global_step = 0
+    # DWA controller (verbatim mirror of papers/SSAE/train.py). When
+    # --use_dwa is off this stays at None and args.l1_weight is used as a
+    # fixed scalar -- legacy behavior for the original 3 methods.
+    dwa = None
+    current_l1_weight = float(args.l1_weight)
+    if args.use_dwa:
+        dwa = DWAController(
+            target=args.l1_target, init_weight=args.l1_weight,
+            update_freq=args.dwa_update_interval, alpha=args.dwa_alpha,
+            min_w=args.dwa_min_w, max_w=args.dwa_max_w,
+        )
+        if master:
+            logger.info(
+                f"[dwa] enabled target={args.l1_target:.3f} "
+                f"init_l1_weight={args.l1_weight:.2e} "
+                f"update_interval={args.dwa_update_interval} "
+                f"alpha={args.dwa_alpha:.3f} "
+                f"bounds=[{args.dwa_min_w:.2e}, {args.dwa_max_w:.2e}]"
+            )
 
     for it in range(args.max_iters):
         if ddp:
@@ -851,7 +932,7 @@ def main() -> None:
                 with autocast_ctx:
                     out = compute_loss(
                         model, batch, device, args.sparsity_factor,
-                        args.l1_weight, args.bce_weight, contrastive,
+                        current_l1_weight, args.bce_weight, contrastive,
                         train_attn_mask_ratio=args.train_attn_mask_ratio,
                         ce_chunk_size=args.ce_chunk_size,
                         method=args.method, rank=rank, iter_num=it,
@@ -862,6 +943,10 @@ def main() -> None:
                 # Scale loss for accumulation
                 loss_scaled = out["loss"] / args.grad_accum_steps
                 scaler.scale(loss_scaled).backward()
+            # DWA: nudge L1 weight toward target using the current micro-step's
+            # per-example sparsity loss (matches papers/SSAE/train.py).
+            if dwa is not None:
+                current_l1_weight = dwa.step(float(out["loss_spa"].item()))
 
             # Log peak memory once after the very first backward on every rank.
             if global_step == 0 and micro_step == 0 and torch.cuda.is_available():
@@ -1065,11 +1150,16 @@ def main() -> None:
                 f"train_l1_mean {mean_spa:.4f} "
                 f"zero_norm_frac {mean_zero_norm:.4f}"
                 + (f" train_aux_bce {mean_aux:.4f}" if mean_aux is not None else "")
+                + (f" dwa_l1_weight={current_l1_weight:.4e} "
+                   f"dwa_l1_avg={dwa.last_avg:.4f} dwa_target={args.l1_target:.2f}"
+                   if dwa is not None else "")
             )
         train_metrics_history.append({
             "iter": it, "lr": lr, "loss_nll": mean_nll, "loss_spa": mean_spa,
             "aux_bce": mean_aux, "zero_norm_frac": mean_zero_norm,
             "n_loss_tokens_in_epoch": epoch_tokens,
+            "dwa_l1_weight": current_l1_weight if dwa is not None else args.l1_weight,
+            "dwa_l1_avg": (dwa.last_avg if dwa is not None else None),
         })
 
         # ---- Validation ---------------------------------------------------

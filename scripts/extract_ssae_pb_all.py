@@ -206,6 +206,11 @@ def parse_args() -> argparse.Namespace:
                    help="When set, write outputs under <out_root>/<subset>/"
                         "shards/shard_NN/ and SKIP the combined-view build "
                         "(merging is the orchestrator's job).")
+    p.add_argument("--no_combined_view", action="store_true",
+                   help="Skip the per-method combined-view build at the end. "
+                        "Use this when multiple workers each handle a single "
+                        "subset in parallel; the orchestrator must then build "
+                        "the combined view itself.")
     return p.parse_args()
 
 
@@ -378,6 +383,26 @@ def main() -> None:
         )
         manifest_path.write_text(json.dumps(manifest_shard, indent=2))
         print(f"[extract_ssae_pb_all] shard {args.shard_idx} done. "
+              f"manifest -> {manifest_path}")
+        return
+
+    if args.no_combined_view:
+        manifest_partial = {
+            "ckpt": str(args.ckpt),
+            "model_name_or_path": args.model_name_or_path,
+            "sparsity_factor": args.sparsity_factor,
+            "contrastive_ckpt": args.contrastive_ckpt,
+            "n_latents": int(getattr(model, "n_latents", -1)),
+            "n_inputs": int(getattr(model, "n_inputs", -1)),
+            "subsets": per_subset_info,
+            "combined_view": "skipped (--no_combined_view); orchestrator builds it",
+            "total_wall_sec": time.perf_counter() - t_all,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        sub_names = "_".join(sorted([s["name"] for s in per_subset_info])) or "none"
+        manifest_path = args.out_root / f"latent_manifest_pb_partial_{sub_names}.json"
+        manifest_path.write_text(json.dumps(manifest_partial, indent=2))
+        print(f"[extract_ssae_pb_all] no_combined_view: wrote per-subset "
               f"manifest -> {manifest_path}")
         return
 

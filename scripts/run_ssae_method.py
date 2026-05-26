@@ -25,11 +25,14 @@ METHOD_TRAIN_JSONL = {
     "ssae_positive": "prm800k_pos_base_20k.jsonl",
     "ssae_mixed": "prm800k_mixed_train_40k.jsonl",
     "ssae_contrastive": "prm800k_mixed_train_40k.jsonl",
+    # ---- audit-only methods (single-shot diagnostic runs) ----
+    "ssae_mixed_dwa_lr1e-4_iter3000": "prm800k_mixed_train_40k.jsonl",
 }
 METHOD_USES_LABELS = {
     "ssae_positive": False,
     "ssae_mixed": False,
     "ssae_contrastive": True,
+    "ssae_mixed_dwa_lr1e-4_iter3000": False,
 }
 
 
@@ -43,6 +46,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--phase", type=int, default=1)
     p.add_argument("--sparsity_factor", type=int, default=1)
     p.add_argument("--l1_weight", type=float, default=1e-4)
+    p.add_argument("--use_dwa", action="store_true",
+                   help="Forward --use_dwa to train_ssae_official.py (DWA "
+                        "adaptive L1 controller, mirrors papers/SSAE/train.py).")
+    p.add_argument("--l1_target", type=float, default=3.0)
+    p.add_argument("--dwa_update_interval", type=int, default=100)
     p.add_argument("--bce_weight", type=float, default=0.1)
     p.add_argument("--max_seq_len", type=int, default=2048)
     p.add_argument("--batch_size", type=int, default=16)
@@ -162,6 +170,12 @@ def main() -> None:
             cmd.append("--local_files_only")
         if args.gradient_checkpointing:
             cmd.append("--gradient_checkpointing")
+        if args.use_dwa:
+            cmd += [
+                "--use_dwa",
+                "--l1_target", str(args.l1_target),
+                "--dwa_update_interval", str(args.dwa_update_interval),
+            ]
         if args.debug_attn_mask:
             cmd.append("--debug_attn_mask")
         if args.debug_grad_check:

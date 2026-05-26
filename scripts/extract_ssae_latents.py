@@ -54,6 +54,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--pb_jsonl", required=True, type=Path)
     p.add_argument("--limit", type=int, default=-1,
                    help="Limit rows per split (smoke mode). -1 = no limit.")
+    p.add_argument("--shard_idx", type=int, default=0,
+                   help="Worker shard index in [0, num_shards). Used together "
+                        "with --num_shards to fan one split across N GPUs.")
+    p.add_argument("--num_shards", type=int, default=1,
+                   help="Total number of shards (e.g. 4 for 4-GPU extraction). "
+                        "When > 1, each shard writes its outputs under "
+                        "<out_dir>/shards/shard_NN/ and the orchestrator must "
+                        "call scripts/merge_processbench_encoded_shards.py "
+                        "(once per split) to recombine.")
     return p.parse_args()
 
 
@@ -150,18 +159,66 @@ def main() -> None:
         ("val_1k", args.val_jsonl, True),
         ("pb_gsm8k_step", args.pb_jsonl, False),
     ]
+    sharded = args.num_shards > 1
+    if sharded and not (0 <= args.shard_idx < args.num_shards):
+        raise SystemExit(
+            f"--shard_idx={args.shard_idx} out of range for "
+            f"--num_shards={args.num_shards}"
+        )
+    write_root = args.out_dir
+    if sharded:
+        write_root = args.out_dir / "shards" / f"shard_{args.shard_idx:02d}"
+        write_root.mkdir(parents=True, exist_ok=True)
+        print(f"[extract_ssae_latents] sharded run shard_idx={args.shard_idx} "
+              f"num_shards={args.num_shards} -> writing under {write_root}",
+              flush=True)
+
     times: dict[str, float] = {}
     for name, path, save_labels in splits:
         ds = SSAEJsonlDataset(path, tokenizer, max_seq_len=args.max_seq_len, limit=limit)
-        # Strict no-truncation check before extraction.
+        # Strict no-truncation check before extraction (full set).
         ds.length_audit(raise_on_violation=True)
+
+        if sharded:
+            # Tag every row with its deterministic global index, then keep
+            # only rows assigned to this worker. The global index is written
+            # into meta so scripts/merge_processbench_encoded_shards.py can
+            # reconstruct the original order.
+            full_rows = list(ds.rows)
+            kept = []
+            for gi, r in enumerate(full_rows):
+                r["global_step_index"] = gi
+                if (gi % args.num_shards) == args.shard_idx:
+                    kept.append(r)
+            ds.rows = kept
+            print(f"[extract_ssae_latents] {name}: shard {args.shard_idx}/"
+                  f"{args.num_shards} keeps {len(kept)}/{len(full_rows)} rows",
+                  flush=True)
+
         t0 = time.time()
         z, y, metas = extract_one(
             model, ds, collator, args.batch_size, args.num_workers, device
         )
         times[name] = time.time() - t0
-        write_split(name, args.out_dir, z, y, metas, save_labels=save_labels)
-        print(f"{name}: z={z.shape} time={times[name]:.1f}s")
+        # Finite check (cheap and load-bearing for the audit job).
+        if not np.all(np.isfinite(z)):
+            raise RuntimeError(
+                f"[extract_ssae_latents] non-finite values in {name} latents"
+            )
+        if sharded:
+            # Write under the SSAE merger's expected names so a single call
+            # to merge_processbench_encoded_shards.py per split can recombine.
+            np.save(write_root / f"{name}_z.npy", z)
+            if save_labels:
+                np.save(write_root / f"{name}_y.npy", y)
+            with (write_root / f"{name}_meta.jsonl").open("w") as f:
+                for m in metas:
+                    f.write(json.dumps(m) + "\n")
+            print(f"{name} (shard {args.shard_idx}): z={z.shape} "
+                  f"time={times[name]:.1f}s -> {write_root}", flush=True)
+        else:
+            write_split(name, args.out_dir, z, y, metas, save_labels=save_labels)
+            print(f"{name}: z={z.shape} time={times[name]:.1f}s")
 
     manifest = {
         "ckpt": str(args.ckpt),
@@ -172,9 +229,12 @@ def main() -> None:
         "n_inputs": model.n_inputs,
         "splits": {name: str(path) for name, path, _ in splits},
         "extraction_time_sec": times,
+        "shard_idx": args.shard_idx if sharded else None,
+        "num_shards": args.num_shards if sharded else None,
     }
-    (args.out_dir / "latent_manifest.json").write_text(json.dumps(manifest, indent=2))
-    print(f"Wrote latents + manifest to {args.out_dir}")
+    manifest_path = (write_root if sharded else args.out_dir) / "latent_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    print(f"Wrote latents + manifest to {manifest_path.parent}")
 
 
 if __name__ == "__main__":

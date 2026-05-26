@@ -44,6 +44,9 @@ METHOD_SPECS: dict[str, tuple[str, bool, bool]] = {
     "ssae_mixed":                         ("ssae",   False, True),
     "ssae_contrastive":                   ("ssae",   False, True),
     "ssae_contrastive_auxlr1e-3_full":    ("ssae",   False, True),
+    # ---- audit-only methods (single-shot diagnostic runs) ----
+    "ssae_original_paper_ckpt_qwen0p5b":  ("ssae",   False, True),
+    "ssae_mixed_dwa_lr1e-4_iter3000":     ("ssae",   False, True),
 }
 
 

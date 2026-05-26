@@ -231,42 +231,19 @@ fi
 # Merge the 4 PRM800K shards into single .npy / _y.npy / _meta.jsonl files.
 for NAME in probe_train_40k val_1k pb_gsm8k_step; do
   echo "[merge] $NAME: combining $NUM_SHARDS shards" | tee -a "$LOG_FILE"
+  Y_ARGS=()
+  if [[ "$NAME" == "probe_train_40k" || "$NAME" == "val_1k" ]]; then
+    Y_ARGS=(--out_y "$LATENTS_DIR/${NAME}_y.npy" --label_name "${NAME}_y.npy")
+  fi
   python scripts/merge_processbench_encoded_shards.py \
     --shard_root "$LATENTS_DIR/shards" \
     --out_h "$LATENTS_DIR/${NAME}_z.npy" \
     --out_meta "$LATENTS_DIR/${NAME}_meta.jsonl" \
     --array_name "${NAME}_z.npy" \
     --meta_name "${NAME}_meta.jsonl" \
+    "${Y_ARGS[@]}" \
     ${FORCE:+--force} 2>&1 | tee -a "$LOG_FILE"
 done
-# Merge the per-shard label arrays for probe_train_40k and val_1k by hand
-# (the merger only concatenates one array; we mirror it for the _y.npy files).
-python - <<PY 2>&1 | tee -a "$LOG_FILE"
-import json, sys
-from pathlib import Path
-import numpy as np
-shards = sorted((Path("${LATENTS_DIR}") / "shards").iterdir())
-for name in ("probe_train_40k", "val_1k"):
-    ys = []
-    metas = []
-    for sd in shards:
-        y_path = sd / f"{name}_y.npy"
-        if not y_path.exists():
-            sys.exit(f"missing {y_path}")
-        ys.append(np.load(y_path))
-        meta_path = sd / f"{name}_meta.jsonl"
-        for line in meta_path.read_text().splitlines():
-            line = line.strip()
-            if line:
-                metas.append(json.loads(line))
-    y_concat = np.concatenate(ys)
-    # Reorder by global_step_index to match the merged z order.
-    order = np.argsort([m["global_step_index"] for m in metas])
-    y_sorted = y_concat[order]
-    out = Path("${LATENTS_DIR}") / f"{name}_y.npy"
-    np.save(out, y_sorted)
-    print(f"[label-merge] {name}: {y_sorted.shape} -> {out}")
-PY
 
 # Quick row-count + finite checks before continuing.
 python - <<PY 2>&1 | tee -a "$LOG_FILE"

@@ -119,6 +119,10 @@ def tokenize_row(row: dict, tokenizer, sep_token_id: int,
         "n_steps": row.get("n_steps"),
         "label": label,
     }
+    if "global_step_index" in row:
+        meta["global_step_index"] = row["global_step_index"]
+    if "pb_subset" in row:
+        meta["pb_subset"] = row["pb_subset"]
 
     return SSAEExample(
         uid=str(row.get("uid") or row.get("id") or ""),

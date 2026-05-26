@@ -46,6 +46,8 @@ METHOD_SPECS: dict[str, tuple[str, bool, bool]] = {
     "ssae_contrastive_auxlr1e-3_full":    ("ssae",   False, True),
     # ---- audit-only methods (single-shot diagnostic runs) ----
     "ssae_original_paper_ckpt_qwen0p5b":  ("ssae",   False, True),
+    "ssae_original_paper_ckpt_qwen0p5b_positive":    ("ssae", False, True),
+    "ssae_original_paper_ckpt_qwen0p5b_contrastive": ("ssae", False, True),
     "ssae_mixed_dwa_lr1e-4_iter3000":     ("ssae",   False, True),
 }
 
@@ -53,7 +55,8 @@ METHOD_SPECS: dict[str, tuple[str, bool, bool]] = {
 def find_subsets(dense_pb_root: Path) -> list[str]:
     out: list[str] = []
     for c in sorted(dense_pb_root.iterdir()):
-        if c.is_dir() and (c / "pb_step_h.npy").exists() \
+        has_latents = (c / "pb_step_h.npy").exists() or (c / "pb_step_z.npy").exists()
+        if c.is_dir() and has_latents \
                 and (c / "pb_step_meta.jsonl").exists():
             out.append(c.name)
     return out
@@ -63,6 +66,10 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runs_root", type=Path, required=True)
     p.add_argument("--dense_pb_cache_root", type=Path, required=True)
+    p.add_argument("--ssae_pb_root_override", type=Path, default=None,
+                   help="Optional shared SSAE full-PB latent root. When set, "
+                        "all SSAE methods read pb_step_z.npy/meta from this "
+                        "root instead of runs_root/<method>/latents_full_pb.")
     p.add_argument("--out_dir", type=Path, required=True,
                    help="Top-level out_dir (full_processbench_eval/). "
                         "Per-job results land under per_job/<method>/<subset>/.")
@@ -108,19 +115,22 @@ def main() -> None:
             sys.exit(msg)
 
         probe = run_dir / "linear_probe.pt" if method != "random" else None
+        centroid_scorer = run_dir / "centroid_scorer.npz"
         thr = run_dir / "threshold.json"
         sae_repr = run_dir / "representation.pt" if family == "sae" else None
         for subset in subsets:
             if family == "ssae":
-                lat = run_dir / "latents_full_pb" / subset / "pb_step_z.npy"
-                meta = run_dir / "latents_full_pb" / subset / "pb_step_meta.jsonl"
+                pb_root = args.ssae_pb_root_override or (run_dir / "latents_full_pb")
+                lat = pb_root / subset / "pb_step_z.npy"
+                meta = pb_root / subset / "pb_step_meta.jsonl"
             else:
                 lat = args.dense_pb_cache_root / subset / "pb_step_h.npy"
                 meta = args.dense_pb_cache_root / subset / "pb_step_meta.jsonl"
             missing = []
             if not lat.exists(): missing.append(str(lat))
             if not meta.exists(): missing.append(str(meta))
-            if method != "random" and probe is not None and not probe.exists():
+            if method != "random" and probe is not None \
+                    and not probe.exists() and not centroid_scorer.exists():
                 missing.append(str(probe))
             if family == "sae" and sae_repr is not None and not sae_repr.exists():
                 missing.append(str(sae_repr))
@@ -139,6 +149,9 @@ def main() -> None:
                 "pb_latents": str(lat),
                 "pb_meta": str(meta),
                 "probe": str(probe) if (probe and method != "random") else None,
+                "centroid_scorer": (
+                    str(centroid_scorer) if centroid_scorer.exists() else None
+                ),
                 "threshold_json": str(thr) if thr.exists() else None,
                 "sae_repr": str(sae_repr) if sae_repr else None,
                 "is_random": method == "random",

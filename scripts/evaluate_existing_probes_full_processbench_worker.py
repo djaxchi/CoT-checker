@@ -102,6 +102,14 @@ def score_one(job: dict, h_or_z: np.ndarray, device: torch.device,
         rng = np.random.default_rng(seed)
         return rng.uniform(0.0, 1.0, size=z.shape[0]).astype(np.float32)
 
+    if job.get("centroid_scorer"):
+        scorer = np.load(job["centroid_scorer"])
+        centroid = scorer["centroid"].astype(np.float32)
+        z_norm = z / np.maximum(np.linalg.norm(z, axis=1, keepdims=True), 1e-12)
+        centroid = centroid / max(float(np.linalg.norm(centroid)), 1e-12)
+        cosine = z_norm @ centroid
+        return ((cosine + 1.0) * 0.5).astype(np.float32)
+
     probe_sd = torch.load(job["probe"], map_location="cpu")
     in_dim = probe_sd["fc.weight"].shape[1]
     if z.shape[1] != in_dim:
@@ -173,6 +181,7 @@ def main() -> None:
                 )
 
             # ---- Threshold -------------------------------------------------
+            raw_score_direction = "error_higher"
             if job["threshold_json"] is None:
                 if job["is_random"]:
                     val_t = 0.5
@@ -183,10 +192,15 @@ def main() -> None:
             else:
                 tj = json.loads(Path(job["threshold_json"]).read_text())
                 val_t = float(tj["selected_threshold"])
+                raw_score_direction = tj.get("raw_score_direction", "error_higher")
 
             # ---- Score -----------------------------------------------------
             t_score = time.time()
-            scores = score_one(job, h_or_z, device, args.batch_size, args.seed)
+            raw_scores = score_one(job, h_or_z, device, args.batch_size, args.seed)
+            if raw_score_direction == "viable_higher":
+                scores = 1.0 - raw_scores
+            else:
+                scores = raw_scores
             t_score = time.time() - t_score
             if not np.all(np.isfinite(scores)):
                 raise ValueError("NaN/Inf in produced scores")
@@ -207,8 +221,9 @@ def main() -> None:
                 "pb_subset": subset,
                 "n_steps_total": int(scores.shape[0]),
                 "scoring_convention":
-                    "sigmoid(probe_logit) = P(step is first-error); "
+                    "evaluator score = P/error-like step non-viability; "
                     "trace pred = first step with score > threshold or -1.",
+                "raw_score_direction": raw_score_direction,
                 "device": device.type,
             }
             (val_out).write_text(json.dumps({

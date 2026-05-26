@@ -96,6 +96,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out_dir", type=Path, required=True,
                    help="Root that contains per_job/ and is the leaderboard target.")
+    p.add_argument("--methods", nargs="+", default=None,
+                   help="Optional method allow-list. When set, ignore any "
+                        "stale per_job/<method>/ directories not listed here.")
     p.add_argument("--force", action="store_true")
     return p.parse_args()
 
@@ -122,8 +125,11 @@ def main() -> None:
     val_rows: list[dict] = []
     ora_rows: list[dict] = []
     errors: list[dict] = []
+    method_filter = set(args.methods) if args.methods else None
     for method_dir in sorted(per_job.iterdir()):
         if not method_dir.is_dir():
+            continue
+        if method_filter is not None and method_dir.name not in method_filter:
             continue
         for sub_dir in sorted(method_dir.iterdir()):
             if not sub_dir.is_dir():

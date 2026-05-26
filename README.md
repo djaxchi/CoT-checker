@@ -104,6 +104,30 @@ uv run pytest tests/ -m "not slow"
 
 ---
 
+## Tamia Audits
+
+Reuse the already-extracted original paper Qwen2.5-0.5B SSAE latents to run
+the positive one-class/OOD baseline and contrastive probe variant:
+
+```bash
+sbatch slurm/audit_ssae_original_paper_ckpt_variants_reuse_tamia.sh
+```
+
+Print the resulting full ProcessBench leaderboards:
+
+```bash
+cat $SCRATCH/cot_mech/prestudy_v1/runs/full_processbench_eval_audit_original_paper_ckpt_qwen0p5b_variants/leaderboard_full_pb_method_averages.md
+
+cat $SCRATCH/cot_mech/prestudy_v1/runs/full_processbench_eval_audit_original_paper_ckpt_qwen0p5b_variants/leaderboard_full_pb_val_threshold.md
+
+cat $SCRATCH/cot_mech/prestudy_v1/runs/full_processbench_eval_audit_original_paper_ckpt_qwen0p5b_variants/leaderboard_full_pb_oracle_threshold.md
+```
+
+These variants use the same fixed SSAE checkpoint and latent representation;
+they differ only in the lightweight probe training protocol.
+
+---
+
 ## Citation
 
 If you use this code, please also cite the original paper:

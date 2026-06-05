@@ -18,8 +18,8 @@ set -euo pipefail
 PROJECT_DIR="$HOME/CoT-checker"
 STORE="/project/aip-azouaq/$USER"
 SCRATCH_BASE="$SCRATCH/cot_mech"
-RAW_FILE="$SCRATCH_BASE/raw/prm800k/train.jsonl"  # train split only (matches prestudy source; no test leakage)
-FORKS_DIR="$SCRATCH_BASE/s2_forks/data"
+: "${RAW_FILE:=$SCRATCH_BASE/raw/prm800k/train.jsonl}"  # train split only (matches prestudy source; no test leakage)
+: "${FORKS_DIR:=$SCRATCH_BASE/s2_forks/data}"
 MODEL="Qwen/Qwen2.5-1.5B"
 
 N_TRAIN_FORKS="${N_TRAIN_FORKS:-40000}"

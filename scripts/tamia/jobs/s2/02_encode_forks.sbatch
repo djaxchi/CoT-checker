@@ -23,8 +23,8 @@ set -euo pipefail
 PROJECT_DIR="$HOME/CoT-checker"
 STORE="/project/aip-azouaq/$USER"
 SCRATCH_BASE="$SCRATCH/cot_mech"
-FORKS_DIR="$SCRATCH_BASE/s2_forks/data"
-ENC_DIR="$SCRATCH_BASE/s2_forks/encoded"
+: "${FORKS_DIR:=$SCRATCH_BASE/s2_forks/data}"
+: "${ENC_DIR:=$SCRATCH_BASE/s2_forks/encoded}"
 MODEL="Qwen/Qwen2.5-1.5B"
 BATCH="${BATCH:-32}"
 

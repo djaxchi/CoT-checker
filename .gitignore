@@ -66,6 +66,14 @@ results/
 # Local scp download staging dirs
 cot-checker-results/
 
+# SLURM job stdout/stderr captured in the repo root (e.g. ssae_methods-302573.out)
+*.out
+# Sprint run outputs and per-job logs (e.g. runs/s2/<tag>/, logs/<tag>.log)
+/runs/
+/logs/
+# Editor / script backups
+*.bak
+
 # macOS
 .DS_Store
 .AppleDouble

@@ -33,10 +33,11 @@ STORE="/project/aip-azouaq/$USER"
 SCRATCH_BASE="$SCRATCH/cot_mech"
 
 export PROJECT_DIR
-export CACHE_DIR="$SCRATCH_BASE/prestudy_v1/encoded"     # probe_train_40k / val_1k
-export ENC_DIR="$SCRATCH_BASE/s2_forks/encoded"
-export FORKS_DIR="$SCRATCH_BASE/s2_forks/data"
-export PB_BASE="$SCRATCH_BASE/processbench_full"
+: "${CACHE_DIR:=$SCRATCH_BASE/prestudy_v1/cache/qwen2_5_1_5b}"                  # probe_train_40k / val_1k
+: "${ENC_DIR:=$SCRATCH_BASE/s2_forks/encoded}"
+: "${FORKS_DIR:=$SCRATCH_BASE/s2_forks/data}"
+: "${PB_BASE:=$SCRATCH_BASE/prestudy_v1/cache/qwen2_5_1_5b_processbench_full}"  # per-subset pb_step_*
+export CACHE_DIR ENC_DIR FORKS_DIR PB_BASE
 export OUT_BASE="$PROJECT_DIR/runs/s2/sweep"
 
 export EPOCHS_SAE=20

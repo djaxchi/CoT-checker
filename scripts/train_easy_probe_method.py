@@ -29,14 +29,21 @@ sys.path.insert(0, str(ROOT))
 from src.repr.objectives import ranking_loss, triplet_loss  # noqa: E402
 
 # Sprint 1 methods + Sprint 2 fork-based representation-shaping methods.
-#   ae          : dense autoencoder, reconstruction only (no sparsity, no pairs)
+#   ae               : dense autoencoder, recon only on mixed_train_40k (no pairs)
+#   {ae,sae}_recon   : MATCHED control - recon[+L1] on the SAME fork items as the
+#                      objective methods, objective term OFF (obj_weight=0). The
+#                      only difference from *_rank/*_triplet is the missing term.
 #   {ae,sae}_rank    : recon[+L1] + pairwise ranking on fork pos/neg siblings
 #   {ae,sae}_triplet : recon[+L1] + triplet (anchor=prefix, pos/neg continuations)
 METHODS = [
     "random", "dense_linear", "sae_positive", "sae_mixed", "sae_contrastive",
-    "ae", "ae_rank", "sae_rank", "ae_triplet", "sae_triplet",
+    "ae", "ae_recon", "sae_recon",
+    "ae_rank", "sae_rank", "ae_triplet", "sae_triplet",
 ]
-FORK_METHODS = ("ae_rank", "sae_rank", "ae_triplet", "sae_triplet")
+FORK_METHODS = (
+    "ae_recon", "sae_recon",
+    "ae_rank", "sae_rank", "ae_triplet", "sae_triplet",
+)
 THRESHOLD_GRID = [round(0.1 * i, 1) for i in range(1, 11)]
 
 
@@ -294,6 +301,9 @@ def train_repr_with_pairs(
     auxiliary and discarded; only the SAE/AE encoder+decoder are saved, so the
     artifact stays format-compatible with the ProcessBench eval pipeline.
     """
+    if objective not in ("rank", "triplet", "none"):
+        raise ValueError(f"objective must be rank|triplet|none, got {objective!r}")
+
     rng = np.random.default_rng(seed)
     sae = SAE(hidden_dim, latent_dim).to(device)
     head: nn.Linear | None = None
@@ -309,12 +319,36 @@ def train_repr_with_pairs(
     n_t = torch.from_numpy(neg_idx).to(device)
     n_pairs = pos_idx.shape[0]
 
-    final = {"recon": float("nan"), "l1": float("nan"), "obj": float("nan")}
-    for _ in range(epochs):
+    def pair_metrics(za, zp, zn, s_pos, s_neg):
+        """Detached diagnostics: did the objective actually order the pair?
+
+        pair_acc = fraction of pairs ranked/embedded in the correct order.
+        margin_sat = fraction satisfying the configured margin.
+        Returns (pair_acc, margin_sat) as floats, or (nan, nan) for objective=none.
+        """
+        with torch.no_grad():
+            if objective == "rank":
+                diff = (s_pos - s_neg).detach()
+                return (diff > 0).float().mean().item(), (diff >= rank_margin).float().mean().item()
+            if objective == "triplet":
+                if triplet_metric == "l2":
+                    d_pos = (za - zp).pow(2).sum(-1)
+                    d_neg = (za - zn).pow(2).sum(-1)
+                else:
+                    d_pos = 1.0 - F.cosine_similarity(za, zp, dim=-1)
+                    d_neg = 1.0 - F.cosine_similarity(za, zn, dim=-1)
+                gap = (d_neg - d_pos).detach()
+                return (gap > 0).float().mean().item(), (gap >= triplet_margin).float().mean().item()
+            return float("nan"), float("nan")
+
+    history: list[dict] = []
+    final = {"recon": float("nan"), "l1": float("nan"), "obj": float("nan"),
+             "pair_acc": float("nan"), "margin_sat": float("nan")}
+    for epoch in range(epochs):
         sae.train()
         if head is not None:
             head.train()
-        ep_recon = ep_l1 = ep_obj = 0.0
+        ep_recon = ep_l1 = ep_obj = ep_acc = ep_margin = 0.0
         nb = 0
         for batch in iter_minibatches(n_pairs, batch_size, rng):
             ib = torch.from_numpy(batch).to(device)
@@ -331,34 +365,47 @@ def train_repr_with_pairs(
             ) / 3.0
             l1 = (za.abs().mean() + zp.abs().mean() + zn.abs().mean()) / 3.0
             loss = recon + l1_weight * l1
+            s_pos = s_neg = None
             if objective == "rank":
                 s_pos = head(zp).squeeze(-1)
                 s_neg = head(zn).squeeze(-1)
                 obj = ranking_loss(s_pos, s_neg, kind=rank_kind, margin=rank_margin)
+                loss = loss + obj_weight * obj
             elif objective == "triplet":
                 obj = triplet_loss(za, zp, zn, metric=triplet_metric, margin=triplet_margin)
-            else:
-                raise ValueError(f"objective must be rank|triplet, got {objective!r}")
-            loss = loss + obj_weight * obj
+                loss = loss + obj_weight * obj
+            else:  # none (recon-only control)
+                obj = torch.zeros((), device=device)
             opt.zero_grad()
             loss.backward()
             opt.step()
+            acc, margin = pair_metrics(za, zp, zn, s_pos, s_neg)
             ep_recon += recon.item()
             ep_l1 += l1.item()
             ep_obj += obj.item()
+            ep_acc += acc
+            ep_margin += margin
             nb += 1
         final = {
             "recon": ep_recon / max(nb, 1),
             "l1": ep_l1 / max(nb, 1),
             "obj": ep_obj / max(nb, 1),
+            "pair_acc": ep_acc / max(nb, 1),
+            "margin_sat": ep_margin / max(nb, 1),
         }
+        history.append({"epoch": epoch, **final})
+
     stats = {
         "final_reconstruction_mse": final["recon"],
         "final_l1_mean": final["l1"],
         "final_aux_bce": None,
         "final_objective_loss": final["obj"],
+        "final_pair_accuracy": final["pair_acc"],
+        "final_margin_satisfaction": final["margin_sat"],
         "objective": objective,
+        "obj_weight": obj_weight,
         "n_pairs": int(n_pairs),
+        "history": history,
     }
     return sae, stats
 
@@ -770,7 +817,12 @@ def main() -> None:
             anchor_idx = anchor_idx[: args.max_pairs]
             pos_idx = pos_idx[: args.max_pairs]
             neg_idx = neg_idx[: args.max_pairs]
-        objective = "rank" if method.endswith("rank") else "triplet"
+        if method.endswith("rank"):
+            objective = "rank"
+        elif method.endswith("triplet"):
+            objective = "triplet"
+        else:  # ae_recon / sae_recon -> matched recon-only control
+            objective = "none"
         # ae_* => dense (no sparsity); sae_* => keep L1 sparsity penalty.
         rep_l1 = 0.0 if method.startswith("ae") else args.l1_weight
         rep_train_n = int(pos_idx.shape[0])
@@ -991,10 +1043,23 @@ def main() -> None:
             sae_stats["final_l1_mean"] if method != "dense_linear" and method != "random" else None
         ),
         "final_aux_bce": sae_stats["final_aux_bce"],
+        # Sprint 2 objective diagnostics (None for non-fork methods).
+        "objective": sae_stats.get("objective"),
+        "obj_weight": sae_stats.get("obj_weight"),
+        "final_objective_loss": sae_stats.get("final_objective_loss"),
+        "final_pair_accuracy": sae_stats.get("final_pair_accuracy"),
+        "final_margin_satisfaction": sae_stats.get("final_margin_satisfaction"),
         "gpu_name": gpu_name,
         "device": device.type,
     }
     (args.out_dir / "train_metrics.json").write_text(json.dumps(train_metrics, indent=2))
+
+    # Per-epoch representation-training curves (recon / l1 / objective /
+    # pair_accuracy / margin_satisfaction) for the fork methods.
+    if sae_stats.get("history"):
+        (args.out_dir / "representation_history.json").write_text(
+            json.dumps(sae_stats["history"], indent=2)
+        )
 
     if all_eval_summaries:
         primary = next(

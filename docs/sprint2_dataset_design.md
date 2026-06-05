@@ -231,28 +231,31 @@ python scripts/merge_easy_probe_leaderboard.py --help
 ## 8. Pipeline
 
 All jobs live in `scripts/tamia/jobs/s2/`. Dataset prep is CPU/IO only and runs
-directly on the login node (no Slurm); GPU work is submitted to Slurm. The
-matrix is **one** Slurm job that runs the 4 cells concurrently on 4 GPUs (not 4
-independent jobs):
+directly on the login node (no Slurm); GPU work is submitted to Slurm. Each
+training stage is **one** Slurm job whose `JOBS` list is distributed round-robin
+across the 4 GPUs (concurrent; one job pinned per `CUDA_VISIBLE_DEVICES`;
+non-zero exit if any job fails):
 
 ```
 build_forks.sh               # login node (no GPU): build forks  -> $SCRATCH/cot_mech/s2_forks/data
 stats_forks.sh               # login node (no GPU): print manifest statistics
 02_encode_forks.sbatch       # 1 GPU: encode train+val items      -> $SCRATCH/cot_mech/s2_forks/encoded
-03_train_matrix_sanity.sbatch  # 4 GPU: 1 epoch, 512 pairs, gsm8k-only (smoke)
-04_train_matrix_full.sbatch    # 4 GPU: full matrix, all PB subsets
-_matrix_common.sh            # shared worker launcher (sourced by 03/04)
+03_train_matrix_sanity.sbatch  # 4 GPU: controls+4 cells, 1 epoch, 512 pairs, gsm8k-only (smoke)
+04_train_matrix_full.sbatch    # 4 GPU: controls + 4 cells @ obj_weight=1 (matched comparison)
+05_train_sweep.sbatch          # 4 GPU: controls + 4 cells x obj_weight{1,10,100} (14 jobs)
+_matrix_common.sh            # shared JOBS runner (sourced by 03/04/05)
 ```
 
-GPU assignment inside the matrix allocation (one method per GPU, concurrent,
-`wait`, non-zero exit if any worker fails):
+**Recon-only controls** (`ae_recon`, `sae_recon`) train on the *same* fork items
+with the objective term OFF, so any F1 delta vs `*_rank` / `*_triplet` is
+attributable to the objective. **Diagnostics** are written per run:
+`train_metrics.json` carries `final_objective_loss`, `final_pair_accuracy`,
+`final_margin_satisfaction`; `representation_history.json` carries the per-epoch
+recon / l1 / objective / pair_accuracy / margin_satisfaction curves.
 
-```
-CUDA_VISIBLE_DEVICES=0 -> ae_rank
-CUDA_VISIBLE_DEVICES=1 -> sae_rank
-CUDA_VISIBLE_DEVICES=2 -> ae_triplet
-CUDA_VISIBLE_DEVICES=3 -> sae_triplet
-```
+`JOBS` entries are `<method>` for the recon controls or `<method>:<obj_weight>`
+for the objective cells. Output/log tag is the method name (controls) or
+`<method>_w<weight>` (objective cells).
 
 Dependency chain:
 ```
@@ -264,7 +267,9 @@ sbatch 02_encode_forks.sbatch                   # GPU
     ↓
 sbatch 03_train_matrix_sanity.sbatch            # GPU (verify), then:
     ↓
-sbatch 04_train_matrix_full.sbatch              # GPU
+sbatch 04_train_matrix_full.sbatch              # GPU (matched comparison @ w=1)
+    ↓
+sbatch 05_train_sweep.sbatch                    # GPU (obj_weight sweep)
 ```
 
 Run, with the full paths:
@@ -274,6 +279,7 @@ bash scripts/tamia/jobs/s2/stats_forks.sh
 sbatch scripts/tamia/jobs/s2/02_encode_forks.sbatch
 sbatch scripts/tamia/jobs/s2/03_train_matrix_sanity.sbatch
 sbatch scripts/tamia/jobs/s2/04_train_matrix_full.sbatch
+sbatch scripts/tamia/jobs/s2/05_train_sweep.sbatch
 ```
 
 ### Output / checkpoint layout

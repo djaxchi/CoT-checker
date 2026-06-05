@@ -4,6 +4,7 @@ CPU-only, tiny tensors, no model downloads.
 """
 
 import json
+import math
 
 import numpy as np
 import torch
@@ -95,3 +96,32 @@ def test_sae_path_keeps_l1_penalty_recorded():
     _, stats = _run("rank", l1_weight=1e-2)
     assert stats["final_l1_mean"] >= 0.0
     assert stats["final_aux_bce"] is None
+
+
+def test_recon_only_control_has_zero_objective():
+    sae, stats = _run("none")
+    assert isinstance(sae, SAE)
+    assert stats["objective"] == "none"
+    assert stats["final_objective_loss"] == 0.0
+    # no objective => pair diagnostics are undefined
+    assert math.isnan(stats["final_pair_accuracy"])
+    assert math.isnan(stats["final_margin_satisfaction"])
+
+
+def test_history_curves_recorded_per_epoch():
+    _, stats = _run("rank", epochs=30)
+    hist = stats["history"]
+    assert len(hist) == 30
+    assert {"epoch", "recon", "l1", "obj", "pair_acc", "margin_sat"} <= set(hist[0])
+    assert hist[0]["epoch"] == 0 and hist[-1]["epoch"] == 29
+
+
+def test_pair_accuracy_in_unit_range_for_rank():
+    _, stats = _run("rank")
+    assert 0.0 <= stats["final_pair_accuracy"] <= 1.0
+    assert 0.0 <= stats["final_margin_satisfaction"] <= 1.0
+
+
+def test_pair_accuracy_reported_for_triplet():
+    _, stats = _run("triplet", triplet_metric="cosine")
+    assert 0.0 <= stats["final_pair_accuracy"] <= 1.0

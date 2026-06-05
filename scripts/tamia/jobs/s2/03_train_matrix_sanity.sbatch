@@ -39,6 +39,9 @@ export BATCH=256
 export THRESHOLD_GRID=0.05
 export PB_SUBSETS="gsm8k"
 
+# Smoke all paths: recon controls + the 4 objective cells at obj_weight=1.
+JOBS=(ae_recon sae_recon ae_rank:1 sae_rank:1 ae_triplet:1 sae_triplet:1)
+
 cd "$PROJECT_DIR"
 mkdir -p results/logs
 

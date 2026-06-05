@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -23,7 +23,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 
-METHODS = ["random", "dense_linear", "sae_positive", "sae_mixed", "sae_contrastive"]
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from src.repr.objectives import ranking_loss, triplet_loss  # noqa: E402
+
+# Sprint 1 methods + Sprint 2 fork-based representation-shaping methods.
+#   ae          : dense autoencoder, reconstruction only (no sparsity, no pairs)
+#   {ae,sae}_rank    : recon[+L1] + pairwise ranking on fork pos/neg siblings
+#   {ae,sae}_triplet : recon[+L1] + triplet (anchor=prefix, pos/neg continuations)
+METHODS = [
+    "random", "dense_linear", "sae_positive", "sae_mixed", "sae_contrastive",
+    "ae", "ae_rank", "sae_rank", "ae_triplet", "sae_triplet",
+]
+FORK_METHODS = ("ae_rank", "sae_rank", "ae_triplet", "sae_triplet")
 THRESHOLD_GRID = [round(0.1 * i, 1) for i in range(1, 11)]
 
 
@@ -217,6 +230,135 @@ def train_sae(
         "final_reconstruction_mse": final_mse,
         "final_l1_mean": final_l1,
         "final_aux_bce": final_bce if contrastive else None,
+    }
+    return sae, stats
+
+
+def load_fork_pairs(
+    items_meta_path: Path, pairs_path: Path
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Map fork pair UIDs to row indices into the encoded items array.
+
+    Returns (anchor_idx, pos_idx, neg_idx), each shape (n_pairs,).
+    """
+    uid_to_row: dict[str, int] = {}
+    for line in items_meta_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        uid_to_row[row["item_uid"]] = int(row["row"])
+
+    anchor, pos, neg = [], [], []
+    for line in pairs_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        pr = json.loads(line)
+        try:
+            anchor.append(uid_to_row[pr["anchor_uid"]])
+            pos.append(uid_to_row[pr["positive_uid"]])
+            neg.append(uid_to_row[pr["negative_uid"]])
+        except KeyError as e:
+            raise ValueError(
+                f"Pair references item uid {e} absent from items meta "
+                f"{items_meta_path}. Re-encode items and pairs from the same build."
+            )
+    if not pos:
+        raise ValueError(f"No pairs loaded from {pairs_path}.")
+    return np.array(anchor), np.array(pos), np.array(neg)
+
+
+def train_repr_with_pairs(
+    items_h: np.ndarray,
+    anchor_idx: np.ndarray,
+    pos_idx: np.ndarray,
+    neg_idx: np.ndarray,
+    hidden_dim: int,
+    latent_dim: int,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    l1_weight: float,
+    objective: str,
+    obj_weight: float,
+    rank_kind: str,
+    rank_margin: float,
+    triplet_metric: str,
+    triplet_margin: float,
+    device: torch.device,
+    seed: int,
+) -> tuple[SAE, dict]:
+    """Train an encoder with reconstruction[+L1] plus a fork preference term.
+
+    objective: "rank" (scalar head, score_pos > score_neg) or "triplet"
+    (latent-space anchor->pos pull, anchor->neg push). The ranking head is
+    auxiliary and discarded; only the SAE/AE encoder+decoder are saved, so the
+    artifact stays format-compatible with the ProcessBench eval pipeline.
+    """
+    rng = np.random.default_rng(seed)
+    sae = SAE(hidden_dim, latent_dim).to(device)
+    head: nn.Linear | None = None
+    params = list(sae.parameters())
+    if objective == "rank":
+        head = nn.Linear(latent_dim, 1).to(device)
+        params += list(head.parameters())
+    opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.0)
+
+    h_t = torch.from_numpy(items_h).to(device)
+    a_t = torch.from_numpy(anchor_idx).to(device)
+    p_t = torch.from_numpy(pos_idx).to(device)
+    n_t = torch.from_numpy(neg_idx).to(device)
+    n_pairs = pos_idx.shape[0]
+
+    final = {"recon": float("nan"), "l1": float("nan"), "obj": float("nan")}
+    for _ in range(epochs):
+        sae.train()
+        if head is not None:
+            head.train()
+        ep_recon = ep_l1 = ep_obj = 0.0
+        nb = 0
+        for batch in iter_minibatches(n_pairs, batch_size, rng):
+            ib = torch.from_numpy(batch).to(device)
+            ha = h_t.index_select(0, a_t.index_select(0, ib))
+            hp = h_t.index_select(0, p_t.index_select(0, ib))
+            hn = h_t.index_select(0, n_t.index_select(0, ib))
+            za, ha_hat = sae(ha)
+            zp, hp_hat = sae(hp)
+            zn, hn_hat = sae(hn)
+            recon = (
+                F.mse_loss(ha_hat, ha)
+                + F.mse_loss(hp_hat, hp)
+                + F.mse_loss(hn_hat, hn)
+            ) / 3.0
+            l1 = (za.abs().mean() + zp.abs().mean() + zn.abs().mean()) / 3.0
+            loss = recon + l1_weight * l1
+            if objective == "rank":
+                s_pos = head(zp).squeeze(-1)
+                s_neg = head(zn).squeeze(-1)
+                obj = ranking_loss(s_pos, s_neg, kind=rank_kind, margin=rank_margin)
+            elif objective == "triplet":
+                obj = triplet_loss(za, zp, zn, metric=triplet_metric, margin=triplet_margin)
+            else:
+                raise ValueError(f"objective must be rank|triplet, got {objective!r}")
+            loss = loss + obj_weight * obj
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            ep_recon += recon.item()
+            ep_l1 += l1.item()
+            ep_obj += obj.item()
+            nb += 1
+        final = {
+            "recon": ep_recon / max(nb, 1),
+            "l1": ep_l1 / max(nb, 1),
+            "obj": ep_obj / max(nb, 1),
+        }
+    stats = {
+        "final_reconstruction_mse": final["recon"],
+        "final_l1_mean": final["l1"],
+        "final_aux_bce": None,
+        "final_objective_loss": final["obj"],
+        "objective": objective,
+        "n_pairs": int(n_pairs),
     }
     return sae, stats
 
@@ -425,6 +567,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--latent_dim", type=int, default=None,
                    help="Default: hidden_dim (no overcomplete unless explicitly set).")
     p.add_argument("--early_stopping_patience", type=int, default=5)
+    # ---- Sprint 2: fork-based representation shaping -------------------
+    p.add_argument("--fork_items_h", type=Path, default=None,
+                   help="Encoded fork items .npy (required for *_rank / *_triplet).")
+    p.add_argument("--fork_items_meta", type=Path, default=None,
+                   help="Fork items meta .jsonl mapping item_uid -> row.")
+    p.add_argument("--fork_pairs", type=Path, default=None,
+                   help="Fork pairs .jsonl (anchor/positive/negative uids).")
+    p.add_argument("--max_pairs", type=int, default=None,
+                   help="Truncate fork pairs to the first N (sanity/smoke runs).")
+    p.add_argument("--obj_weight", type=float, default=1.0,
+                   help="Weight on the ranking/triplet term added to recon[+L1].")
+    p.add_argument("--rank_kind", choices=["logistic", "margin"], default="logistic")
+    p.add_argument("--rank_margin", type=float, default=1.0)
+    p.add_argument("--triplet_metric", choices=["l2", "cosine"], default="l2")
+    p.add_argument("--triplet_margin", type=float, default=1.0)
     # ---- Generalized cache stems --------------------------------------
     p.add_argument("--probe_train_stem", type=str, default="probe_train_40k",
                    help="Stem under --cache_dir loaded as probe training data.")
@@ -575,6 +732,58 @@ def main() -> None:
             contrastive=contrastive,
             device=device,
             seed=args.seed,
+        )
+        representation_train_time = time.time() - t0
+        torch.save(sae.state_dict(), args.out_dir / "representation.pt")
+        for p in sae.parameters():
+            p.requires_grad_(False)
+        sae.eval()
+    elif method == "ae":
+        # Dense autoencoder: reconstruction only (no sparsity, no labels).
+        rep_h, _ = load_npy_pair(args.cache_dir, "mixed_train_40k")
+        rep_train_n = rep_h.shape[0]
+        t0 = time.time()
+        sae, sae_stats = train_sae(
+            h_train=rep_h, y_train=None,
+            hidden_dim=hidden_dim, latent_dim=latent_dim,
+            epochs=args.epochs_sae, batch_size=args.batch_size, lr=args.lr_sae,
+            l1_weight=0.0, bce_weight=0.0, contrastive=False,
+            device=device, seed=args.seed,
+        )
+        representation_train_time = time.time() - t0
+        torch.save(sae.state_dict(), args.out_dir / "representation.pt")
+        for p in sae.parameters():
+            p.requires_grad_(False)
+        sae.eval()
+    elif method in FORK_METHODS:
+        if not (args.fork_items_h and args.fork_items_meta and args.fork_pairs):
+            raise SystemExit(
+                f"Method {method} requires --fork_items_h, --fork_items_meta, --fork_pairs."
+            )
+        items_h = np.load(args.fork_items_h).astype(np.float32)
+        if items_h.shape[1] != hidden_dim:
+            raise SystemExit(
+                f"Fork items hidden_dim ({items_h.shape[1]}) != PRM800K ({hidden_dim})."
+            )
+        anchor_idx, pos_idx, neg_idx = load_fork_pairs(args.fork_items_meta, args.fork_pairs)
+        if args.max_pairs is not None:
+            anchor_idx = anchor_idx[: args.max_pairs]
+            pos_idx = pos_idx[: args.max_pairs]
+            neg_idx = neg_idx[: args.max_pairs]
+        objective = "rank" if method.endswith("rank") else "triplet"
+        # ae_* => dense (no sparsity); sae_* => keep L1 sparsity penalty.
+        rep_l1 = 0.0 if method.startswith("ae") else args.l1_weight
+        rep_train_n = int(pos_idx.shape[0])
+        t0 = time.time()
+        sae, sae_stats = train_repr_with_pairs(
+            items_h=items_h,
+            anchor_idx=anchor_idx, pos_idx=pos_idx, neg_idx=neg_idx,
+            hidden_dim=hidden_dim, latent_dim=latent_dim,
+            epochs=args.epochs_sae, batch_size=args.batch_size, lr=args.lr_sae,
+            l1_weight=rep_l1, objective=objective, obj_weight=args.obj_weight,
+            rank_kind=args.rank_kind, rank_margin=args.rank_margin,
+            triplet_metric=args.triplet_metric, triplet_margin=args.triplet_margin,
+            device=device, seed=args.seed,
         )
         representation_train_time = time.time() - t0
         torch.save(sae.state_dict(), args.out_dir / "representation.pt")

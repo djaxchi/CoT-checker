@@ -18,7 +18,7 @@ set -euo pipefail
 PROJECT_DIR="$HOME/CoT-checker"
 STORE="/project/aip-azouaq/$USER"
 SCRATCH_BASE="$SCRATCH/cot_mech"
-RAW_DIR="$SCRATCH_BASE/prestudy_v1/raw"          # PRM800K raw jsonl directory
+RAW_FILE="$SCRATCH_BASE/raw/prm800k/train.jsonl"  # train split only (matches prestudy source; no test leakage)
 FORKS_DIR="$SCRATCH_BASE/s2_forks/data"
 MODEL="Qwen/Qwen2.5-1.5B"
 
@@ -41,12 +41,12 @@ export TOKENIZERS_PARALLELISM=false
 
 echo "======================================================="
 echo "  S2: build forks  (mode=$PAIR_MODE  train=$N_TRAIN_FORKS  val=$N_VAL_FORKS)"
-echo "  raw : $RAW_DIR"
+echo "  raw : $RAW_FILE"
 echo "  out : $FORKS_DIR"
 echo "======================================================="
 
 python scripts/build_prm800k_forks.py \
-    --raw_dir "$RAW_DIR" \
+    --raw_file "$RAW_FILE" \
     --out_dir "$FORKS_DIR" \
     --tokenizer_name_or_path "$MODEL" \
     --local_files_only \

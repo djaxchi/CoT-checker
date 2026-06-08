@@ -34,7 +34,9 @@ if [[ "$TAG" == "qwen2_5_1_5b" ]]; then GATE=1; fi
 
 mkdir -p "$RUNS_ROOT/$TAG/logs"
 
-EXPORT_COMMON="ALL,TAG=$TAG"
+# Pass the real (un-spooled) script dir so the stage jobs can find models.env /
+# _common.sh; sbatch copies the script body to a spool dir where siblings are absent.
+EXPORT_COMMON="ALL,TAG=$TAG,S1MS_DIR=$HERE"
 
 dep_clause() { [[ -n "$1" ]] && echo "--dependency=afterok:$1" || echo ""; }
 

@@ -15,7 +15,8 @@
 # Required env: TAG
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# sbatch spools this script; use the launcher-exported S1MS_DIR (real repo path).
+HERE="${S1MS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 # shellcheck disable=SC1091
 source "$HERE/models.env"
 # shellcheck disable=SC1091

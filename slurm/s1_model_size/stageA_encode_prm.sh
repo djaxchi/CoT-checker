@@ -18,7 +18,10 @@
 # Required env (exported by submit_model_dag.sh): TAG
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# sbatch copies this script to a spool dir, so $BASH_SOURCE does not point at
+# the repo. The launcher exports S1MS_DIR with the real path; fall back to
+# dirname only when run directly (not via sbatch).
+HERE="${S1MS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 # shellcheck disable=SC1091
 source "$HERE/models.env"
 # shellcheck disable=SC1091

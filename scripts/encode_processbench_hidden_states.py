@@ -146,7 +146,9 @@ def encode_all_steps(
     pad_token_id: int,
     shard_idx: int = 0,
     num_shards: int = 1,
-) -> tuple[np.ndarray, np.ndarray, list[dict], int]:
+    fail_on_overlength: bool = False,
+    subset_name: str | None = None,
+) -> tuple[np.ndarray, list[dict], int, list[int]]:
     """
     Flatten all steps from all traces, encode in batches.
 
@@ -194,6 +196,7 @@ def encode_all_steps(
     all_hidden = np.zeros((n, hidden_dim), dtype=np_dtype)
     all_meta: list[dict] = []
     n_skipped = 0
+    token_lengths: list[int] = []
 
     t_start = time.perf_counter()
     i = 0
@@ -215,6 +218,16 @@ def encode_all_steps(
                 # carry subset tag through if present
                 ex.setdefault("pb_subset", ex.get("pb_subset"))
             except ValueError as e:
+                if fail_on_overlength:
+                    sys.exit(
+                        "[encode_pb] FATAL: overlength step under the "
+                        "no-truncation contract. "
+                        f"subset={subset_name or ex.get('pb_subset')} "
+                        f"id={ex['id']} step_idx={ex['step_idx']} "
+                        f"global_step_index={ex.get('global_step_index')}: {e}\n"
+                        "Raise --max_seq_len (or -1 for the model context "
+                        "window); never truncate."
+                    )
                 print(
                     f"[encode] SKIP overlength step: id={ex['id']} step={ex['step_idx']}: {e}",
                     file=sys.stderr, flush=True,
@@ -251,6 +264,7 @@ def encode_all_steps(
             if valid:
                 vec = last_layer[b_idx, cand_idx, :].detach().to(save_dtype).cpu().numpy()
                 all_hidden[i + b_idx] = vec
+                token_lengths.append(n_tokens)
             meta_row = {
                 "id": ex["id"],
                 "step_idx": ex["step_idx"],
@@ -273,7 +287,7 @@ def encode_all_steps(
         if i % (batch_size * 16) == 0 or i >= n:
             print(f"[encode] {i}/{n} steps done ({elapsed:.1f}s)", flush=True)
 
-    return all_hidden, all_meta, n_skipped
+    return all_hidden, all_meta, n_skipped, token_lengths
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +305,14 @@ def main() -> None:
     p.add_argument("--model_name_or_path", type=str, required=True)
     p.add_argument("--local_files_only", action="store_true")
     p.add_argument("--run_name", type=str, required=True)
-    p.add_argument("--max_seq_len", type=int, default=2048)
+    p.add_argument("--max_seq_len", type=int, default=2048,
+                   help="Hard cap on tokenized sequence length. Pass -1 to use "
+                        "the model's full context window "
+                        "(model.config.max_position_embeddings).")
+    p.add_argument("--fail_on_overlength", action="store_true",
+                   help="No-truncation contract: abort (instead of skipping) if "
+                        "any step exceeds --max_seq_len, logging "
+                        "subset/id/step_idx/length.")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     p.add_argument("--save_dtype", choices=["float16", "float32"], default="float16")
@@ -368,7 +389,23 @@ def main() -> None:
     model = model.to(device)
     model.eval()
     hidden_dim = model.config.hidden_size
-    print(f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, device={device}", flush=True)
+    model_max = int(getattr(model.config, "max_position_embeddings", 0) or 0)
+
+    if args.max_seq_len is not None and args.max_seq_len <= 0:
+        if model_max <= 0:
+            sys.exit("[encode_pb] model has no max_position_embeddings; pass an explicit --max_seq_len.")
+        args.max_seq_len = model_max
+    if model_max and args.max_seq_len > model_max:
+        sys.exit(
+            f"[encode_pb] --max_seq_len={args.max_seq_len} exceeds model context "
+            f"window max_position_embeddings={model_max}. Refusing."
+        )
+    print(
+        f"[encode_pb] Model loaded. hidden_dim={hidden_dim}, "
+        f"max_position_embeddings={model_max}, max_seq_len={args.max_seq_len}, "
+        f"device={device}",
+        flush=True,
+    )
 
     if args.num_shards < 1 or not (0 <= args.shard_idx < args.num_shards):
         sys.exit(
@@ -381,7 +418,7 @@ def main() -> None:
         flush=True,
     )
     t_start = time.perf_counter()
-    all_hidden, all_meta, n_skipped = encode_all_steps(
+    all_hidden, all_meta, n_skipped, token_lengths = encode_all_steps(
         traces=traces,
         tokenizer=tokenizer,
         model=model,
@@ -392,6 +429,8 @@ def main() -> None:
         pad_token_id=pad_token_id,
         shard_idx=args.shard_idx,
         num_shards=args.num_shards,
+        fail_on_overlength=args.fail_on_overlength,
+        subset_name=args.subset_name,
     )
     t_end = time.perf_counter()
 
@@ -412,19 +451,34 @@ def main() -> None:
     total_sec = t_end - t_start
     avg_ms = total_sec / n_total * 1000 if n_total > 0 else 0.0
 
+    lt = np.asarray(token_lengths, dtype=np.int64) if token_lengths else np.zeros(0, dtype=np.int64)
     manifest = {
         "run_name": args.run_name,
-        "model": args.model_name_or_path,
+        "model_name": args.model_name_or_path,
+        "tokenizer_name": args.model_name_or_path,
         "offline": True,
         "local_files_only": args.local_files_only,
         "source_file": str(args.raw_file),
+        "subset_name": args.subset_name,
         "n_traces": len(traces),
         "n_steps_total": n_total,
         "n_skipped": n_skipped,
         "layer": "last",
         "token_position": "last token of current_step",
-        "length_policy": "skip overlength (not fail)",
+        "length_policy": (
+            "no truncation (fail-hard on overlength)"
+            if args.fail_on_overlength else "skip overlength (not fail)"
+        ),
+        "fail_on_overlength": args.fail_on_overlength,
         "max_seq_len": args.max_seq_len,
+        "model_max_position_embeddings": model_max,
+        "num_examples": len(traces),
+        "num_steps": n_total,
+        "max_observed_tokens": int(lt.max()) if lt.size else 0,
+        "mean_observed_tokens": float(lt.mean()) if lt.size else 0.0,
+        "p95_observed_tokens": int(np.percentile(lt, 95)) if lt.size else 0,
+        "p99_observed_tokens": int(np.percentile(lt, 99)) if lt.size else 0,
+        "num_truncated_examples": 0,
         "hidden_dim": hidden_dim,
         "model_dtype": args.model_dtype,
         "saved_dtype": args.save_dtype,

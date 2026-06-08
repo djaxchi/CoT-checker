@@ -148,14 +148,40 @@ def encode_file(
     save_dtype: torch.dtype,
     pad_token_id: int,
     limit: int | None = None,
+    shard_idx: int = 0,
+    num_shards: int = 1,
 ) -> dict:
-    """Encode one JSONL file. Returns per-file stats."""
-    examples = read_jsonl(jsonl_path)
+    """Encode one JSONL file. Returns per-file stats.
+
+    Sharding: a deterministic ``global_index`` is assigned to every example in
+    file order BEFORE sharding, so every worker agrees on the ordering. When
+    ``num_shards > 1`` only examples with ``global_index % num_shards ==
+    shard_idx`` are encoded; each meta row carries its ``global_index`` so
+    merge_prm800k_encoded_shards.py can reconstruct the original order. With the
+    default (shard_idx=0, num_shards=1) this is a no-op and behaviour is
+    identical to the original S1 encoder.
+    """
+    all_examples = read_jsonl(jsonl_path)
     if limit is not None:
-        examples = examples[:limit]
+        all_examples = all_examples[:limit]
+
+    # Assign deterministic global_index over the FULL (pre-shard) file order.
+    for gi, ex in enumerate(all_examples):
+        ex["global_index"] = gi
+    n_total_file = len(all_examples)
+    if num_shards > 1:
+        examples = [ex for ex in all_examples if ex["global_index"] % num_shards == shard_idx]
+        print(
+            f"[encode] {stem}: shard {shard_idx}/{num_shards} -> "
+            f"{len(examples)}/{n_total_file} examples",
+            flush=True,
+        )
+    else:
+        examples = all_examples
 
     n = len(examples)
     print(f"[encode] {stem}: {n} examples", flush=True)
+    token_lengths: list[int] = []
 
     hidden_dim = model.config.hidden_size
     np_dtype = np.float16 if save_dtype == torch.float16 else np.float32
@@ -234,6 +260,7 @@ def encode_file(
 
             all_hidden[i + b_idx] = vec
             all_labels[i + b_idx] = ex["label"]
+            token_lengths.append(n_tokens)
             all_meta.append({
                 "uid": ex["uid"],
                 "problem_id": ex["problem_id"],
@@ -245,6 +272,7 @@ def encode_file(
                 "candidate_last_token_idx": cand_idx,
                 "n_tokens": n_tokens,
                 "was_truncated": False,
+                "global_index": ex["global_index"],
             })
 
         del last_layer
@@ -271,16 +299,29 @@ def encode_file(
     h_sha = sha256_file(h_path)
     print(f"[encode] {stem}: saved ({h_path.stat().st_size / 1e6:.1f} MB)", flush=True)
 
+    lt = np.asarray(token_lengths, dtype=np.int64) if token_lengths else np.zeros(0, dtype=np.int64)
+    length_stats = {
+        "num_examples": int(n),
+        "max_observed_tokens": int(lt.max()) if lt.size else 0,
+        "mean_observed_tokens": float(lt.mean()) if lt.size else 0.0,
+        "p95_observed_tokens": int(np.percentile(lt, 95)) if lt.size else 0,
+        "p99_observed_tokens": int(np.percentile(lt, 99)) if lt.size else 0,
+    }
+
     return {
         "jsonl_path": str(jsonl_path),
         "hidden_path": str(h_path),
         "label_path": str(y_path),
         "meta_path": str(m_path),
         "n_examples": n,
+        "n_examples_in_file": n_total_file,
+        "shard_idx": shard_idx,
+        "num_shards": num_shards,
         "sha256_hidden": h_sha,
         "n_overlength": n_overlength,
         "n_truncated": 0,
         "n_skipped": 0,
+        "length_stats": length_stats,
         "total_encoding_time_sec": total_sec,
         "avg_latency_ms_per_example": avg_ms,
     }
@@ -332,7 +373,17 @@ def main() -> None:
     parser.add_argument("--model_name_or_path", type=str, required=True)
     parser.add_argument("--local_files_only", action="store_true")
     parser.add_argument("--run_name", type=str, required=True)
-    parser.add_argument("--max_seq_len", type=int, default=2048)
+    parser.add_argument("--max_seq_len", type=int, default=2048,
+                        help="Hard cap on tokenized sequence length. Encoding "
+                             "FAILS (never truncates) on any example exceeding "
+                             "this. Pass -1 to use the model's full context "
+                             "window (model.config.max_position_embeddings).")
+    parser.add_argument("--shard_idx", type=int, default=0,
+                        help="Worker shard index in [0, num_shards). Examples "
+                             "with global_index %% num_shards == shard_idx are "
+                             "encoded. Merge with merge_prm800k_encoded_shards.py.")
+    parser.add_argument("--num_shards", type=int, default=1,
+                        help="Total number of shards (e.g. 4 for 4-GPU encoding).")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--save_dtype", choices=["float16", "float32"], default="float16")
@@ -394,7 +445,36 @@ def main() -> None:
     model = model.to(device)
     model.eval()
     hidden_dim = model.config.hidden_size
-    print(f"[encode] Model loaded. hidden_dim={hidden_dim}, device={device}", flush=True)
+    model_max = int(getattr(model.config, "max_position_embeddings", 0) or 0)
+
+    # Resolve the no-truncation length cap. -1 => the model's full context
+    # window. Any positive value is honoured but must not exceed the model
+    # context (otherwise we could request positions the model cannot encode).
+    if args.max_seq_len is not None and args.max_seq_len <= 0:
+        if model_max <= 0:
+            sys.exit("[encode] model has no max_position_embeddings; pass an explicit --max_seq_len.")
+        resolved_max_seq_len = model_max
+    else:
+        resolved_max_seq_len = args.max_seq_len
+    if model_max and resolved_max_seq_len > model_max:
+        sys.exit(
+            f"[encode] --max_seq_len={resolved_max_seq_len} exceeds model "
+            f"context window max_position_embeddings={model_max}. Refusing: "
+            "the assertion encoded_length <= max_position_embeddings would be unsafe."
+        )
+    args.max_seq_len = resolved_max_seq_len
+    print(
+        f"[encode] Model loaded. hidden_dim={hidden_dim}, "
+        f"max_position_embeddings={model_max}, max_seq_len={resolved_max_seq_len}, "
+        f"device={device}",
+        flush=True,
+    )
+
+    if args.num_shards < 1 or not (0 <= args.shard_idx < args.num_shards):
+        sys.exit(
+            f"[encode] invalid shard config: shard_idx={args.shard_idx} "
+            f"num_shards={args.num_shards}"
+        )
 
     gpu_info = get_gpu_info()
     t_all_start = time.perf_counter()
@@ -432,6 +512,8 @@ def main() -> None:
             save_dtype=save_dtype,
             pad_token_id=pad_token_id,
             limit=args.limit_per_file,
+            shard_idx=args.shard_idx,
+            num_shards=args.num_shards,
         )
         files_manifest[stem] = {
             "jsonl_path": stats["jsonl_path"],
@@ -439,7 +521,9 @@ def main() -> None:
             "label_path": stats["label_path"],
             "meta_path": stats["meta_path"],
             "n_examples": stats["n_examples"],
+            "n_examples_in_file": stats["n_examples_in_file"],
             "sha256_hidden": stats["sha256_hidden"],
+            "length_stats": stats["length_stats"],
         }
         overlength_by_file[stem] = stats["n_overlength"]
         truncated_by_file[stem] = stats["n_truncated"]
@@ -452,15 +536,35 @@ def main() -> None:
         if total_examples > 0 else 0.0
     )
 
+    # Aggregate no-truncation audit across all encoded files. Because encoding
+    # FAILS hard on any overlength example (see tokenize_example), reaching this
+    # point proves zero truncation occurred.
+    agg_max = max((files_manifest[s]["length_stats"]["max_observed_tokens"]
+                   for s in files_manifest), default=0)
+    agg_p95 = max((files_manifest[s]["length_stats"]["p95_observed_tokens"]
+                   for s in files_manifest), default=0)
+    agg_p99 = max((files_manifest[s]["length_stats"]["p99_observed_tokens"]
+                   for s in files_manifest), default=0)
+
     encoding_manifest = {
         "run_name": args.run_name,
-        "model": args.model_name_or_path,
+        "model_name": args.model_name_or_path,
+        "tokenizer_name": args.model_name_or_path,
         "offline": True,
         "local_files_only": args.local_files_only,
         "layer": "last",
         "token_position": "last token of candidate_step",
-        "length_policy": "no truncation",
+        "length_policy": "no truncation (fail-hard on overlength)",
         "max_seq_len": args.max_seq_len,
+        "model_max_position_embeddings": model_max,
+        "max_observed_tokens": agg_max,
+        "p95_observed_tokens": agg_p95,
+        "p99_observed_tokens": agg_p99,
+        "num_examples": total_examples,
+        "num_steps": total_examples,
+        "num_truncated_examples": 0,
+        "shard_idx": args.shard_idx,
+        "num_shards": args.num_shards,
         "hidden_dim": hidden_dim,
         "model_dtype": args.model_dtype,
         "saved_dtype": args.save_dtype,

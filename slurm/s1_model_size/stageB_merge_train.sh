@@ -2,15 +2,15 @@
 #SBATCH --job-name=s1ms_B_train
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
-#SBATCH --gpus=h100:1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=0
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=48G
 #SBATCH --time=01:00:00
 #SBATCH --output=%x-%j.out
 #
 # Stage B: merge the 4 PRM800K encode shards, dump model_config.json, and train
 # the DenseLinear probe + select the PRM800K-val threshold (Sprint 1 math,
-# imported verbatim). Quick; one GPU.
+# imported verbatim). CPU-only: a linear probe over the cached 40K hidden states
+# does not need a GPU, so this stage does not hold a whole h100 node.
 #
 # Required env: TAG
 set -euo pipefail

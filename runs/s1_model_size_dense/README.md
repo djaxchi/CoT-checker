@@ -63,13 +63,18 @@ Sequential **across** model sizes, parallel **within** a model size, via SLURM
 Per model, a 4-stage DAG:
 
 ```
-Stage A  encode PRM800K 40K+1K, sharded 4 ways (array 0-3, 1 H100/task)
-            └─ merge after all shards succeed (Stage B)
-Stage B  merge shards + dump model_config + train probe + select threshold  (afterok: A)
-Stage C  evaluate ProcessBench, one subset per H100 (array 0-3)             (afterok: B)
+Stage A  encode PRM800K 40K+1K on a whole 4-GPU node: 4 workers (one per GPU),
+         each its deterministic shard (global_index %% 4 == g) of both splits
+Stage B  merge shards + dump model_config + train probe + select threshold  (afterok: A, CPU)
+Stage C  evaluate ProcessBench on a whole 4-GPU node: one subset per GPU      (afterok: B)
             GPU0=gsm8k GPU1=math GPU2=olympiadbench GPU3=omnimath
-Stage D  aggregate val/oracle macro + append to leaderboard                 (afterok: C)
+Stage D  aggregate val/oracle macro + append to leaderboard                  (afterok: C, CPU)
 ```
+
+TamIA allocates h100 GPUs by whole node, so Stages A and C each request a full
+4-GPU node (`--gpus-per-node=h100:4`) and fan out 4 background workers
+internally. Stages B and D are CPU-only (a linear probe and a JSON rollup do not
+need a GPU node).
 
 The next model's Stage A is chained `afterok` on the current model's Stage D, so
 14B/32B never start until the smaller sizes have produced leaderboard rows. The

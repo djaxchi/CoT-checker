@@ -103,13 +103,24 @@ export PRM_SPLIT_DIR=/path/to/s1/split/dir   # prm800k_probe_train_40k.jsonl, pr
 export PB_DIR=/scratch/d/dchikhi/cot-checker/processbench   # ProcessBench raw subsets
 # HF cache contract has sane defaults in models.env; override HF_CACHE_ROOT if needed.
 
-# Phase 1 - smoke test 1.5B and gate:
-slurm/s1_model_size/launch_smoke_1p5b.sh        # prints the gate (Stage D) job id
+# Whole sweep in ONE job (default): encode->train->eval->aggregate for every
+# size, in order, on one 4-GPU allocation. 1.5B still gates the rest; completed
+# models are skipped on re-run (resume); a failure stops with prior rows kept.
+sbatch slurm/s1_model_size/run_sweep_one_job.sh
 
-# Phase 2 - after the gate job SUCCEEDS, submit the rest chained on it:
-slurm/s1_model_size/launch_rest.sh <gate_jobid>
+#   sbatch --time=48:00:00 slurm/s1_model_size/run_sweep_one_job.sh   # longer walltime
+#   S1MS_ONLY="qwen2_5_7b qwen2_5_14b" sbatch slurm/s1_model_size/run_sweep_one_job.sh  # resume subset
+#   FORCE=1 sbatch slurm/s1_model_size/run_sweep_one_job.sh           # recompute completed
+```
 
-# Or submit the whole gated chain in one shot:
+### Alternative: staged afterok DAG (one job per stage)
+
+More restart-friendly but queues a 4-GPU node twice per model (Stages A and C):
+
+```bash
+GATE=$(slurm/s1_model_size/launch_smoke_1p5b.sh)   # 1.5B only; prints gate job id
+slurm/s1_model_size/launch_rest.sh "$GATE"          # 3B..32B after the gate passes
+# or the whole gated chain at once:
 slurm/s1_model_size/launch_sweep.sh
 ```
 

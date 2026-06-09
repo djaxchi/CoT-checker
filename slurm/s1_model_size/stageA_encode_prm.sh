@@ -61,38 +61,6 @@ python scripts/s1ms_audit_token_lengths.py \
   --pb_subset "${PB_SPECS[@]}" \
   --out_json "$MODEL_DIR/length_audit.json" 2>&1 | tee -a "$LOG"
 
-# ---- Fan out one encode worker per GPU; each does its shard of both splits.
-pids=()
-for g in 0 1 2 3; do
-  (
-    export CUDA_VISIBLE_DEVICES="$g" S1MS_SHARD="$g"
-    WLOG="$LOG_DIR/stageA_encode_prm_shard${g}.log"
-    SHARD_DIR="$MODEL_DIR/prm800k_encode_shards/shard_0${g}"
-    mkdir -p "$SHARD_DIR"
-    echo "[A] worker g=$g -> $SHARD_DIR" | tee "$WLOG"
-    run_with_oom_retry "$BS" "$WLOG" \
-      python scripts/encode_prm800k_hidden_states.py \
-        --data_dir "$PRM_SPLIT_DIR" \
-        --out_dir "$SHARD_DIR" \
-        --model_name_or_path "$MODEL_ID" --local_files_only \
-        --run_name "s1ms_${TAG}_prm_shard${g}" \
-        --max_seq_len -1 \
-        --shard_idx "$g" --num_shards 4 \
-        --batch_size __BS__ \
-        --model_dtype float16 --save_dtype float16 \
-        --splits "${PRM_TRAIN_JSONL}:probe_train_40k" "${PRM_VAL_JSONL}:val_1k" \
-        --force
-  ) &
-  pids+=("$!")
-done
-
-fail=0
-for i in "${!pids[@]}"; do
-  if ! wait "${pids[$i]}"; then
-    echo "[A] FATAL: PRM encode worker g=$i failed (model=$MODEL_ID)" | tee -a "$LOG" >&2
-    fail=1
-  fi
-done
-[[ $fail -ne 0 ]] && exit 1
-
+# ---- Fan out one encode worker per GPU (shared helper in _common.sh).
+s1ms_encode_prm_fanout || { echo "[A] FATAL: a PRM shard failed (model=$MODEL_ID)" | tee -a "$LOG" >&2; exit 1; }
 echo "[A] all 4 PRM shards done -> $MODEL_DIR/prm800k_encode_shards" | tee -a "$LOG"

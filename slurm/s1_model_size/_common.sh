@@ -115,3 +115,77 @@ run_with_oom_retry() {
     return "$rc"
   done
 }
+
+# ---------------------------------------------------------------------------
+# Reusable per-model stages (shared by the staged DAG and the single-job sweep).
+# All require: TAG, MODEL_ID, BS, MODEL_DIR, LOG_DIR set by the caller, plus the
+# models.env paths. Each returns non-zero on failure (no set -e reliance).
+# ---------------------------------------------------------------------------
+
+# Encode the frozen PRM800K splits, 4 GPU workers (one shard each), then wait.
+s1ms_encode_prm_fanout() {
+  local pids=() g fail=0
+  for g in 0 1 2 3; do
+    (
+      export CUDA_VISIBLE_DEVICES="$g" S1MS_SHARD="$g"
+      local wlog="$LOG_DIR/stageA_encode_prm_shard${g}.log"
+      local sdir="$MODEL_DIR/prm800k_encode_shards/shard_0${g}"
+      mkdir -p "$sdir"
+      echo "[A] worker g=$g -> $sdir" | tee "$wlog"
+      run_with_oom_retry "$BS" "$wlog" \
+        python scripts/encode_prm800k_hidden_states.py \
+          --data_dir "$PRM_SPLIT_DIR" --out_dir "$sdir" \
+          --model_name_or_path "$MODEL_ID" --local_files_only \
+          --run_name "s1ms_${TAG}_prm_shard${g}" \
+          --max_seq_len -1 --shard_idx "$g" --num_shards 4 \
+          --batch_size __BS__ --model_dtype float16 --save_dtype float16 \
+          --splits "${PRM_TRAIN_JSONL}:probe_train_40k" "${PRM_VAL_JSONL}:val_1k" \
+          --force || exit 1
+    ) &
+    pids+=("$!")
+  done
+  for g in "${!pids[@]}"; do
+    wait "${pids[$g]}" || { echo "[A] PRM shard $g FAILED (model=$MODEL_ID)" >&2; fail=1; }
+  done
+  return "$fail"
+}
+
+# Encode + score the 4 ProcessBench subsets, one GPU each, then wait.
+s1ms_eval_pb_fanout() {
+  local pids=() g fail=0
+  for g in 0 1 2 3; do
+    (
+      export CUDA_VISIBLE_DEVICES="$g"
+      local subset="${S1MS_SUBSETS[$g]}"
+      export S1MS_SHARD="$subset"
+      local raw; raw="$(s1ms_resolve_pb_raw "$subset")" || exit 1
+      local out="$MODEL_DIR/processbench_eval_shards/$subset"
+      local wlog="$LOG_DIR/stageC_eval_${subset}.log"
+      mkdir -p "$out"
+      echo "[C] worker g=$g subset=$subset raw=$raw" | tee "$wlog"
+      run_with_oom_retry "$BS" "$wlog" \
+        python scripts/encode_processbench_hidden_states.py \
+          --raw_file "$raw" --out_dir "$out" \
+          --model_name_or_path "$MODEL_ID" --local_files_only \
+          --run_name "s1ms_${TAG}_pb_${subset}" \
+          --max_seq_len -1 --fail_on_overlength \
+          --batch_size __BS__ --model_dtype float16 --save_dtype float16 \
+          --subset_name "$subset" --output_layout generic \
+          --shard_idx 0 --num_shards 1 --force || exit 1
+      python scripts/evaluate_saved_probe_on_processbench.py \
+        --probe "$MODEL_DIR/linear_probe.pt" \
+        --pb_latents "$out/pb_step_h.npy" --pb_meta "$out/pb_step_meta.jsonl" \
+        --threshold_json "$MODEL_DIR/threshold.json" \
+        --also_oracle --oracle_threshold_step 0.005 \
+        --method_name dense_linear --pb_subset "$subset" \
+        --out_json "$out/metrics.json" \
+        --out_scores_jsonl "$out/step_scores.jsonl" \
+        --out_predictions_jsonl "$out/predictions.jsonl" 2>&1 | tee -a "$wlog" || exit 1
+    ) &
+    pids+=("$!")
+  done
+  for g in "${!pids[@]}"; do
+    wait "${pids[$g]}" || { echo "[C] PB subset worker $g FAILED" >&2; fail=1; }
+  done
+  return "$fail"
+}

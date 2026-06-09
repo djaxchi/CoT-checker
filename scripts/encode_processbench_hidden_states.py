@@ -374,15 +374,23 @@ def main() -> None:
 
     print(f"[encode_pb] Loading model from {args.model_name_or_path} ...", flush=True)
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path,
-            local_files_only=args.local_files_only,
-            torch_dtype=model_dtype,
-        )
+        # transformers >=5 renamed `torch_dtype` to `dtype`; try new then old.
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path,
+                local_files_only=args.local_files_only,
+                dtype=model_dtype,
+            )
+        except TypeError:
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path,
+                local_files_only=args.local_files_only,
+                torch_dtype=model_dtype,
+            )
     except OSError:
         sys.exit(
             "Model not found locally. This job runs offline on TamIA. "
-            "Pre-cache Qwen/Qwen2.5-1.5B before submitting."
+            "Pre-cache the model before submitting."
         )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

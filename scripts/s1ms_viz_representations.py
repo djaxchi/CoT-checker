@@ -35,9 +35,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import numpy as np
+
+
+def _log(msg: str) -> None:
+    print(f"[viz {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -54,11 +59,23 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(x, -60.0, 60.0)))
 
 
+def pca_scores(h: np.ndarray, k: int) -> np.ndarray:
+    """Top-k PCA scores via the Gram matrix (n x n eigendecomposition).
+
+    For n < d (our case: 1000 steps, hidden up to 5120) this is much faster than
+    a full (n x d) SVD: one well-threaded n x n gemm + a 1000x1000 eigh.
+    """
+    hc = (h - h.mean(axis=0, keepdims=True)).astype(np.float32)
+    gram = hc @ hc.T                       # (n, n)
+    w, v = np.linalg.eigh(gram)            # ascending eigenvalues
+    k = min(k, v.shape[1])
+    w = np.clip(w[::-1][:k], 0.0, None)
+    v = v[:, ::-1][:, :k]
+    return v * np.sqrt(w)[None, :]
+
+
 def pca2(h: np.ndarray) -> np.ndarray:
-    """Top-2 PCA scores via numpy SVD (no sklearn dependency)."""
-    hc = h - h.mean(axis=0, keepdims=True)
-    u, s, _ = np.linalg.svd(hc, full_matrices=False)
-    return u[:, :2] * s[:2]
+    return pca_scores(h, 2)
 
 
 def auroc_np(y: np.ndarray, s: np.ndarray) -> float:
@@ -174,22 +191,18 @@ def _scatter_2d(ax, xy, y, title):
     ax.set_xticks([]); ax.set_yticks([])
 
 
-def _pca_k(h: np.ndarray, k: int) -> np.ndarray:
-    hc = h - h.mean(axis=0, keepdims=True)
-    u, s, _ = np.linalg.svd(hc, full_matrices=False)
-    k = min(k, u.shape[1])
-    return u[:, :k] * s[:k]
-
-
-def _project(h, method):
+def _project(h, method, tag=""):
+    t0 = time.perf_counter()
     if method == "PCA":
-        return pca2(h)
-    from sklearn.manifold import TSNE  # lazy
-    # Standard practice: PCA-reduce to ~50 dims before t-SNE. Much faster than
-    # running it on the full hidden dim (1536-5120), and denoises the input.
-    hp = _pca_k(h, 50)
-    perp = min(30, max(5, (len(h) - 1) // 3))
-    return TSNE(n_components=2, init="pca", random_state=42, perplexity=perp).fit_transform(hp)
+        xy = pca2(h)
+    else:
+        from sklearn.manifold import TSNE  # lazy
+        # PCA-reduce to ~50 dims before t-SNE (standard; much faster + denoised).
+        hp = pca_scores(h, 50)
+        perp = min(30, max(5, (len(h) - 1) // 3))
+        xy = TSNE(n_components=2, init="pca", random_state=42, perplexity=perp).fit_transform(hp)
+    _log(f"  projected {tag} {method} (n={len(h)}, d={h.shape[1]}) in {time.perf_counter()-t0:.1f}s")
+    return xy
 
 
 def _score_panel(ax, scores, y, thr, title):
@@ -206,18 +219,20 @@ def _score_panel(ax, scores, y, thr, title):
 def fig_val(models, out_dir, use_tsne):
     methods = ["PCA"] + (["t-SNE"] if use_tsne else [])
     n = len(models)
+    _log("building embeddings figure ...")
     fig, axes = plt.subplots(len(methods), n, figsize=(3.1 * n, 3.1 * len(methods)), squeeze=False)
     for r, method in enumerate(methods):
         for c, m in enumerate(models):
             h, y = _subsample(m["h"], m["y"], EMBED_CAP)
-            _scatter_2d(axes[r, c], _project(h, method), y, f"{m['label']} ({method})\nAUROC={m['auroc']:.3f}")
+            _scatter_2d(axes[r, c], _project(h, method, m["label"]), y,
+                        f"{m['label']} ({method})\nAUROC={m['auroc']:.3f}")
             if c == 0:
                 axes[r, c].set_ylabel(method)
     axes[0, 0].legend(loc="upper right", fontsize=8, markerscale=2)
     fig.suptitle("Correct vs incorrect geometry (PRM800K val_1k) across model size")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_dir / "embeddings_val1k.png", dpi=150); plt.close(fig)
-    print(f"[viz] wrote {out_dir/'embeddings_val1k.png'}")
+    _log(f"wrote {out_dir/'embeddings_val1k.png'}")
 
     fig, axes = plt.subplots(1, len(models), figsize=(3.2 * len(models), 3.4), squeeze=False)
     for c, m in enumerate(models):
@@ -231,7 +246,7 @@ def fig_val(models, out_dir, use_tsne):
     fig.suptitle("Probe score distributions by class (val_1k); dashed = deployed threshold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(out_dir / "probe_scores_val1k.png", dpi=150); plt.close(fig)
-    print(f"[viz] wrote {out_dir/'probe_scores_val1k.png'}")
+    _log(f"wrote {out_dir/'probe_scores_val1k.png'}")
 
     _fig_sep_single(models, out_dir / "separability_val1k.png")
 
@@ -253,7 +268,7 @@ def _fig_sep_single(models, out):
     ax1.legend(h1 + h2, l1 + l2, fontsize=8, loc="lower right")
     ax1.set_title("Class separability and ProcessBench F1_PB vs model size")
     fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
-    print(f"[viz] wrote {out}")
+    _log(f"wrote {out}")
 
 
 # --------------------------------------------------------------------------- pb figures
@@ -283,7 +298,7 @@ def fig_pb_scores_grid(models, subsets, out):
     fig.suptitle("ProcessBench probe scores by class (rows=subset, cols=size); dashed=deployed threshold")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(out, dpi=150); plt.close(fig)
-    print(f"[viz] wrote {out}")
+    _log(f"wrote {out}")
 
 
 def fig_pb_embeddings(models, subset, out, use_tsne):
@@ -297,14 +312,15 @@ def fig_pb_embeddings(models, subset, out, use_tsne):
             if d is None:
                 ax.set_axis_off(); continue
             h, y = _subsample(d["h"], d["y"], EMBED_CAP)
-            _scatter_2d(ax, _project(h, method), y, f"{m['label']} ({method})\nAUROC={d['auroc']:.3f}")
+            _scatter_2d(ax, _project(h, method, f"{m['label']}/{subset}"), y,
+                        f"{m['label']} ({method})\nAUROC={d['auroc']:.3f}")
             if c == 0:
                 ax.set_ylabel(method)
     axes[0, 0].legend(loc="upper right", fontsize=8, markerscale=2)
     fig.suptitle(f"ProcessBench {subset}: correct vs first-error geometry across model size")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out, dpi=150); plt.close(fig)
-    print(f"[viz] wrote {out}")
+    _log(f"wrote {out}")
 
 
 def fig_pb_separability(models, subsets, out):
@@ -325,7 +341,7 @@ def fig_pb_separability(models, subsets, out):
     for ax in axes:
         ax.set_xticks(xs); ax.set_xticklabels(labels); ax.set_xlabel("model size"); ax.legend(fontsize=8)
     fig.tight_layout(); fig.savefig(out, dpi=150); plt.close(fig)
-    print(f"[viz] wrote {out}")
+    _log(f"wrote {out}")
 
 
 def main() -> None:
@@ -346,6 +362,7 @@ def main() -> None:
     models = []
     for tag in args.tags:
         md = args.runs_root / tag
+        _log(f"loading {tag} ({args.source}) ...")
         m = load_val(md) if args.source == "val" else load_pb(md, args.subsets)
         if m is None:
             print(f"[viz] skip {tag}: missing {args.source} data / probe")

@@ -33,6 +33,15 @@ P(error). Run on TamIA login node (CPU); core needs only numpy/torch/matplotlib
 
 from __future__ import annotations
 
+import os
+# Cap BLAS threads BEFORE importing numpy. On a shared login node numpy/OpenBLAS
+# otherwise spawns one thread per core (64+), which thrash against each other and
+# other users for a tiny gemm/eigh and can stall for many minutes. 4 is plenty
+# for these 1000xD operations. Override by exporting the vars before running.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "4")
+
 import argparse
 import json
 import time

@@ -134,7 +134,9 @@ def main() -> None:
     p.add_argument("--model_name_or_path", type=str, required=True)
     p.add_argument("--local_files_only", action="store_true")
     p.add_argument("--run_name", type=str, required=True)
-    p.add_argument("--max_seq_len", type=int, default=2048)
+    p.add_argument("--max_seq_len", type=int, default=2048,
+                   help="Hard cap; encoding fails (never truncates) on overlength. "
+                        "Pass -1 to use the model's full context window.")
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     p.add_argument("--save_dtype", choices=["float16", "float32"], default="float16")
@@ -153,10 +155,16 @@ def main() -> None:
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_name_or_path, local_files_only=args.local_files_only
         )
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path, local_files_only=args.local_files_only,
-            torch_dtype=dtype_map[args.model_dtype],
-        )
+        try:  # transformers >=5 uses dtype=; older uses torch_dtype=
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path, local_files_only=args.local_files_only,
+                dtype=dtype_map[args.model_dtype],
+            )
+        except TypeError:
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path, local_files_only=args.local_files_only,
+                torch_dtype=dtype_map[args.model_dtype],
+            )
     except OSError:
         sys.exit("Model not found locally. Pre-cache the model before running offline.")
 
@@ -166,6 +174,14 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device).eval()
+
+    model_max = int(getattr(model.config, "max_position_embeddings", 0) or 0)
+    if args.max_seq_len is not None and args.max_seq_len <= 0:
+        if model_max <= 0:
+            sys.exit("[encode-forks] model has no max_position_embeddings; pass an explicit --max_seq_len.")
+        args.max_seq_len = model_max
+    if model_max and args.max_seq_len > model_max:
+        sys.exit(f"[encode-forks] --max_seq_len={args.max_seq_len} exceeds model context {model_max}.")
 
     items = read_jsonl(args.items)
     print(f"[encode-forks] {len(items)} items from {args.items}", flush=True)

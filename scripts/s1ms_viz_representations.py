@@ -403,8 +403,17 @@ def fig_probe(models, out_dir, topk=15):
         order = np.argsort(-np.abs(contrib))
         csum = np.cumsum(np.abs(contrib)[order]) / tot
         top_dim = int(order[0]); top_share = float(abs(contrib[top_dim]) / tot)
+        n50 = int(np.searchsorted(csum, 0.5)) + 1
         n90 = int(np.searchsorted(csum, 0.9)) + 1
         info[c] = (top_dim, top_share, n90)
+        # Cohen's d of the two classes along the probe direction (linear separability).
+        u = w / (float(np.linalg.norm(w)) + 1e-12)
+        pp = h @ u
+        p0, p1 = pp[y == 0], pp[y == 1]
+        pooled = np.sqrt(0.5 * (p0.var() + p1.var())) + 1e-12
+        dprime = float((p1.mean() - p0.mean()) / pooled)
+        _log(f"  {m['label']}: val_stepF1={m['val_step_f1']:.3f}  top_unit={top_dim} "
+             f"share={top_share*100:.1f}%  50%@{n50}u  90%@{n90}u  probe-dir d'={dprime:.3f}")
 
         ax = axes[0, c]; td = order[:topk]; vals = contrib[td]
         ax.bar(range(len(td)), vals, color=[ERROR_COLOR if v > 0 else CORRECT_COLOR for v in vals])

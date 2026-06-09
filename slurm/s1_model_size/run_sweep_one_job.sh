@@ -29,7 +29,24 @@
 #   FORCE=1 sbatch ...                               # recompute completed models
 set -uo pipefail   # deliberately NOT -e: per-model failures are handled explicitly
 
-HERE="${S1MS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# Locate this script's dir robustly. When submitted directly via `sbatch`, the
+# script body is copied to a spool dir (so $BASH_SOURCE is useless) and S1MS_DIR
+# is not exported, so we also probe $SLURM_SUBMIT_DIR (where sbatch was run) and
+# $PROJECT_ROOT. Pick the first candidate that actually contains models.env.
+_s1ms_find_here() {
+  local c
+  for c in "${S1MS_DIR:-}" \
+           "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" \
+           "${SLURM_SUBMIT_DIR:-}/slurm/s1_model_size" \
+           "${PROJECT_ROOT:-$HOME/CoT-checker}/slurm/s1_model_size"; do
+    if [[ -n "$c" && -f "$c/models.env" ]]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+HERE="$(_s1ms_find_here)" || {
+  echo "[sweep] FATAL: cannot locate models.env (set S1MS_DIR or submit from the repo root)." >&2
+  exit 1
+}
 # shellcheck disable=SC1091
 source "$HERE/models.env"
 # shellcheck disable=SC1091

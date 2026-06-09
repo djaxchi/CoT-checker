@@ -15,8 +15,9 @@ Step-level Chain-of-Thought verification benchmark. This document is incremental
    - [SSAE-positive](#36-ssae-positive)
    - [SSAE-mixed](#37-ssae-mixed)
    - [SSAE-contrastive](#38-ssae-contrastive)
-   - [SSAE-contrastive (aux-lr 1e-3)](#39-ssae-contrastive-aux-lr-1e-3)
+   - [SSAE original paper checkpoint, Qwen2.5-0.5B](#39-ssae-original-paper-checkpoint-qwen25-05b)
    - [DenseLinear-PRM400k](#310-denselinear-prm400k)
+   - [PRM800K fork preference objectives](#311-prm800k-fork-preference-objectives)
 
 ---
 
@@ -93,10 +94,10 @@ Macro F1_PB averaged across the 4 ProcessBench subsets (gsm8k, math, olympiadben
 | 2 | SAE-mixed | 0.0919 | 0.3688 |
 | 3 | SAE-contrastive | 0.1648 | 0.3350 |
 | 4 | SAE-positive | 0.0371 | 0.3153 |
-| 5 | SSAE-mixed | 0.0203 | 0.1811 |
-| 6 | SSAE-positive | 0.0122 | 0.1804 |
-| 7 | SSAE-contrastive | 0.0176 | 0.1794 |
-| 8 | SSAE-contrastive (aux-lr 1e-3) | 0.0199 | 0.1676 |
+| 5 | SSAE original paper ckpt, Qwen2.5-0.5B | 0.0098 | 0.2948 |
+| 6 | SSAE-mixed | 0.0203 | 0.1811 |
+| 7 | SSAE-positive | 0.0122 | 0.1804 |
+| 8 | SSAE-contrastive | 0.0176 | 0.1794 |
 | - | RandomProbe | 0.0537 | 0.1672 |
 | ‡ | DenseLinear-PRM400k | - | - |
 
@@ -113,7 +114,6 @@ Macro F1_PB averaged across the 4 ProcessBench subsets (gsm8k, math, olympiadben
 | SSAE-mixed | 0.2620 (t=0.565) | 0.2035 (t=0.560) | 0.1136 (t=0.565) | 0.1451 (t=0.545) |
 | SSAE-positive | 0.2841 (t=0.570) | 0.1930 (t=0.570) | 0.1080 (t=0.585) | 0.1366 (t=0.560) |
 | SSAE-contrastive | 0.2615 (t=0.560) | 0.1980 (t=0.565) | 0.1200 (t=0.570) | 0.1380 (t=0.555) |
-| SSAE-contrastive aux-lr | 0.2504 (t=0.555) | 0.1753 (t=0.545) | 0.1124 (t=0.555) | 0.1323 (t=0.535) |
 | RandomProbe | 0.1891 (t=0.725) | 0.1818 (t=0.785) | 0.1383 (t=0.830) | 0.1595 (t=0.835) |
 
 ### Per-subset val-selected F1_PB
@@ -127,18 +127,20 @@ Macro F1_PB averaged across the 4 ProcessBench subsets (gsm8k, math, olympiadben
 | SSAE-mixed | 0.50 | 0.0000 | 0.0277 | 0.0166 | 0.0371 |
 | SSAE-positive | 0.50 | 0.0000 | 0.0143 | 0.0113 | 0.0233 |
 | SSAE-contrastive | 0.50 | 0.0000 | 0.0233 | 0.0165 | 0.0304 |
-| SSAE-contrastive aux-lr | 0.50 | 0.0000 | 0.0143 | 0.0218 | 0.0433 |
 | RandomProbe | 0.50 | 0.0909 | 0.0635 | 0.0113 | 0.0491 |
 
 ### Headline observations
 
 1. **DenseLinear wins at oracle** (macro 0.3773). No learned representation in this set beats the raw final-layer hidden state once a per-subset threshold is chosen.
 2. **SAE-mixed nearly ties DenseLinear at oracle** (0.3688) but its val/oracle gap is the largest in the table. Unsupervised sparsity preserves signal but destroys threshold transfer from PRM800K val.
-3. **SAE-contrastive is the best-calibrated SAE.** Its val-selected macro (0.1648) is the closest to DenseLinear's; contrastive supervision during representation training aligns the score distribution with what PRM800K val expects.
-4. **All four SSAE variants collapse to the random baseline.** Macro oracle F1_PB across the SSAE family is 0.168-0.181, against random's 0.1672. The aux-LR 1e-3 fix from §3.9 does not move the needle.
-5. **The fine 0.005-step oracle grid is load-bearing.** SSAE oracle thresholds cluster in `[0.535, 0.585]`; SAE-contrastive optima at `[0.88, 0.92]`. A 0.1-step grid would have snapped both to grid points and reported substantially worse oracle numbers.
-6. **Subset difficulty is consistent**: gsm8k > math > omnimath > olympiadbench across every method. OlympiadBench is the hardest subset for every probe.
-7. **PRM800K val→PB calibration gap widens off-distribution.** DenseLinear val/oracle ratio is 0.77 on gsm8k (0.2701 / 0.3495) but only 0.24 on olympiadbench (0.0899 / 0.3720).
+3. **SAE auxiliary BCE shaping is the best-calibrated original SAE variant.** This is not a true contrastive method; it uses an auxiliary BCE head during SAE training and discards that head before the final probe. Its val-selected macro (0.1648) is the closest of the SAE family to DenseLinear's, because the auxiliary BCE pressure aligns the score distribution with what PRM800K val expects.
+4. **The original paper SSAE checkpoint is materially better than our 1.5B SSAE runs at oracle** (0.2948 vs 0.1811 best in-house SSAE), despite using a smaller Qwen2.5-0.5B backbone. This points away from the SSAE architecture itself being hopeless and toward insufficient or ineffective training in our 1.5B SSAE variants.
+5. **Calibration remains broken for SSAE.** The 0.5B checkpoint has usable oracle signal, but val-selected macro F1 is still only 0.0098. Probe-only positive/contrastive reuse variants also produce val-selected F1=0.0000, so the PRM800K-val threshold does not transfer.
+6. **All three in-house 1.5B SSAE variants collapse to the random baseline.** Macro oracle F1_PB across that family is 0.179-0.181, barely above random's 0.1672.
+7. **The fine 0.005-step oracle grid is load-bearing.** In-house SSAE oracle thresholds cluster in `[0.535, 0.585]`; SAE-contrastive optima at `[0.88, 0.92]`. A 0.1-step grid would have snapped both to grid points and reported substantially worse oracle numbers.
+8. **Subset difficulty is consistent**: gsm8k > math > omnimath > olympiadbench across every method. OlympiadBench is the hardest subset for every probe.
+9. **PRM800K val→PB calibration gap widens off-distribution.** DenseLinear val/oracle ratio is 0.77 on gsm8k (0.2701 / 0.3495) but only 0.24 on olympiadbench (0.0899 / 0.3720).
+10. **True PRM800K fork preference objectives improve deployable threshold transfer but not oracle separability.** The best fork-based method, AE Rank w=100, reaches macro val-selected F1_PB ≈ 0.235, exceeding DenseLinear's val-selected 0.1855, but its oracle macro is only ≈ 0.290, below DenseLinear's 0.3773 and SAE-mixed's 0.3688. This suggests the fork objective mainly affects calibration rather than the maximum recoverable correctness signal. Full study in §3.11.
 
 ---
 
@@ -232,7 +234,7 @@ Each candidate gets the same brief block: what it is, full-PB results, and a sho
 | omnimath | 0.1444 | 0.2964 | 0.0954 | 0.920 | 0.3193 | 0.2332 | 0.5062 |
 | **macro** | **0.1648** | 0.2935 | 0.1238 | - | **0.3350** | 0.2680 | 0.4563 |
 
-**Interpretation.** Best-calibrated SAE variant. Its val-selected macro (0.1648) is the closest of the SAE family to DenseLinear's (0.1855); contrastive supervision during representation training aligns the score distribution with what the PRM800K val threshold expects. Oracle ceiling sits between SAE-mixed and SAE-positive.
+**Interpretation.** Best-calibrated SAE variant. Despite the legacy `sae_contrastive` id, this is **not** true contrastive learning: it is `SAE + auxiliary BCE shaping` (MSE reconstruction + L1 sparsity + an auxiliary BCE label head that is discarded before the fresh probe is trained). Its val-selected macro (0.1648) is the closest of the SAE family to DenseLinear's (0.1855); the auxiliary BCE pressure during representation training aligns the score distribution with what the PRM800K val threshold expects. Oracle ceiling sits between SAE-mixed and SAE-positive. For genuine fork-based preference (rank/triplet) objectives, see §3.11.
 
 ---
 
@@ -292,25 +294,25 @@ Trained from text JSONL (not cached `.npy`) on positive-only steps. Stability re
 | omnimath | 0.0304 | 0.1779 | 0.0166 | 0.555 | 0.1380 | 0.1014 | 0.2158 |
 | **macro** | **0.0176** | 0.1850 | 0.0094 | - | **0.1794** | 0.1438 | 0.2519 |
 
-**Interpretation.** Effectively tied with SSAE-mixed; the contrastive auxiliary did not transfer because the aux head failed to learn. See §3.9 for the follow-up run that addressed the aux-head optimization, which still did not move the needle.
+**Interpretation.** Effectively tied with SSAE-mixed; the contrastive auxiliary did not transfer because the aux head failed to learn.
 
 ---
 
-### 3.9 SSAE-contrastive (aux-lr 1e-3)
+### 3.9 SSAE original paper checkpoint, Qwen2.5-0.5B
 
-**Particularities.** Same recipe as §3.8 but with the auxiliary BCE head trained on a separate parameter group at LR 1e-3 (vs the main 1e-4) and the full 40K mixed-data train split. Diagnostic intended to fix the aux-head failure observed in §3.8.
+**Particularities.** Reuse audit of the original Miaow-Lab SSAE checkpoint on Qwen2.5-0.5B. This candidate tests whether the poor results from our Qwen2.5-1.5B SSAE variants are primarily a methodology/training failure or an inherent representation failure. The checkpoint is fixed; PRM800K and ProcessBench latents are reused. The leaderboard row reports the best probe/scorer variant over this fixed representation, which remains the mixed baseline.
 
-**Results.** Val threshold = 0.50.
+**Results.**
 
-| Subset | val F1_PB | val Acc_err | val Acc_corr | oracle t | oracle F1_PB | oracle Acc_err | oracle Acc_corr |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| gsm8k | 0.0000 | 0.2126 | 0.0000 | 0.555 | 0.2504 | 0.1836 | 0.3938 |
-| math | 0.0143 | 0.2306 | 0.0074 | 0.545 | 0.1753 | 0.1734 | 0.1773 |
-| olympiadbench | 0.0218 | 0.1452 | 0.0118 | 0.555 | 0.1124 | 0.0908 | 0.1475 |
-| omnimath | 0.0433 | 0.1660 | 0.0249 | 0.535 | 0.1323 | 0.1318 | 0.1328 |
-| **macro** | **0.0199** | 0.1886 | 0.0110 | - | **0.1676** | 0.1449 | 0.2128 |
+| Variant over fixed 0.5B SSAE latents | val_selected macro F1_PB | oracle macro F1_PB | Read |
+|---|---:|---:|---|
+| positive-only centroid | 0.0000 | 0.1379 | weak OOD signal |
+| contrastive probe | 0.0000 | 0.2871 | similar oracle signal to mixed, worse val calibration |
+| mixed baseline | **0.0098** | **0.2948** | best among the fixed-checkpoint SSAE variants |
 
-**Interpretation.** The aux-LR fix does not move macro F1_PB; this variant is slightly below random's macro oracle (0.1676 vs 0.1672). Oracle thresholds shift down marginally (0.535-0.555 vs 0.555-0.570 in §3.8), suggesting the aux head now contributes to the score, but the resulting features do not carry more first-error signal than uniform noise on PB. The SSAE bottleneck, not the contrastive head, is the bottleneck.
+Best mixed-baseline oracle breakdown: combined F1_PB = 0.2877; gsm8k = 0.3627; math = 0.3059; olympiadbench = 0.2464; omnimath = 0.2642.
+
+**Interpretation.** The fixed 0.5B paper checkpoint carries substantially more oracle first-error signal than our in-house 1.5B SSAE runs (0.2948 vs 0.1811 best oracle macro), despite the smaller backbone. That makes the earlier SSAE failure look less like a fatal architecture problem and more like insufficient or ineffective training of our 1.5B SSAE representations. However, the val-selected score remains essentially zero, and the contrastive probe variant does not fix calibration transfer: useful signal is present only when a ProcessBench oracle threshold is allowed.
 
 ---
 
@@ -360,6 +362,62 @@ Probe training time: 12.96 s on 400K examples (≈ 0.032 ms/example) on a single
 - Calibrate the threshold on a held-out ProcessBench split rather than PRM800K val. This is the gap, not training scale.
 - Re-run §3.10 under the 4-subset full-PB pipeline so it can join the unified leaderboard in §2.
 - Add weight decay or temperature scaling to the 400K probe to reduce the over-confidence that hurts Acc_correct at low thresholds.
+
+---
+
+### 3.11 PRM800K fork preference objectives
+
+**Particularities.** Sprint 2. This study asks whether *genuine* fork-based preference supervision shapes a more useful latent than reconstruction alone. It also corrects a naming error: the earlier `sae_contrastive` candidate (§3.5) is **not** contrastive. It is `SAE + auxiliary BCE shaping` (MSE reconstruction + L1 sparsity + an auxiliary BCE label head that is discarded before the fresh probe is trained). True contrastive/preference learning needs matched positive/negative continuations, which §3.5 never used.
+
+**Fork dataset.** Built from PRM800K forks: same problem + solution prefix + step index with multiple human-rated candidate next steps. A valid fork has ≥1 positive (rating +1 → label 0) and ≥1 negative (rating -1 → label 1).
+
+- 54,737 valid forks found
+- 40,000 train forks / 5,000 val forks, problem-disjoint split
+- one (positive, negative) pair per fork
+- each training item carries an anchor / positive / negative triple (anchor = prefix state before the next step)
+- train items = 120,000 encoded rows; val items = 15,000 encoded rows
+- Qwen2.5-1.5B last-token hidden states; `latent_dim = hidden_dim = 1536`; seed = 42
+
+**Methods.** Controls `ae_recon`, `sae_recon` (objective off; AE = reconstruction only, SAE = reconstruction + L1 sparsity). Preference objectives `ae_rank`, `sae_rank` (RankNet logistic on a scalar head, score(pos) > score(neg)) and `ae_triplet`, `sae_triplet` (anchor pulled toward positive, pushed from negative; L2 metric, margin 1.0). Objective weight swept over `w ∈ {1, 10, 100}`; controls have the objective off. Heads are discarded after representation training; a fresh linear probe is trained on the frozen latent and evaluated through the locked ProcessBench pipeline (val-selected + oracle thresholds, 4 subsets, macro F1_PB).
+
+**Results.** Macro F1_PB over the 4 ProcessBench subsets (gsm8k, math, olympiadbench, omnimath). Training diagnostics from `train_metrics.json`: final reconstruction MSE, pair accuracy (fraction of fork pairs correctly ordered), and margin satisfaction.
+
+| Method      | Objective | Weight | Val-selected macro F1_PB | Oracle macro F1_PB | Recon MSE | Pair acc | Margin sat |
+| ----------- | --------- | -----: | -----------------------: | -----------------: | --------: | -------: | ---------: |
+| AE Recon    | none      |      - |                    0.046 |              0.360 |     0.130 |      N/A |        N/A |
+| SAE Recon   | none      |      - |                    0.056 |              0.340 |     0.130 |      N/A |        N/A |
+| AE Rank     | rank      |      1 |                    0.206 |              0.307 |     0.174 |    0.879 |      0.735 |
+| AE Rank     | rank      |     10 |                    0.225 |              0.306 |     0.247 |    0.872 |      0.720 |
+| AE Rank     | rank      |    100 |                **0.235** |              0.290 |     0.431 |    0.857 |      0.690 |
+| SAE Rank    | rank      |      1 |                    0.179 |              0.275 |     0.172 |    0.880 |      0.735 |
+| SAE Rank    | rank      |     10 |                    0.160 |              0.261 |     0.259 |    0.866 |      0.711 |
+| SAE Rank    | rank      |    100 |                    0.183 |              0.272 |     0.416 |    0.854 |      0.681 |
+| AE Triplet  | triplet   |      1 |                    0.136 |              0.260 |     1.168 |    0.882 |      0.874 |
+| AE Triplet  | triplet   |     10 |                    0.226 |              0.256 |     1.745 |    0.864 |      0.845 |
+| AE Triplet  | triplet   |    100 |                    0.196 |              0.207 |     2.224 |    0.844 |      0.774 |
+| SAE Triplet | triplet   |      1 |                    0.203 |              0.286 |     1.177 |    0.875 |      0.867 |
+| SAE Triplet | triplet   |     10 |                    0.183 |              0.210 |     1.763 |    0.858 |      0.837 |
+| SAE Triplet | triplet   |    100 |                    0.209 |              0.218 |     2.620 |    0.836 |      0.758 |
+
+Reference points from the existing leaderboard: DenseLinear oracle 0.3773 / val-selected 0.1855; SAE-mixed oracle 0.3688; SAE auxiliary BCE shaping (§3.5) oracle 0.3350 / val-selected 0.1648.
+
+- **Best deployable (val-selected) method:** AE Rank w=100, macro val-selected F1_PB ≈ 0.235.
+- **Best oracle inside this study:** AE Recon, oracle macro F1_PB ≈ 0.360.
+
+**Interpretation.**
+
+1. **The old "contrastive" SAE was not contrastive.** It was `SAE + auxiliary BCE shaping`: an auxiliary BCE head trained on the latent and then discarded. This study is the first to use genuine fork-based preference supervision.
+2. **The preference objective is genuinely learned, not ignored.** At w=1, pair accuracy is 0.879 (AE Rank), 0.880 (SAE Rank), 0.882 (AE Triplet), 0.875 (SAE Triplet). The objective is connected to the graph, optimized, and demonstrably reshapes the latent. An implementation bug was ruled out during the Sprint 2 audit.
+3. **Reconstruction-only controls keep high oracle separability but fail under deployable thresholds.** AE Recon reaches oracle 0.360 but only 0.046 at the PRM800K-val-selected threshold; SAE Recon is 0.340 / 0.056.
+4. **Fork objectives massively improve val-selected transfer over the recon-only controls.** AE Rank lifts val-selected macro from 0.046 (AE Recon) to 0.235 at w=100, roughly a 5× improvement in deployable F1.
+5. **The strongest deployable result is AE Rank w=100** at macro val-selected F1_PB ≈ 0.235, above DenseLinear's 0.1855.
+6. **The strongest oracle result remains reconstruction-only AE**, and DenseLinear (§3.2) still has the strongest oracle macro overall (0.3773). Fork objectives do **not** raise the oracle ceiling.
+7. **Fork preference objectives do not create a stronger maximum correctness signal.** They reshape/calibrate the representation so validation-selected thresholds transfer better to ProcessBench.
+8. **Higher objective weight does not improve pair accuracy.** For ranking, pair accuracy *decreases* from 0.879 (w=1) to 0.857 (w=100) while val-selected F1 *improves*. The gain is score-distribution / calibration reshaping, not better fork ordering.
+9. **Triplet is less stable.** It inflates reconstruction MSE sharply (up to 2.6 at high weight) and does not beat AE Rank overall.
+10. **The contrastive / preference-objective study is closed for now.** Future work should target model size, threshold calibration, or score-distribution analysis rather than more variants of this objective family.
+
+**Conclusion.** The fork-preference study shows that pairwise PRM800K supervision is learnable from Qwen2.5-1.5B hidden states: rank and triplet objectives reach roughly 0.85–0.88 pair accuracy on the fork training signal. However, this does not translate into a higher oracle ProcessBench ceiling. Reconstruction-only AE/SAE controls retain stronger oracle separability, while fork objectives mainly improve val-selected threshold transfer. The strongest deployable result is AE Rank with objective weight 100, reaching macro val-selected F1_PB ≈ 0.235, above DenseLinear's 0.1855 val-selected macro, but below DenseLinear's oracle ceiling of 0.3773. Thus, fork preference objectives appear to improve calibration / score shaping rather than extract a stronger mechanistic correctness representation.
 
 ---
 

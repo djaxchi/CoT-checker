@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from sklearn.linear_model import LogisticRegression  # noqa: E402
 from sklearn.metrics import f1_score  # noqa: E402
+from sklearn.preprocessing import StandardScaler  # noqa: E402
 
 DEFAULT_TAGS = ["qwen2_5_1_5b", "qwen2_5_3b", "qwen2_5_7b", "qwen2_5_14b", "qwen2_5_32b"]
 DEFAULT_KS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048]
@@ -65,10 +66,21 @@ def read_meta_field(path: Path, field: str) -> np.ndarray:
     return np.asarray(vals, dtype=int)
 
 
+def fit_clf(xtr, ytr, seed=42):
+    """Standardize (fit on train) then logistic regression. Scaling makes lbfgs
+    converge and the cross-step transfer comparable across bins."""
+    sc = StandardScaler().fit(xtr)
+    clf = LogisticRegression(max_iter=2000, C=1.0, random_state=seed).fit(sc.transform(xtr), ytr)
+    return clf, sc
+
+
+def eval_f1(clf, sc, xte, yte) -> float:
+    return float(f1_score(yte, clf.predict(sc.transform(xte)), average="macro"))
+
+
 def macro_f1_fit(xtr, ytr, xte, yte, seed=42) -> float:
-    clf = LogisticRegression(max_iter=300, C=1.0, random_state=seed, n_jobs=1)
-    clf.fit(xtr, ytr)
-    return float(f1_score(yte, clf.predict(xte), average="macro"))
+    clf, sc = fit_clf(xtr, ytr, seed)
+    return eval_f1(clf, sc, xte, yte)
 
 
 def make_bins(step_idx: np.ndarray, y: np.ndarray, min_per_class: int) -> list[tuple[str, np.ndarray]]:
@@ -176,11 +188,9 @@ def main() -> None:
                 tr_idx.append(idx[:cut][: args.max_per_bin]); te_idx.append(idx[cut:][: args.max_per_bin])
             transfer = np.zeros((nb, nb))
             for i in range(nb):
-                xtr, ytr = tr_h[tr_idx[i]][:, cols], tr_y[tr_idx[i]]
-                clf = LogisticRegression(max_iter=300, C=1.0, random_state=42, n_jobs=1).fit(xtr, ytr)
+                clf, sc = fit_clf(tr_h[tr_idx[i]][:, cols], tr_y[tr_idx[i]])
                 for j in range(nb):
-                    xte, yte = tr_h[te_idx[j]][:, cols], tr_y[te_idx[j]]
-                    transfer[i, j] = float(f1_score(yte, clf.predict(xte), average="macro"))
+                    transfer[i, j] = eval_f1(clf, sc, tr_h[te_idx[j]][:, cols], tr_y[te_idx[j]])
             bin_results[tag] = {"labels": labels, "cos": cos, "jac": jac, "transfer": transfer}
             off = ~np.eye(nb, dtype=bool)
             _log(f"  {tag} step-sharing: mean off-diag cos={cos[off].mean():.3f} "

@@ -383,11 +383,91 @@ def fig_forks(models, out_dir, use_tsne, max_lines):
     _log(f"wrote {out_dir/'forks_displacement.png'}")
 
 
+def fig_probe(models, out_dir, topk=15):
+    """Interpret the LINEAR probe directly on PRM800K val_1k:
+      - which hidden units create the correct/incorrect logit gap (is it one unit?),
+      - the single most important unit's class-conditional distribution,
+      - a decision-aligned 2D view (x = probe direction) showing linear separability.
+    """
+    n = len(models)
+    info = {}
+
+    # A: per-unit contribution c_i = w_i * (mu_incorrect_i - mu_correct_i).
+    _log("building probe feature-importance figure ...")
+    fig, axes = plt.subplots(2, n, figsize=(3.3 * n, 6.2), squeeze=False)
+    for c, m in enumerate(models):
+        h, y, w = m["h"], m["y"], m["w"]
+        mu0 = h[y == 0].mean(0); mu1 = h[y == 1].mean(0)
+        contrib = w * (mu1 - mu0)
+        tot = float(np.abs(contrib).sum()) + 1e-12
+        order = np.argsort(-np.abs(contrib))
+        csum = np.cumsum(np.abs(contrib)[order]) / tot
+        top_dim = int(order[0]); top_share = float(abs(contrib[top_dim]) / tot)
+        n90 = int(np.searchsorted(csum, 0.9)) + 1
+        info[c] = (top_dim, top_share, n90)
+
+        ax = axes[0, c]; td = order[:topk]; vals = contrib[td]
+        ax.bar(range(len(td)), vals, color=[ERROR_COLOR if v > 0 else CORRECT_COLOR for v in vals])
+        ax.set_xticks(range(len(td))); ax.set_xticklabels([str(int(i)) for i in td], rotation=90, fontsize=6)
+        ax.axhline(0, color="k", lw=0.6)
+        ax.set_title(f"{m['label']}\nunit {top_dim}: {top_share*100:.0f}% | 90% in {n90} units", fontsize=9)
+        if c == 0:
+            ax.set_ylabel("contribution w_i·Δμ_i\n(+ pushes toward incorrect)")
+        ax2 = axes[1, c]
+        ax2.plot(np.arange(1, len(csum) + 1), csum, color="#333")
+        ax2.axhline(0.9, color="grey", ls=":"); ax2.axvline(n90, color="grey", ls=":")
+        ax2.set_xscale("log"); ax2.set_ylim(0, 1)
+        ax2.set_xlabel("# hidden units (sorted by |contribution|)")
+        if c == 0:
+            ax2.set_ylabel("cumulative |contribution|")
+    fig.suptitle("Which hidden units create the correct/incorrect logit gap (PRM800K val_1k)")
+    fig.tight_layout(rect=(0, 0, 1, 0.95)); fig.savefig(out_dir / "probe_feature_importance.png", dpi=150); plt.close(fig)
+    _log(f"wrote {out_dir/'probe_feature_importance.png'}")
+
+    # B: most important single unit's distribution by class.
+    fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 3.2), squeeze=False)
+    for c, m in enumerate(models):
+        h, y = m["h"], m["y"]; top_dim, top_share, _ = info[c]
+        x = h[:, top_dim]
+        bins = np.linspace(float(x.min()), float(x.max()), 41)
+        axes[0, c].hist(x[y == 0], bins=bins, color=CORRECT_COLOR, alpha=0.6, density=True, label="correct")
+        axes[0, c].hist(x[y == 1], bins=bins, color=ERROR_COLOR, alpha=0.6, density=True, label="incorrect")
+        axes[0, c].set_title(f"{m['label']}  unit {top_dim}\nshare={top_share*100:.0f}%", fontsize=9)
+        axes[0, c].set_xlabel("activation value")
+        if c == 0:
+            axes[0, c].set_ylabel("density"); axes[0, c].legend(fontsize=8)
+    fig.suptitle("Most important single hidden unit: value distribution by class")
+    fig.tight_layout(rect=(0, 0, 1, 0.93)); fig.savefig(out_dir / "probe_top_unit.png", dpi=150); plt.close(fig)
+    _log(f"wrote {out_dir/'probe_top_unit.png'}")
+
+    # C: decision-aligned 2D view (x = probe direction).
+    fig, axes = plt.subplots(1, n, figsize=(3.3 * n, 3.3), squeeze=False)
+    for c, m in enumerate(models):
+        h, y, w, b, thr = m["h"], m["y"], m["w"], m["b"], m["thr"]
+        nrmw = float(np.linalg.norm(w)) + 1e-12; u = w / nrmw
+        pdir = h @ u
+        hperp = h - pdir[:, None] * u[None, :]
+        q = pca_scores(hperp.astype(np.float32), 1)[:, 0]
+        z_thr = np.log(thr / (1 - thr)); p_b = (z_thr - b) / nrmw
+        ax = axes[0, c]
+        for cls, color, name in [(0, CORRECT_COLOR, "correct"), (1, ERROR_COLOR, "incorrect")]:
+            msk = y == cls
+            ax.scatter(pdir[msk], q[msk], s=7, c=color, alpha=0.5, linewidths=0, label=name)
+        ax.axvline(p_b, color="k", ls="--", lw=1.4)
+        ax.set_title(f"{m['label']}\nval F1={m['val_step_f1']:.3f}", fontsize=9)
+        ax.set_xlabel("probe direction (decision axis)"); ax.set_yticks([])
+        if c == 0:
+            ax.set_ylabel("top orthogonal PCA dir"); ax.legend(fontsize=8)
+    fig.suptitle("Decision-aligned view: x = probe direction (linear separability); dashed = deployed threshold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93)); fig.savefig(out_dir / "decision_axis.png", dpi=150); plt.close(fig)
+    _log(f"wrote {out_dir/'decision_axis.png'}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--runs_root", type=Path, default=Path("runs/s1_model_size_dense"))
     p.add_argument("--tags", nargs="+", default=DEFAULT_TAGS)
-    p.add_argument("--source", choices=["val", "pb", "forks"], default="val")
+    p.add_argument("--source", choices=["val", "pb", "forks", "probe"], default="val")
     p.add_argument("--subsets", nargs="+", default=SUBSETS)
     p.add_argument("--pb_embed_subset", default="olympiadbench")
     p.add_argument("--forks_stem", default="forks_val_items",
@@ -405,7 +485,7 @@ def main() -> None:
     for tag in args.tags:
         md = args.runs_root / tag
         _log(f"loading {tag} ({args.source}) ...")
-        if args.source == "val":
+        if args.source in ("val", "probe"):
             m = load_val(md)
         elif args.source == "pb":
             m = load_pb(md, args.subsets)
@@ -423,6 +503,8 @@ def main() -> None:
         fig_val(models, out_dir, args.tsne)
     elif args.source == "pb":
         fig_pb(models, args.subsets, out_dir, args.pb_embed_subset, args.tsne)
+    elif args.source == "probe":
+        fig_probe(models, out_dir)
     else:
         fig_forks(models, out_dir, args.tsne, args.max_lines)
     _log(f"done -> {out_dir}")

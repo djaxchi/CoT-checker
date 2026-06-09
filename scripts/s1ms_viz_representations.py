@@ -174,12 +174,22 @@ def _scatter_2d(ax, xy, y, title):
     ax.set_xticks([]); ax.set_yticks([])
 
 
+def _pca_k(h: np.ndarray, k: int) -> np.ndarray:
+    hc = h - h.mean(axis=0, keepdims=True)
+    u, s, _ = np.linalg.svd(hc, full_matrices=False)
+    k = min(k, u.shape[1])
+    return u[:, :k] * s[:k]
+
+
 def _project(h, method):
     if method == "PCA":
         return pca2(h)
     from sklearn.manifold import TSNE  # lazy
+    # Standard practice: PCA-reduce to ~50 dims before t-SNE. Much faster than
+    # running it on the full hidden dim (1536-5120), and denoises the input.
+    hp = _pca_k(h, 50)
     perp = min(30, max(5, (len(h) - 1) // 3))
-    return TSNE(n_components=2, init="pca", random_state=42, perplexity=perp).fit_transform(h)
+    return TSNE(n_components=2, init="pca", random_state=42, perplexity=perp).fit_transform(hp)
 
 
 def _score_panel(ax, scores, y, thr, title):

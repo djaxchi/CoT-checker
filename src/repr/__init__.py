@@ -7,9 +7,19 @@ encoder (`representation.pt`), keeping the downstream ProcessBench pipeline inta
 """
 
 from src.repr.objectives import (
+    dense_absmargin_loss,
+    dense_anchor_rank_loss,
+    dense_rank_loss,
     enumerate_fork_pairs,
     ranking_loss,
     triplet_loss,
 )
 
-__all__ = ["ranking_loss", "triplet_loss", "enumerate_fork_pairs"]
+__all__ = [
+    "ranking_loss",
+    "triplet_loss",
+    "enumerate_fork_pairs",
+    "dense_rank_loss",
+    "dense_anchor_rank_loss",
+    "dense_absmargin_loss",
+]

@@ -26,7 +26,13 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.repr.objectives import ranking_loss, triplet_loss  # noqa: E402
+from src.repr.objectives import (  # noqa: E402
+    dense_absmargin_loss,
+    dense_anchor_rank_loss,
+    dense_rank_loss,
+    ranking_loss,
+    triplet_loss,
+)
 
 # Sprint 1 methods + Sprint 2 fork-based representation-shaping methods.
 #   ae               : dense autoencoder, recon only on mixed_train_40k (no pairs)
@@ -35,10 +41,18 @@ from src.repr.objectives import ranking_loss, triplet_loss  # noqa: E402
 #                      only difference from *_rank/*_triplet is the missing term.
 #   {ae,sae}_rank    : recon[+L1] + pairwise ranking on fork pos/neg siblings
 #   {ae,sae}_triplet : recon[+L1] + triplet (anchor=prefix, pos/neg continuations)
+# Sprint 2 classifier-level fork supervision (no representation, no BCE):
+#   dense_rank          : pairwise rank on score logits, l_neg > l_pos by margin
+#   dense_anchor_rank   : anchor-relative score loss (preserve anchor for pos,
+#                         raise score above anchor for neg) - NOT a latent triplet
+#   dense_rank_absmargin: absolute-margin constraints (l_pos<-1, l_neg>+1, gap)
+DENSE_PAIR_METHODS = ("dense_rank", "dense_anchor_rank", "dense_rank_absmargin")
+
 METHODS = [
     "random", "dense_linear", "sae_positive", "sae_mixed", "sae_contrastive",
     "ae", "ae_recon", "sae_recon",
     "ae_rank", "sae_rank", "ae_triplet", "sae_triplet",
+    *DENSE_PAIR_METHODS,
 ]
 FORK_METHODS = (
     "ae_recon", "sae_recon",
@@ -410,6 +424,109 @@ def train_repr_with_pairs(
     return sae, stats
 
 
+def train_dense_pair_scorer(
+    items_h: np.ndarray,
+    anchor_idx: np.ndarray,
+    pos_idx: np.ndarray,
+    neg_idx: np.ndarray,
+    method: str,
+    hidden_dim: int,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    rank_margin: float,
+    low_margin: float,
+    high_margin: float,
+    device: torch.device,
+    seed: int,
+) -> tuple[LinearProbe, dict]:
+    """Train the final linear scorer s(h)=w.h+b directly on PRM800K fork pairs.
+
+    No representation is trained: the frozen dense hidden state IS the feature,
+    and the scorer is the only learned object. No BCE. score = sigmoid(s(h)) =
+    P(non_viable), so the preferred sibling should get a LOW logit and the
+    rejected sibling a HIGH logit. The trained scorer is the candidate's
+    `linear_probe.pt`; ProcessBench scoring/threshold selection are unchanged.
+    """
+    if method not in DENSE_PAIR_METHODS:
+        raise ValueError(f"method must be one of {DENSE_PAIR_METHODS}, got {method!r}")
+
+    rng = np.random.default_rng(seed)
+    scorer = LinearProbe(hidden_dim).to(device)
+    opt = torch.optim.AdamW(scorer.parameters(), lr=lr, weight_decay=0.0)
+
+    h_t = torch.from_numpy(items_h).to(device)
+    a_t = torch.from_numpy(anchor_idx).to(device)
+    p_t = torch.from_numpy(pos_idx).to(device)
+    n_t = torch.from_numpy(neg_idx).to(device)
+    n_pairs = int(pos_idx.shape[0])
+
+    history: list[dict] = []
+    final: dict[str, float] = {}
+    for epoch in range(epochs):
+        scorer.train()
+        acc: dict[str, float] = {}
+        nb = 0
+        for batch in iter_minibatches(n_pairs, batch_size, rng):
+            ib = torch.from_numpy(batch).to(device)
+            hp = h_t.index_select(0, p_t.index_select(0, ib))
+            hn = h_t.index_select(0, n_t.index_select(0, ib))
+            l_pos = scorer(hp)
+            l_neg = scorer(hn)
+            l_anchor = None
+            if method == "dense_rank":
+                loss = dense_rank_loss(l_pos, l_neg, margin=rank_margin)
+            elif method == "dense_rank_absmargin":
+                loss = dense_absmargin_loss(
+                    l_pos, l_neg, low_margin=low_margin,
+                    high_margin=high_margin, rank_margin=rank_margin,
+                )
+            else:  # dense_anchor_rank
+                ha = h_t.index_select(0, a_t.index_select(0, ib))
+                l_anchor = scorer(ha)
+                loss = dense_anchor_rank_loss(l_anchor, l_pos, l_neg, margin=rank_margin)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            with torch.no_grad():
+                diff = (l_neg - l_pos).detach()
+                d = {
+                    "loss": loss.item(),
+                    "pair_acc": (diff > 0).float().mean().item(),
+                    "margin_sat": (diff > rank_margin).float().mean().item(),
+                }
+                if method == "dense_anchor_rank":
+                    adiff = (l_neg - l_anchor).detach()
+                    d["anchor_acc"] = (adiff > 0).float().mean().item()
+                    d["anchor_margin_sat"] = (adiff > rank_margin).float().mean().item()
+                    d["pos_anchor_drift"] = (l_pos - l_anchor).abs().mean().item()
+                if method == "dense_rank_absmargin":
+                    d["pos_low_sat"] = (l_pos < -low_margin).float().mean().item()
+                    d["neg_high_sat"] = (l_neg > high_margin).float().mean().item()
+                    d["rank_margin_sat"] = (diff > rank_margin).float().mean().item()
+            for k, v in d.items():
+                acc[k] = acc.get(k, 0.0) + v
+            nb += 1
+        final = {k: v / max(nb, 1) for k, v in acc.items()}
+        history.append({"epoch": epoch, **final})
+
+    stats = {
+        "final_reconstruction_mse": None,
+        "final_l1_mean": None,
+        "final_aux_bce": None,
+        "objective": method,
+        "obj_weight": None,
+        "final_objective_loss": final.get("loss", float("nan")),
+        "final_pair_accuracy": final.get("pair_acc", float("nan")),
+        "final_margin_satisfaction": final.get("margin_sat", float("nan")),
+        "n_pairs": n_pairs,
+        "diagnostics": dict(final),
+        "history": history,
+    }
+    return scorer, stats
+
+
 def train_linear_probe(
     z_train: np.ndarray,
     y_train: np.ndarray,
@@ -629,6 +746,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rank_margin", type=float, default=1.0)
     p.add_argument("--triplet_metric", choices=["l2", "cosine"], default="l2")
     p.add_argument("--triplet_margin", type=float, default=1.0)
+    # ---- Sprint 2: classifier-level fork supervision (dense_* methods) -
+    p.add_argument("--pair_epochs", type=int, default=20,
+                   help="Epochs to train the dense pair scorer (dense_* methods).")
+    p.add_argument("--low_margin", type=float, default=1.0,
+                   help="dense_rank_absmargin: preferred logit pushed below -low_margin.")
+    p.add_argument("--high_margin", type=float, default=1.0,
+                   help="dense_rank_absmargin: rejected logit pushed above +high_margin.")
     # ---- Generalized cache stems --------------------------------------
     p.add_argument("--probe_train_stem", type=str, default="probe_train_40k",
                    help="Stem under --cache_dir loaded as probe training data.")
@@ -751,6 +875,8 @@ def main() -> None:
 
     # ---- Representation step ----------------------------------------------
     sae: SAE | None = None
+    dense_scorer: LinearProbe | None = None  # dense_* methods: scorer is the only learned object
+    dense_history: list[dict] | None = None
     if method in ("sae_positive", "sae_mixed", "sae_contrastive"):
         if method == "sae_positive":
             rep_h, rep_y = load_npy_pair(args.cache_dir, "pos_base_20k")
@@ -842,6 +968,36 @@ def main() -> None:
         for p in sae.parameters():
             p.requires_grad_(False)
         sae.eval()
+    elif method in DENSE_PAIR_METHODS:
+        # No representation: train the final linear scorer directly on fork
+        # pairs over the frozen dense hidden state. sae stays None.
+        if not (args.fork_items_h and args.fork_items_meta and args.fork_pairs):
+            raise SystemExit(
+                f"Method {method} requires --fork_items_h, --fork_items_meta, --fork_pairs."
+            )
+        items_h = np.load(args.fork_items_h).astype(np.float32)
+        if items_h.shape[1] != hidden_dim:
+            raise SystemExit(
+                f"Fork items hidden_dim ({items_h.shape[1]}) != PRM800K ({hidden_dim})."
+            )
+        anchor_idx, pos_idx, neg_idx = load_fork_pairs(args.fork_items_meta, args.fork_pairs)
+        if args.max_pairs is not None:
+            anchor_idx = anchor_idx[: args.max_pairs]
+            pos_idx = pos_idx[: args.max_pairs]
+            neg_idx = neg_idx[: args.max_pairs]
+        rep_train_n = int(pos_idx.shape[0])
+        t0 = time.time()
+        dense_scorer, sae_stats = train_dense_pair_scorer(
+            items_h=items_h,
+            anchor_idx=anchor_idx, pos_idx=pos_idx, neg_idx=neg_idx,
+            method=method, hidden_dim=hidden_dim,
+            epochs=args.pair_epochs, batch_size=args.batch_size, lr=args.lr_probe,
+            rank_margin=args.rank_margin, low_margin=args.low_margin,
+            high_margin=args.high_margin,
+            device=device, seed=args.seed,
+        )
+        probe_train_time = time.time() - t0
+        dense_history = sae_stats.pop("history")  # written as training_history.json
 
     # ---- Build probe inputs for training/val (not ProcessBench yet) -------
     if sae is not None:
@@ -856,6 +1012,11 @@ def main() -> None:
         rng = np.random.default_rng(args.seed)
         val_scores = rng.uniform(0.0, 1.0, size=val_h.shape[0]).astype(np.float32)
         probe = None
+    elif method in DENSE_PAIR_METHODS:
+        # Scorer already trained on fork pairs above; it IS the linear probe.
+        probe = dense_scorer
+        torch.save(probe.state_dict(), args.out_dir / "linear_probe.pt")
+        val_scores = probe_scores(probe, z_val, args.batch_size, device)
     else:
         t0 = time.time()
         probe = train_linear_probe(
@@ -1052,6 +1213,11 @@ def main() -> None:
         "gpu_name": gpu_name,
         "device": device.type,
     }
+    # Classifier-level fork supervision: surface the method-specific diagnostics
+    # (anchor accuracy / drift / abs-margin satisfaction) and pair count.
+    if method in DENSE_PAIR_METHODS:
+        train_metrics["n_pairs"] = sae_stats.get("n_pairs")
+        train_metrics["pair_diagnostics"] = sae_stats.get("diagnostics")
     (args.out_dir / "train_metrics.json").write_text(json.dumps(train_metrics, indent=2))
 
     # Per-epoch representation-training curves (recon / l1 / objective /
@@ -1059,6 +1225,12 @@ def main() -> None:
     if sae_stats.get("history"):
         (args.out_dir / "representation_history.json").write_text(
             json.dumps(sae_stats["history"], indent=2)
+        )
+
+    # Per-epoch scorer-training curves for the classifier-level fork methods.
+    if dense_history is not None:
+        (args.out_dir / "training_history.json").write_text(
+            json.dumps(dense_history, indent=2)
         )
 
     if all_eval_summaries:

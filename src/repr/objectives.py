@@ -110,6 +110,109 @@ def triplet_loss(
 
 
 # ---------------------------------------------------------------------------
+# Classifier-level fork losses (operate on scalar SCORE LOGITS, not latents)
+# ---------------------------------------------------------------------------
+#
+# These shape the final linear scorer s(h) = w.h + b directly on top of the
+# frozen dense hidden state. No representation is trained; no BCE is used.
+# Score convention: score = sigmoid(s(h)) = P(non_viable / error), so the
+# preferred (rating +1 / label 0) sibling should get a LOW logit and the
+# rejected (rating -1 / label 1) sibling a HIGH logit.
+
+def dense_rank_loss(
+    logit_pos: torch.Tensor,
+    logit_neg: torch.Tensor,
+    margin: float = 1.0,
+) -> torch.Tensor:
+    """Pairwise rank on score logits: the error step should outscore the good one.
+
+    L = softplus(margin - (logit_neg - logit_pos)), minimized as the rejected
+    logit exceeds the preferred logit by at least `margin`.
+
+    Args:
+        logit_pos: scorer logits for preferred continuations, shape (n,).
+        logit_neg: scorer logits for rejected continuations, shape (n,).
+        margin: required gap logit_neg - logit_pos.
+
+    Returns:
+        Scalar mean loss.
+    """
+    if logit_pos.shape != logit_neg.shape:
+        raise ValueError(
+            f"logit_pos {tuple(logit_pos.shape)} != logit_neg {tuple(logit_neg.shape)}"
+        )
+    return F.softplus(margin - (logit_neg - logit_pos)).mean()
+
+
+def dense_anchor_rank_loss(
+    logit_anchor: torch.Tensor,
+    logit_pos: torch.Tensor,
+    logit_neg: torch.Tensor,
+    margin: float = 1.0,
+) -> torch.Tensor:
+    """Anchor-relative score loss (NOT a latent-space triplet).
+
+    The preferred continuation should preserve the anchor's score, while the
+    rejected continuation should raise the non-viability score above the anchor
+    by at least `margin`:
+
+        L = (logit_pos - logit_anchor)^2 + softplus(margin - (logit_neg - logit_anchor))
+
+    All quantities are scalar scorer logits; no distances in representation space.
+
+    Args:
+        logit_anchor: scorer logits for the prefix/anchor state, shape (n,).
+        logit_pos: scorer logits for preferred continuations, shape (n,).
+        logit_neg: scorer logits for rejected continuations, shape (n,).
+        margin: required gap logit_neg - logit_anchor.
+
+    Returns:
+        Scalar mean loss.
+    """
+    if not (logit_anchor.shape == logit_pos.shape == logit_neg.shape):
+        raise ValueError(
+            "logit_anchor/pos/neg must share shape, got "
+            f"{tuple(logit_anchor.shape)}, {tuple(logit_pos.shape)}, {tuple(logit_neg.shape)}"
+        )
+    keep = (logit_pos - logit_anchor).pow(2)
+    push = F.softplus(margin - (logit_neg - logit_anchor))
+    return (keep + push).mean()
+
+
+def dense_absmargin_loss(
+    logit_pos: torch.Tensor,
+    logit_neg: torch.Tensor,
+    low_margin: float = 1.0,
+    high_margin: float = 1.0,
+    rank_margin: float = 1.0,
+) -> torch.Tensor:
+    """Absolute-margin constraints on score logits (no BCE).
+
+        L = softplus(logit_pos + low_margin)            # push preferred logit below -low_margin
+          + softplus(high_margin - logit_neg)           # push rejected  logit above +high_margin
+          + softplus(rank_margin - (logit_neg - logit_pos))  # keep the pairwise ordering
+
+    Args:
+        logit_pos: scorer logits for preferred continuations, shape (n,).
+        logit_neg: scorer logits for rejected continuations, shape (n,).
+        low_margin: preferred logit target ceiling is -low_margin.
+        high_margin: rejected logit target floor is +high_margin.
+        rank_margin: required gap logit_neg - logit_pos.
+
+    Returns:
+        Scalar mean loss.
+    """
+    if logit_pos.shape != logit_neg.shape:
+        raise ValueError(
+            f"logit_pos {tuple(logit_pos.shape)} != logit_neg {tuple(logit_neg.shape)}"
+        )
+    pos_low = F.softplus(logit_pos + low_margin)
+    neg_high = F.softplus(high_margin - logit_neg)
+    rank = F.softplus(rank_margin - (logit_neg - logit_pos))
+    return (pos_low + neg_high + rank).mean()
+
+
+# ---------------------------------------------------------------------------
 # Pair enumeration from a fork's siblings
 # ---------------------------------------------------------------------------
 

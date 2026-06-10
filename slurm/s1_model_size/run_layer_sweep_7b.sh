@@ -45,8 +45,8 @@ s1ms_env_setup
 echo "[lsweep] TAG=$TAG model=$MODEL_ID forks=$FORK_ITEMS" | tee "$LOG"
 s1ms_ensure_model_cached "$MODEL_ID" 2>&1 | tee -a "$LOG" || exit 1
 s1ms_venv
-# layer sweep also needs sklearn
-pip install --no-index scikit-learn 2>&1 | tail -1 | tee -a "$LOG"
+# layer sweep also needs sklearn + matplotlib
+pip install --no-index scikit-learn matplotlib 2>&1 | tail -2 | tee -a "$LOG"
 
 # Frozen PRM split must be present.
 for f in "$PRM_TRAIN_JSONL" "$PRM_VAL_JSONL"; do
@@ -61,16 +61,22 @@ else
   echo "[lsweep] WARNING: FORK_ITEMS not found ($FORK_ITEMS); skipping fork reservation." | tee -a "$LOG" >&2
 fi
 
-# 2. multi-layer encode PRM800K 40k/1k (single GPU; 7B fits comfortably)
-CUDA_VISIBLE_DEVICES=0 run_with_oom_retry "$BS" "$LOG" \
-  python scripts/encode_prm800k_multilayer.py \
-    --data_dir "$PRM_SPLIT_DIR" --out_dir "$MLDIR" \
-    --model_name_or_path "$MODEL_ID" --local_files_only \
-    --run_name "s1ms_${TAG}_multilayer" \
-    --splits "${PRM_TRAIN_JSONL}:probe_train_40k" "${PRM_VAL_JSONL}:val_1k" \
-    --layer_fracs $LAYER_FRACS \
-    --max_seq_len -1 --batch_size __BS__ --model_dtype float16 --save_dtype float16 --force
-[[ $? -ne 0 ]] && { echo "[lsweep] FATAL: multi-layer encode failed" | tee -a "$LOG" >&2; exit 1; }
+# 2. multi-layer encode PRM800K 40k/1k (single GPU; 7B fits comfortably).
+#    Skip if already complete (manifest is written last) unless FORCE=1, so a
+#    re-run after a downstream failure does not redo the ~15-min encode.
+if [[ -f "$MLDIR/multilayer_manifest.json" && "${FORCE:-0}" != "1" ]]; then
+  echo "[lsweep] multi-layer cache present; skipping encode (FORCE=1 to redo)" | tee -a "$LOG"
+else
+  CUDA_VISIBLE_DEVICES=0 run_with_oom_retry "$BS" "$LOG" \
+    python scripts/encode_prm800k_multilayer.py \
+      --data_dir "$PRM_SPLIT_DIR" --out_dir "$MLDIR" \
+      --model_name_or_path "$MODEL_ID" --local_files_only \
+      --run_name "s1ms_${TAG}_multilayer" \
+      --splits "${PRM_TRAIN_JSONL}:probe_train_40k" "${PRM_VAL_JSONL}:val_1k" \
+      --layer_fracs $LAYER_FRACS \
+      --max_seq_len -1 --batch_size __BS__ --model_dtype float16 --save_dtype float16 --force
+  [[ $? -ne 0 ]] && { echo "[lsweep] FATAL: multi-layer encode failed" | tee -a "$LOG" >&2; exit 1; }
+fi
 
 # 3. per-layer probe + subset sweep (CPU)
 python scripts/s1ms_layer_sweep.py \

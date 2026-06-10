@@ -78,9 +78,37 @@ else
   [[ $? -ne 0 ]] && { echo "[lsweep] FATAL: multi-layer encode failed" | tee -a "$LOG" >&2; exit 1; }
 fi
 
-# 3. per-layer probe + subset sweep (CPU)
+# 2b. multi-layer encode the 4 ProcessBench subsets (one per GPU) for F1_PB.
+PBML="$MDIR/pb_multilayer"
+mkdir -p "$PBML"
+pids=()
+for g in 0 1 2 3; do
+  (
+    export CUDA_VISIBLE_DEVICES="$g" S1MS_SHARD="${S1MS_SUBSETS[$g]}"
+    sub="${S1MS_SUBSETS[$g]}"
+    raw="$(s1ms_resolve_pb_raw "$sub")" || exit 1
+    od="$PBML/$sub"; mkdir -p "$od"
+    wlog="$LOG_DIR/pb_multilayer_${sub}.log"
+    if [[ -f "$od/pb_multilayer_manifest.json" && "${FORCE:-0}" != "1" ]]; then
+      echo "[lsweep] pb multilayer $sub present; skipping" | tee "$wlog"; exit 0
+    fi
+    run_with_oom_retry "$BS" "$wlog" \
+      python scripts/encode_processbench_multilayer.py \
+        --raw_file "$raw" --out_dir "$od" \
+        --model_name_or_path "$MODEL_ID" --local_files_only \
+        --subset_name "$sub" --layer_fracs $LAYER_FRACS \
+        --max_seq_len -1 --batch_size __BS__ --model_dtype float16 --save_dtype float16 --force
+  ) &
+  pids+=("$!")
+done
+fail=0
+for idx in "${!pids[@]}"; do wait "${pids[$idx]}" || { echo "[lsweep] pb encode worker $idx failed" | tee -a "$LOG" >&2; fail=1; }; done
+[[ $fail -ne 0 ]] && { echo "[lsweep] FATAL: pb multilayer encode failed" | tee -a "$LOG" >&2; exit 1; }
+
+# 3. per-layer probe + subset sweep + ProcessBench F1_PB (CPU)
 python scripts/s1ms_layer_sweep.py \
-  --cache_dir "$MLDIR" --out_dir "$MDIR/layer_sweep" 2>&1 | tee -a "$LOG"
+  --cache_dir "$MLDIR" --out_dir "$MDIR/layer_sweep" \
+  --pb_cache_dir "$PBML" --subsets "${S1MS_SUBSETS[@]}" 2>&1 | tee -a "$LOG"
 [[ $? -ne 0 ]] && { echo "[lsweep] FATAL: layer sweep failed" | tee -a "$LOG" >&2; exit 1; }
 
 # Mirror figures into the shared figures dir for easy rsync.

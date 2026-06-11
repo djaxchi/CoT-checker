@@ -62,6 +62,7 @@ nohup.out
 /tmp/
 *.log
 results/
+presentations/
 
 # Local scp download staging dirs
 cot-checker-results/
@@ -71,6 +72,8 @@ cot-checker-results/
 # Sprint run outputs and per-job logs (e.g. runs/s2/<tag>/, logs/<tag>.log)
 /runs/
 /logs/
+# Generated analysis figures (s1 model-size study)
+/s1ms_figures/
 # Editor / script backups
 *.bak
 

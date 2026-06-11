@@ -18,6 +18,8 @@ Step-level Chain-of-Thought verification benchmark. This document is incremental
    - [SSAE original paper checkpoint, Qwen2.5-0.5B](#39-ssae-original-paper-checkpoint-qwen25-05b)
    - [DenseLinear-PRM400k](#310-denselinear-prm400k)
    - [PRM800K fork preference objectives](#311-prm800k-fork-preference-objectives)
+   - [Dense pairwise scorer objectives](#312-dense-pairwise-scorer-objectives)
+   - [DenseLinear model-size ablation](#313-denselinear-model-size-ablation)
 
 ---
 
@@ -62,7 +64,7 @@ F1_PB       = 2 * Acc_error * Acc_correct / (Acc_error + Acc_correct)
 | Probe train split | 40K PRM800K examples |
 | Probe validation split | 1K PRM800K examples |
 | Evaluation splits | ProcessBench `gsm8k` (400 traces, 2 082 steps), `math` (1 000 / 6 505), `olympiadbench` (1 000 / 8 819), `omnimath` (1 000 / 8 291) |
-| Threshold sources | (a) `val_selected`: PRM800K val_1k threshold.json (deployable); (b) `oracle`: per-subset F1_PB maximizer over `{0.000, 0.005, ..., 1.000}` (201 points, not deployable) |
+| Threshold sources | (a) `val_selected`: PRM800K val_1k threshold.json (deployable); (b) `oracle`: per-subset F1_PB maximizer over `{0.005, 0.010, ..., 0.995}` (199 points, endpoints excluded, not deployable) |
 | Aggregation | `macro_avg_F1_PB` = unweighted mean across the 4 subsets |
 | Score convention | `s = sigmoid(probe_logit) = P(step is first-error)`; trace prediction = first step with `s > t` or `-1` |
 | Sharding | 4 H100s per stage: per-subset 4-way sharding for encoding/extraction with deterministic `global_step_index`; round-robin (method, subset) workers for evaluation |
@@ -141,6 +143,7 @@ Macro F1_PB averaged across the 4 ProcessBench subsets (gsm8k, math, olympiadben
 8. **Subset difficulty is consistent**: gsm8k > math > omnimath > olympiadbench across every method. OlympiadBench is the hardest subset for every probe.
 9. **PRM800K val→PB calibration gap widens off-distribution.** DenseLinear val/oracle ratio is 0.77 on gsm8k (0.2701 / 0.3495) but only 0.24 on olympiadbench (0.0899 / 0.3720).
 10. **True PRM800K fork preference objectives improve deployable threshold transfer but not oracle separability.** The best fork-based method, AE Rank w=100, reaches macro val-selected F1_PB ≈ 0.235, exceeding DenseLinear's val-selected 0.1855, but its oracle macro is only ≈ 0.290, below DenseLinear's 0.3773 and SAE-mixed's 0.3688. This suggests the fork objective mainly affects calibration rather than the maximum recoverable correctness signal. Full study in §3.11.
+11. **The fork objective's ceiling/calibration trade-off is intrinsic to the pairwise objective, not just representation damage.** Dense pairwise scorers (§3.12) train *only* a linear scorer on frozen hidden states (no AE/SAE), swapping BCE for a ranking/margin loss. They reproduce the same pattern: `dense_rank` slightly beats DenseLinear's val-selected macro (0.2087 vs 0.1855) but its oracle macro collapses to 0.2328 (vs 0.3773). Since no representation is trained, the oracle drop must come from the objective itself. **DenseLinear BCE remains the strongest oracle method**; fork objectives mainly reshape/calibrate scores for threshold transfer.
 
 ---
 
@@ -418,6 +421,86 @@ Reference points from the existing leaderboard: DenseLinear oracle 0.3773 / val-
 10. **The contrastive / preference-objective study is closed for now.** Future work should target model size, threshold calibration, or score-distribution analysis rather than more variants of this objective family.
 
 **Conclusion.** The fork-preference study shows that pairwise PRM800K supervision is learnable from Qwen2.5-1.5B hidden states: rank and triplet objectives reach roughly 0.85–0.88 pair accuracy on the fork training signal. However, this does not translate into a higher oracle ProcessBench ceiling. Reconstruction-only AE/SAE controls retain stronger oracle separability, while fork objectives mainly improve val-selected threshold transfer. The strongest deployable result is AE Rank with objective weight 100, reaching macro val-selected F1_PB ≈ 0.235, above DenseLinear's 0.1855 val-selected macro, but below DenseLinear's oracle ceiling of 0.3773. Thus, fork preference objectives appear to improve calibration / score shaping rather than extract a stronger mechanistic correctness representation.
+
+---
+
+### 3.12 Dense pairwise scorer objectives
+
+**Particularities.** This follow-up asks whether PRM800K fork supervision is more useful at the *classifier/scorer* level than as a representation-shaping objective. Unlike the AE/SAE Rank/Triplet methods of §3.11, these methods train **no representation**: the Qwen2.5-1.5B hidden state stays frozen and the only learned object is a linear scorer
+
+```text
+logit(h) = w·h + b ,    score = sigmoid(logit) = P(non_viable / error)
+```
+
+so the preferred (label 0) sibling should get a LOW logit and the rejected (label 1) sibling a HIGH logit. **No BCE** is used in any of the three methods; they replace the BCE label loss with a pairwise/margin loss over fork siblings on the same frozen `h`.
+
+- `dense_rank` — pairwise margin ranking: `softplus(margin - (l_neg - l_pos))`.
+- `dense_anchor_rank` — anchor-relative score constraint: `(l_pos - l_anchor)² + softplus(margin - (l_neg - l_anchor))` (scores on logits, not latent distances).
+- `dense_rank_absmargin` — pairwise ranking + absolute logit margins: `softplus(l_pos + 1) + softplus(1 - l_neg) + softplus(1 - (l_neg - l_pos))`.
+
+Threshold selection (PRM800K val_1k) and the ProcessBench eval path are identical to every other candidate; only the scorer's training objective changes.
+
+**Results.** Macro F1_PB over the 4 ProcessBench subsets (gsm8k, math, olympiadbench, omnimath).
+
+| Method               | Training objective                        | val-selected macro F1_PB | oracle macro F1_PB | Read                                                                 |
+| -------------------- | ----------------------------------------- | -----------------------: | -----------------: | -------------------------------------------------------------------- |
+| DenseLinear          | BCE on independent PRM800K labels         |                   0.1855 |         **0.3773** | best oracle baseline                                                 |
+| dense_rank           | pairwise margin ranking on forks          |               **0.2087** |             0.2328 | slightly better deployable threshold transfer, large oracle collapse |
+| dense_anchor_rank    | anchor-relative score constraint          |                   0.1228 |             0.2047 | worst of the three; anchor term hurts                                |
+| dense_rank_absmargin | pairwise ranking + absolute logit margins |                   0.1771 |             0.2478 | does not beat DenseLinear val-selected; oracle still collapses       |
+
+**Interpretation.** The dense pair-scorer experiment isolates the effect of the fork objective from representation training. Since no AE/SAE/SSAE representation is trained, any performance change comes from replacing the BCE-trained linear scorer with a pairwise/margin-trained linear scorer on the same frozen dense hidden states. The result is clear: pairwise fork objectives can slightly improve val-selected threshold transfer (`dense_rank`: 0.2087 vs DenseLinear 0.1855), but they strongly reduce oracle separability (0.2328 vs 0.3773). Therefore, the oracle drop observed in AE/SAE fork-objective runs is not only a representation damage effect. It is intrinsic to the pairwise/margin objective: it learns a more calibration-friendly but lower-ceiling decision direction.
+
+- `dense_anchor_rank` is not promising: it is the worst of the three on both axes (val-selected 0.1228, below even DenseLinear). The squared anchor-preservation term likely fights the error-score separation objective, pinning `l_pos` toward an unconstrained `l_anchor` while the ranking term tries to push the siblings apart.
+- `dense_rank_absmargin` adds stronger absolute score pressure (push `l_pos` below -1, `l_neg` above +1) which improves its oracle slightly over plain `dense_rank` (0.2478 vs 0.2328), but it still does not preserve the oracle signal and does not beat DenseLinear's val-selected macro.
+- **DenseLinear BCE remains the best method for maximum recoverable ProcessBench signal** (oracle 0.3773); the fork objectives mainly reshape/calibrate scores for threshold transfer.
+
+**Study closed.** The contrastive / preference-objective branch is closed for now. The evidence supports a calibration-transfer benefit from fork supervision, but not a stronger mechanistic correctness representation. The next research direction should be model scale / stronger backbone / calibration analysis, rather than more variants of this same pairwise objective family.
+
+---
+
+### 3.13 DenseLinear model-size ablation
+
+**Particularities.** Sprint 2 follow-up answering the direction §3.12 left open (model scale / stronger backbone / calibration). Identical DenseLinear method and locked pipeline as §3.2 (linear probe on the final-layer last-token hidden state; PRM800K 40K-train / 1K-val frozen split; ProcessBench 4 subsets; F1_PB; val-selected + 0.005 oracle thresholds; seed 42). The only variable is the backbone: Qwen2.5 {1.5B, 3B, 7B, 14B, 32B}. Probe input dim is inferred from `model.config.hidden_size` (1536 to 5120), never hardcoded. No context truncation: each step conditions on question + all previous steps + current step, with `max_seq_len` set to the model's full context window (131072; 32768 for 3B, the strict case) and a fail-hard overlength guard; `num_truncated_examples = 0` for every model. float16 inference; run on transformers 5.9 / torch 2.12. The 1.5B row reproduces §3.2 exactly (val 0.18554, oracle 0.37729; per-subset thresholds and F1_PB identical), validating the scaled pipeline.
+
+**Results.** Macro F1_PB over the 4 subsets, ranked by oracle.
+
+| Backbone | hidden | layers | val-selected macro F1_PB | oracle macro F1_PB | val/oracle |
+|---|---:|---:|---:|---:|---:|
+| Qwen2.5-32B | 5120 | 64 | 0.0606 | **0.4761** | 0.13 |
+| Qwen2.5-14B | 5120 | 48 | 0.2375 | 0.4489 | 0.53 |
+| Qwen2.5-7B | 3584 | 28 | 0.2369 | 0.4132 | 0.57 |
+| Qwen2.5-3B | 2048 | 36 | 0.0383 | 0.3817 | 0.10 |
+| Qwen2.5-1.5B | 1536 | 28 | 0.1855 | 0.3773 | 0.49 |
+
+Per-subset oracle F1_PB:
+
+| Backbone | gsm8k | math | olympiadbench | omnimath |
+|---|---:|---:|---:|---:|
+| 1.5B | 0.3495 | 0.4070 | 0.3720 | 0.3806 |
+| 3B | 0.3678 | 0.4196 | 0.3760 | 0.3634 |
+| 7B | 0.4537 | 0.4467 | 0.3773 | 0.3751 |
+| 14B | 0.4859 | 0.4898 | 0.4008 | 0.4192 |
+| 32B | 0.5236 | 0.4955 | 0.4317 | 0.4537 |
+
+Per-subset val-selected F1_PB (with the PRM800K-val threshold t_val):
+
+| Backbone | t_val | gsm8k | math | olympiadbench | omnimath |
+|---|---:|---:|---:|---:|---:|
+| 1.5B | 0.50 | 0.2701 | 0.2248 | 0.0899 | 0.1574 |
+| 3B | 0.40 | 0.0960 | 0.0049 | 0.0000 | 0.0522 |
+| 7B | 0.50 | 0.3944 | 0.2210 | 0.1367 | 0.1956 |
+| 14B | 0.50 | 0.4504 | 0.2253 | 0.0895 | 0.1850 |
+| 32B | 0.40 | 0.0911 | 0.0928 | 0.0000 | 0.0583 |
+
+**Interpretation.**
+
+1. **Oracle macro F1_PB rises monotonically with scale**: 0.3773 (1.5B) to 0.3817 (3B) to 0.4132 (7B) to 0.4489 (14B) to 0.4761 (32B), +0.10 macro overall. The raw final-layer hidden state carries progressively more first-error signal as the backbone grows; 32B is the strongest DenseLinear oracle in the whole log.
+2. **The deployable (PRM800K-val-selected) threshold does not scale and is erratic.** 3B (0.0383) and 32B (0.0606) collapse while 1.5B/7B/14B sit at 0.19/0.24/0.24. Both collapsing models selected t_val=0.40 on PRM800K-val, which over-predicts errors on ProcessBench (olympiadbench falls to 0.0). Calibration, not representation capacity, is the binding constraint, and it does not improve with scale.
+3. **Per subset**: olympiadbench (hardest) gains most from scale at oracle (0.372 to 0.432); gsm8k gains most overall (0.350 to 0.524). At the val threshold the larger models still leak most of this on the off-distribution subsets.
+4. This extends the §3.2 / S1 val-to-PB calibration finding: the gap is not a smooth function of scale; a larger model can have a worse deployable score (32B val/oracle ratio 0.13) despite a higher ceiling. A PB-held-out threshold rule (cross-cutting follow-up) is the natural fix and would make the oracle gains deployable.
+
+**Artifacts.** `runs/s1_model_size_dense/` (per-model `per_subset_metrics.json`, `model_config.json`, `length_audit.json`, `leaderboard_model_size*.{csv,md}`), produced by `slurm/s1_model_size/run_sweep_one_job.sh`.
 
 ---
 

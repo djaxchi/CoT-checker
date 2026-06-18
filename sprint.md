@@ -4,8 +4,79 @@ One row per sprint: what we hypothesized, what we tested, what we got. Keep it t
 
 | Sprint | Dates | Hypothesis | Verdict |
 |---|---|---|---|
+| S3 | 2026-06-16 → (open) | **Pivot:** stop optimizing the ProcessBench score; explain it. The ~41% hidden-state signal is a *mixture of failure-mode-specific signals*, not one unified correctness concept. Decompose via failure-type annotation, controlled contrasts, layer-wise probing, geometry, transfer, and causal intervention. | in progress |
 | S2 | 2026-06-05 → 06-09 | Fork-based preference supervision (ranking / triplet) shapes a better latent than reconstruction-only; + DenseLinear model-size scaling (1.5B–32B) | ~ partial: forks improve transfer not oracle; scale raises oracle ceiling (0.476 @ 32B) but not deployable calibration (closed) |
 | S1 | 2026-05-21 → 05-26 | SAE/SSAE latents localize the first wrong CoT step better than raw dense hidden states | ✗ not supported |
+
+---
+
+## S3 — What do hidden states encode about CoT correctness? (2026-06-16 → open)
+
+**Pivot.** S1/S2 asked whether a learned representation can *beat the ProcessBench score*; answer was
+no (raw dense holds the strongest oracle signal; scale lifts the ceiling to 0.476 @ 32B but not
+deployable calibration). S3 changes the question from optimizing the number to **explaining it**.
+The empirical anchor is fixed: hidden-state probes reach ~41% on ProcessBench using only internal
+activations — too weak for general correctness, too strong to be noise. ProcessBench becomes the
+*starting point and a downstream diagnostic*, not the objective.
+
+**Central hypothesis.** Correctness is not an atomic internal concept. The binary correct/incorrect
+label collapses mechanistically distinct failure modes (arithmetic, algebraic, variable binding,
+unit mismatch, unsupported premise, goal drift, constraint violation, logical inference, post-hoc).
+The ~41% is a mixture of failure-mode-specific signals; a binary probe wins when a benchmark's
+failures align with the encoded signatures and loses otherwise.
+
+**Plan (6 stages).** (1) profile the ProcessBench signal by failure mode; (2) build controlled
+correct/corrupted contrasts per mode; (3) extract dense last-token all-layer hidden states (SAE/SSAE
+deferred to where the dense signal appears); (4) per (mode × layer) linear probes → F1 heatmap vs
+surface baselines; (5) geometry + transfer (controlled → natural → ProcessBench); (6) causality via
+activation patching, steering, sparse-feature ablation.
+
+**Metrics.** macro F1 for detection; ProcessBench first-error score as diagnostic only; geometry
+(direction alignment, class distances, seed/size stability); causal (continuation correctness,
+final-answer likelihood, dose-response).
+
+**Full governing brief:** `docs/research_direction_s3.md` (sourced from the research proposal).
+
+### Stage 1 findings — failure-mode profiling and geometry (2026-06-18)
+
+Profiled the 7B DenseLinear run (oracle macro F1_PB=0.413) at the **last layer, last token of
+each step**. Built a loader joining hidden state + probe score + gold first-error + text
+(`src/data/processbench_probe_data.py`), then ran four analyses. Headline: the central hypothesis
+(that the signal decomposes into a discrete taxonomy of failure modes) is **not supported by the
+representation geometry** at this layer/token.
+
+1. **No discrete failure-mode taxonomy in the signal.** Sampled 200 first-error steps (stratified
+   50/50 detected/missed x 4 subsets), labeled by Claude Opus subagents into the 10-mode taxonomy
+   (Haiku rejected: only 44% agreement with Opus, systematic over-tagging of arithmetic), plus two
+   hand-corrections. Per-mode detection rate spread is narrow and not significant: best-caught
+   `unsupported_premise` 0.61 (n=28) vs hardest `logical_inference_error` 0.45 (n=60), two-proportion
+   z=1.4, p=0.17. Failure mode is not linearly decodable from the hidden state: 5-fold balanced
+   logistic regression scores at or below the majority floor on PCA-50 (0.29 vs 0.30), and only 0.32
+   on the full 3,584 dims (decorrelated), 2 points over floor at n=200, not significant. The earlier
+   "probe is bad at arithmetic" reading was a Haiku labeling artifact and disappears with clean labels.
+
+2. **No clusters of first-error steps.** Clustering the 200 tagged steps on the full decorrelated
+   hidden state (KMeans, cosine) gives a best silhouette of 0.14, i.e. a continuous cloud, not
+   separable types. Only soft regions appear; a tentative high-confidence/low-detection
+   "computational" region vs low-confidence/high-detection "logical" region is suggestive but
+   n-limited.
+
+3. **First-error steps are not globally distinguishable from correct steps.** Projected all 25,697
+   step encodings (full 3,584 dims, UMAP cosine, HDBSCAN): 7 clusters fall out, but first-error rate
+   is flat across them (0.026 to 0.108 vs 0.086 base rate). Error steps are sprinkled through every
+   cluster, never pooled. Incorrectness is a diffuse property, not a region of representation space.
+
+4. **The one robust axis is step locality.** The clusters that separate cleanly are defined by
+   **position in the trace** (final-step clusters at step_frac ~0.99 split off as their own islands);
+   topic/subset is secondary (cluster subset-purity 0.29 to 0.50). Neither failure mode nor
+   correctness organizes the space; step position does.
+
+**Caveat and next step.** All of the above uses a single readout: last layer, last token of the step.
+The next move is to ablate this choice over **layers and token positions** before concluding that the
+representation lacks failure-mode structure, since mid-layer or step-internal tokens may carry it.
+
+Artifacts: `scripts/analysis/s3_failure_mode_scatter.py`, `s3_cluster_failures.py`, `s3_project_all.py`
+(+ sampling, labeling, and correction scripts); outputs under `results/s3_first_error/` (gitignored).
 
 ---
 

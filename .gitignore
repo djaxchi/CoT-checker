@@ -99,3 +99,6 @@ CLAUDE.md
 
 # Personal runner scripts (Telegram notifications, local paths)
 scripts/run_pipeline.sh
+
+# graphify knowledge-graph artifacts (generated locally, rebuilt on demand)
+graphify-out/

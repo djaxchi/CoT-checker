@@ -58,7 +58,7 @@ fi
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
-pip install --no-index torch transformers numpy
+pip install --no-index torch transformers numpy scikit-learn
 
 EXTRA=()
 if [[ "${FORCE:-0}" == "1" ]]; then EXTRA+=(--force); fi
@@ -70,4 +70,20 @@ python scripts/encode_prm800k_hidden_states.py \
   --batch_size "$BATCH" --model_dtype float16 --save_dtype float16 \
   --splits "${STEM}.jsonl:${STEM}" "${EXTRA[@]}"
 
-echo "[$(date -Iseconds)] $TAG done -> $OUT_DIR/${STEM}_{h,y,meta}"
+echo "[$(date -Iseconds)] $TAG encode done -> $OUT_DIR/${STEM}_{h,y,meta}"
+
+# ---- eval this size's deployed probe on the just-encoded test (last layer) ----
+# Per-tag JSON filename so the 5 parallel array tasks never race on one file.
+RUN_DIR="$RUNS_ROOT/$TAG"
+LABEL="${S1MS_PARAMS_LABEL[$TAG]:-$TAG}"
+EVAL_OUT="${EVAL_OUT:-$PROJECT_ROOT/results/prm800k_test_full_eval}"
+if [[ -f "$RUN_DIR/linear_probe.pt" ]]; then
+  echo "[$(date -Iseconds)] $TAG eval -> $EVAL_OUT/${LABEL}.json"
+  python scripts/eval_prm800k_heldout_probe.py \
+    --run_dir "$RUN_DIR" --enc_dir "$OUT_DIR" --stem "$STEM" \
+    --tag "$LABEL" --out_dir "$EVAL_OUT"
+else
+  echo "[WARN] $TAG: no $RUN_DIR/linear_probe.pt; skipping eval (encoding kept)"
+fi
+
+echo "[$(date -Iseconds)] $TAG done"

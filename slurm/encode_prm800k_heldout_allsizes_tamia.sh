@@ -45,6 +45,7 @@ GPU3_TAGS="${GPU3_TAGS:-qwen2_5_3b qwen2_5_1_5b}"
 export HF_HOME="${HF_HOME:-$HF_CACHE_ROOT}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"   # so `import src` works under the venv
 mkdir -p "$EVAL_OUT"
 
 cat <<BANNER
@@ -78,6 +79,9 @@ run_one () {
   local out_dir="$RUNS_ROOT/$tag/merged" run_dir="$RUNS_ROOT/$tag"
   local label="${S1MS_PARAMS_LABEL[$tag]:-$tag}"
   mkdir -p "$out_dir"
+  if [[ "${FORCE:-0}" != "1" && -f "$out_dir/${STEM}_h.npy" ]]; then
+    echo "[gpu$gpu][$(date -Iseconds)] $tag encode SKIP (exists $out_dir/${STEM}_h.npy)"
+  else
   echo "[gpu$gpu][$(date -Iseconds)] $tag ($model_id, batch=$batch) encode start"
   if ! CUDA_VISIBLE_DEVICES="$gpu" python scripts/encode_prm800k_hidden_states.py \
        --data_dir "$DATA_DIR" --out_dir "$out_dir" \
@@ -88,6 +92,7 @@ run_one () {
     echo "[gpu$gpu][ERR] $tag encode FAILED; skipping eval"; return 1
   fi
   echo "[gpu$gpu][$(date -Iseconds)] $tag encode done -> $out_dir/${STEM}_{h,y,meta}"
+  fi
   if [[ -f "$run_dir/linear_probe.pt" ]]; then
     if ! python scripts/eval_prm800k_heldout_probe.py \
          --run_dir "$run_dir" --enc_dir "$out_dir" --stem "$STEM" \

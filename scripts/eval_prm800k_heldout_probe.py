@@ -32,9 +32,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+
+# make the project root importable when run as `python scripts/eval_...py`
+# (Python puts scripts/ on sys.path, not the repo root, so `import src` fails)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.prm800k_val_data import load_prm800k_multitoken, load_prm800k_val
 from src.data.processbench_probe_data import compute_scores, load_probe

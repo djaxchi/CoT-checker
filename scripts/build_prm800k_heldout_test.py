@@ -76,11 +76,15 @@ def main() -> None:
                     help="existing artifact jsonls whose problem_ids are excluded")
     ap.add_argument("--out_dir", type=Path, required=True)
     ap.add_argument("--stem", type=str, default="prm800k_heldout_test_6k")
-    ap.add_argument("--tokenizer_name_or_path", type=str, required=True)
+    ap.add_argument("--tokenizer_name_or_path", type=str, default=None,
+                    help="only needed when --max_seq_len > 0 (length filter)")
     ap.add_argument("--local_files_only", action="store_true")
     ap.add_argument("--n_per_class", type=int, default=3000,
                     help="balanced: this many correct AND this many incorrect")
-    ap.add_argument("--max_seq_len", type=int, default=2048)
+    ap.add_argument("--max_seq_len", type=int, default=2048,
+                    help="length filter cap (needs transformers); <=0 SKIPS the "
+                         "filter (no tokenizer needed) since we encode at full "
+                         "context and PRM800K steps never approach it")
     ap.add_argument("--max_per_problem", type=int, default=0,
                     help="0 = no cap; else keep at most N examples per problem_id "
                          "to avoid a few problems dominating")
@@ -102,12 +106,19 @@ def main() -> None:
     print(f"[build] {len(unseen)} candidates on unseen problems "
           f"({len({e['problem_id'] for e in unseen})} problems)")
 
-    from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(
-        args.tokenizer_name_or_path, local_files_only=args.local_files_only)
-    unseen = filter_by_length(unseen, tok, args.max_seq_len, counters)
-    print(f"[build] {len(unseen)} after length filter "
-          f"(<= {args.max_seq_len} tokens; dropped {counters['candidate_overlength']})")
+    if args.max_seq_len and args.max_seq_len > 0:
+        if not args.tokenizer_name_or_path:
+            sys.exit("--max_seq_len > 0 requires --tokenizer_name_or_path for the "
+                     "length filter (or pass --max_seq_len -1 to skip it)")
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(
+            args.tokenizer_name_or_path, local_files_only=args.local_files_only)
+        unseen = filter_by_length(unseen, tok, args.max_seq_len, counters)
+        print(f"[build] {len(unseen)} after length filter "
+              f"(<= {args.max_seq_len} tokens; dropped {counters['candidate_overlength']})")
+    else:
+        print("[build] length filter SKIPPED (--max_seq_len <= 0); encode at full "
+              "context handles any length")
 
     if args.max_per_problem > 0:
         by_pid: dict[str, list[dict]] = defaultdict(list)

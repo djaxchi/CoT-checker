@@ -105,3 +105,75 @@ def test_load_multitoken_bad_layer_or_token(tmp_path):
         load_prm800k_multitoken(d, "mt", 99, "last")
     with pytest.raises(ValueError, match="token"):
         load_prm800k_multitoken(d, "mt", 28, "middle")
+
+
+# --- 4D shard merge ordering ------------------------------------------------
+
+def _write_shard(root, idx, gi, layers=(20, 28), tokens=("first", "last"), H=8,
+                 stem="mt"):
+    """One shard_NN/ dir whose rows carry the given (out-of-order) global_index."""
+    sd = root / f"shard_{idx:02d}"
+    sd.mkdir(parents=True)
+    n, L, T = len(gi), len(layers), len(tokens)
+    # encode the global_index into the data so we can verify ordering post-merge
+    h = np.zeros((n, L, T, H), dtype=np.float16)
+    for i, g in enumerate(gi):
+        h[i] = float(g)
+    y = np.array([g % 2 for g in gi], dtype=np.int64)
+    meta = [{"uid": f"u{g}", "problem_id": f"p{g}", "step_idx": g,
+             "label": int(y[i]), "rating": 1, "n_tokens": 10, "global_index": g}
+            for i, g in enumerate(gi)]
+    np.save(sd / f"{stem}_h.npy", h)
+    np.save(sd / f"{stem}_y.npy", y)
+    (sd / f"{stem}_meta.jsonl").write_text("\n".join(json.dumps(m) for m in meta))
+    (sd / f"{stem}_manifest.json").write_text(json.dumps({
+        "layer_indices": list(layers), "token_order": list(tokens),
+        "hidden_size": H, "shape": [n, L, T, H]}))
+    return sd
+
+
+def test_merge_sorts_by_global_index(tmp_path):
+    import subprocess
+    import sys
+
+    root = tmp_path / "out"
+    # shards hold interleaved, out-of-order global indices
+    _write_shard(root, 0, gi=[0, 3, 6])
+    _write_shard(root, 1, gi=[1, 4, 7])
+    _write_shard(root, 2, gi=[2, 5])
+
+    r = subprocess.run(
+        [sys.executable, "scripts/merge_prm800k_multitoken_shards.py",
+         "--shard_root", str(root), "--stem", "mt", "--out_dir", str(root)],
+        capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    H = np.load(root / "mt_h.npy")
+    y = np.load(root / "mt_y.npy")
+    meta = [json.loads(l) for l in (root / "mt_meta.jsonl").read_text().splitlines()]
+
+    assert H.shape == (8, 2, 2, 8)
+    gi = [m["global_index"] for m in meta]
+    assert gi == list(range(8))                       # sorted, contiguous, deduped
+    # row payload (== global_index) lines up with the sorted order
+    np.testing.assert_array_equal(H[:, 0, 0, 0], np.arange(8, dtype=np.float16))
+    np.testing.assert_array_equal(y, np.array([g % 2 for g in range(8)]))
+
+    manifest = json.loads((root / "mt_manifest.json").read_text())
+    assert manifest["merged"] is True
+    assert manifest["shape"] == [8, 2, 2, 8]
+
+
+def test_merge_refuses_overwrite_without_force(tmp_path):
+    import subprocess
+    import sys
+
+    root = tmp_path / "out"
+    _write_shard(root, 0, gi=[0, 1])
+    (root / "mt_h.npy").write_bytes(b"existing")      # pre-existing merged output
+    r = subprocess.run(
+        [sys.executable, "scripts/merge_prm800k_multitoken_shards.py",
+         "--shard_root", str(root), "--stem", "mt", "--out_dir", str(root)],
+        capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "refusing overwrite" in (r.stdout + r.stderr)

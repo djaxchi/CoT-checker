@@ -29,7 +29,8 @@ STEM="${STEM:-prm800k_heldout_test}"
 LAYERS="${LAYERS:-11 17 20 22 25 28}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
-HF_CACHE="${HF_CACHE:-$SCRATCH/hf_cache}"
+# 7B weights live in the (non-purged) project cache, not $SCRATCH; override with HF_CACHE=...
+HF_CACHE="${HF_CACHE:-/project/6102296/dchikhi/hf_cache}"
 
 mkdir -p "$OUT" "$HF_CACHE"
 export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"

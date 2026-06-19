@@ -81,6 +81,10 @@ def main() -> None:
     ap.add_argument("--local_files_only", action="store_true")
     ap.add_argument("--n_per_class", type=int, default=3000,
                     help="balanced: this many correct AND this many incorrect")
+    ap.add_argument("--full", action="store_true",
+                    help="write ALL unseen candidates at the natural class "
+                         "distribution (no balancing); ignores --n_per_class. Use "
+                         "for the literature-comparable full PRM800K test set.")
     ap.add_argument("--max_seq_len", type=int, default=2048,
                     help="length filter cap (needs transformers); <=0 SKIPS the "
                          "filter (no tokenizer needed) since we encode at full "
@@ -131,15 +135,22 @@ def main() -> None:
         print(f"[build] {len(capped)} after max_per_problem={args.max_per_problem} cap")
         unseen = capped
 
-    pos = [e for e in unseen if e["label"] == 0]   # correct
-    neg = [e for e in unseen if e["label"] == 1]   # incorrect
-    rng.shuffle(pos); rng.shuffle(neg)
-    k = args.n_per_class
-    if len(pos) < k or len(neg) < k:
-        sys.exit(f"[build] not enough unseen examples: correct={len(pos)} "
-                 f"incorrect={len(neg)} < n_per_class={k}. Lower --n_per_class.")
-    test = pos[:k] + neg[:k]
-    rng.shuffle(test)
+    if args.full:
+        test = list(unseen)
+        rng.shuffle(test)
+        nc = sum(1 for e in test if e["label"] == 0)
+        print(f"[build] FULL natural test: {len(test)} steps "
+              f"({nc} correct / {len(test) - nc} incorrect, no balancing)")
+    else:
+        pos = [e for e in unseen if e["label"] == 0]   # correct
+        neg = [e for e in unseen if e["label"] == 1]   # incorrect
+        rng.shuffle(pos); rng.shuffle(neg)
+        k = args.n_per_class
+        if len(pos) < k or len(neg) < k:
+            sys.exit(f"[build] not enough unseen examples: correct={len(pos)} "
+                     f"incorrect={len(neg)} < n_per_class={k}. Lower --n_per_class.")
+        test = pos[:k] + neg[:k]
+        rng.shuffle(test)
 
     out_path = args.out_dir / f"{args.stem}.jsonl"
     write_jsonl(out_path, test)
@@ -147,6 +158,7 @@ def main() -> None:
     pid_set = {e["problem_id"] for e in test}
     manifest = {
         "stem": args.stem,
+        "mode": "full_natural" if args.full else f"balanced_{args.n_per_class}",
         "n_total": len(test),
         "n_correct": sum(1 for e in test if e["label"] == 0),
         "n_incorrect": sum(1 for e in test if e["label"] == 1),

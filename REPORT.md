@@ -931,7 +931,131 @@ The PSSAE demonstrates that a single linear layer trained on positive-only trans
 
 ---
 
-## 15. Limitations
+## 15. PRM800K Layer × Token Geometry: Where and How Correctness Is Encoded (S3 Stage 2)
+
+S3 Stage 1 concluded that incorrectness is a diffuse property at the last-layer / last-token readout
+and flagged the readout choice as the open confound: mid-layer or step-internal tokens might still
+carry the structure. Stage 2 pre-paid that ablation with a single multi-layer / multi-token encode and
+then dissected the resulting signal. The conclusion is sharper than Stage 1: across every layer and
+both tokens the correctness signal is a genuine but very low-variance, low-effect-size **linear
+direction**, linearly decodable yet invisible to any variance- or neighborhood-based embedding, and it
+never organizes into clusters.
+
+### 15.1 Setup
+
+One whole-node 4-GPU pass encoded the natural PRM800K held-out test set: 6,000 steps, balanced 3,000
+correct (rating +1) and 3,000 incorrect (rating −1), capturing the **first and last token of each
+step at layers 11, 17, 20, 22, 25, 28** (depth fractions 0.39 to 1.0) of Qwen2.5-7B, hidden size
+3,584. The result is a 4D tensor (6,000 × 6 layers × 2 tokens × 3,584). Decodability throughout is
+5-fold balanced logistic-regression accuracy with a majority floor of 0.50. Because the set is the
+rating ±1 extremes, this is an in-distribution and optimistic ceiling, not directly comparable to the
+ProcessBench numbers in §9 and §13.
+
+Scripts: `scripts/encode_prm800k_multitoken_multilayer.py` (+ `merge_prm800k_multitoken_shards.py`),
+`scripts/analysis/s3_prm800k_layer_projection.py`, `s3_prm800k_probe_anatomy.py`,
+`s3_prm800k_minimal_subspace.py`, `s3_prm800k_supervised_view.py`. Outputs under
+`results/prm800k_layers/` (gitignored).
+
+### 15.2 Layer × token sweep
+
+| layer (depth) | first-token acc | last-token acc |
+|---|---|---|
+| L11 (0.39) | 0.681 | 0.694 |
+| L17 (0.61) | 0.683 | 0.737 |
+| **L20 (0.71)** | 0.697 | **0.742** |
+| L22 (0.79) | 0.688 | 0.727 |
+| L25 (0.89) | 0.694 | 0.731 |
+| L28 (1.00) | 0.682 | 0.731 |
+
+(ROC-AUC where measured: L20/last 0.808, L28/last 0.784, L20/first 0.729, L28/first 0.709.)
+
+Two robust effects:
+
+- **Last token beats first at every depth.** Last-token decodability peaks at L20 (0.742) and
+  plateaus near 0.73 to the final layer; first-token is flat near 0.68 throughout. Only the last token
+  has attended over the entire step, so it integrates step content; the first token is essentially the
+  step's opening token. The first-token signal is also qualitatively worse: row-normalizing hurts it
+  and confound-residualizing barely changes it, meaning what little it has leans on magnitude and
+  confounds. Actionable: the readout should be last-token (or mean-pool), never first.
+- **L20 slightly beats the final layer.** L20/last exceeds L28/last on accuracy and AUC and after
+  every control below (cosine 0.766 vs 0.737, residual 0.711 vs 0.691). Mid-late layers hold the most
+  abstract step-validity representation before the final layer re-specializes toward next-token
+  prediction.
+
+### 15.3 What the probe reads: confound audit (L20/last)
+
+Incorrect steps are systematically longer (median 246 vs 193 tokens) and later (step_idx 5.2 vs 4.4),
+so the obvious worry is that the probe is a length/position detector. It is not, mostly:
+
+| readout | acc | auc |
+|---|---|---|
+| length + position only | 0.583 | 0.627 |
+| raw last-token norm only | 0.556 | 0.575 |
+| full hidden state | 0.742 | 0.808 |
+| cosine (row-normalized, magnitude removed) | 0.766 | 0.839 |
+| residualized (length + position regressed out of every dim) | 0.711 | 0.763 |
+
+The lift over floor is 0.242; after linearly removing length and position it is still 0.211, so about
+87% of the lift is content, not confound (probe-score correlation with length is only r=+0.21). The
+mechanism is **direction, not magnitude**: removing magnitude (cosine) improves decodability and the
+raw norm alone is near-useless. Length and position are real contaminants worth fixing in the data,
+but they are not the mechanism.
+
+### 15.4 Why no clusters: a 0.01%-variance linear margin
+
+The signal lives in a distributed, low-variance subspace roughly orthogonal to the dominant variance:
+
+- Top-1 PC decodes at 0.517 (floor); top-10 PCs only 0.635. Removing the top-1 PC still leaves 0.741;
+  you must strip roughly 100 to 200 PCs before decodability collapses.
+- The logistic probe direction holds **0.4 of 3,584 total variance, i.e. 0.01%**, while the top
+  residual PC (the kind of direction a 2D map's axes are built from) holds about 600 times more.
+- The class means along the probe axis are only **d' = 1.19 standard deviations apart** (AUC 0.808),
+  i.e. heavy overlap, a shift rather than two blobs.
+
+This resolves the apparent paradox between strong linear decodability and an unstructured map. UMAP and
+PCA choose axes that maximize variance and preserve neighborhoods; those axes are topic, problem, and
+length, all orthogonal to correctness. A supervised projection onto the probe axis displays the shift
+plainly (`supervised_view_L20_last.png`); an unsupervised map spends both dimensions on the 99.99% of
+variance that is not correctness and shows nothing.
+
+### 15.5 Minimal separating subspace and the cluster test
+
+An L1 sparse probe recovers the full signal from a small subset of activations:
+
+- **235 of 3,584 dims (6.6%)** retain full accuracy (0.747); about 920 dims peak at 0.774. Selecting
+  on a train half and scoring the held-out half gives 0.733, so the minimal set generalizes.
+- Per-dim effect sizes confirm the elimination is meaningful: median |Cohen's d| = 0.10, only 664 dims
+  with |d| > 0.2. Roughly 93% of activations are statistically common to both classes and droppable.
+
+But isolating the discriminative subspace does **not** make it cluster. Against a shuffled-label null
+selected the same way:
+
+| subspace (235 dims) | 2D-map label separability (kNN) | HDBSCAN purity |
+|---|---|---|
+| minimal (discriminative) | 0.660 | 0.61 |
+| common (eliminated) | 0.645 | 0.56 |
+| shuffled-label control | 0.654 | 0.56 |
+
+The minimal subspace separates labels in 2D at 0.660, barely above the shuffled null of 0.654, and far
+below its own linear decodability (0.747). Correctness is a distributed linear direction, not a
+localizable cluster of "error neurons."
+
+### 15.6 Takeaways
+
+- Stage 1's "incorrectness is diffuse" now holds across all six layers and both tokens, with a
+  mechanism: a low-variance (0.01%), low-effect-size (d' ≈ 1.2) linear direction. No cluster structure
+  exists for any (layer, token).
+- Two concrete actions: switch the readout to last-token or mean-pool (never first); use L20 rather
+  than the final layer as the probe site, for a small but consistent gain.
+- The natural balanced ceiling is about 0.74, optimistic because it is the rating ±1 extremes.
+- This is the strongest case yet for the deferred SAE stage. Only a learned sparse basis can allocate a
+  dedicated coordinate to a 0.01%-variance direction and turn this linear margin into discrete,
+  interpretable, clusterable features. Caveats: residualization removes only linear confound (matched
+  to the linear probe), and the held-out set is the artificial balanced extremes.
+
+---
+
+## 16. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -940,15 +1064,15 @@ The PSSAE demonstrates that a single linear layer trained on positive-only trans
 
 ---
 
-## 16. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 17. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
-### 16.1 Overview
+### 17.1 Overview
 
 The field has converged around a central question: do intermediate CoT steps causally determine the final answer, and can mechanistic signals detect when they do not? As of May 2026, five broad approaches have emerged.
 
 ---
 
-### 16.2 Full Paper Inventory
+### 17.2 Full Paper Inventory
 
 #### Tier 1: Most Directly Relevant (Mechanistic Signal + Step-Level CoT Validity)
 
@@ -1182,7 +1306,7 @@ The field has converged around a central question: do intermediate CoT steps cau
 
 ---
 
-### 16.3 Directly Relevant Papers (Both Criteria: Mechanistic Signal + Step-Level CoT Validity)
+### 17.3 Directly Relevant Papers (Both Criteria: Mechanistic Signal + Step-Level CoT Validity)
 
 | # | Paper | Signal | Step-Level? | Year |
 |---|---|---|---|---|
@@ -1200,7 +1324,7 @@ The field has converged around a central question: do intermediate CoT steps cau
 
 ---
 
-### 16.4 State-of-the-Art Summary
+### 17.4 State-of-the-Art Summary
 
 #### Approach 1: Sparse Autoencoders (SAEs) on Activations
 
@@ -1230,7 +1354,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-### 16.5 Signal Performance Comparison
+### 17.5 Signal Performance Comparison
 
 | Signal Type | Best Result | Scope | Training Required |
 |---|---|---|---|
@@ -1246,7 +1370,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-### 16.6 Open Questions Most Relevant to This Project
+### 17.6 Open Questions Most Relevant to This Project
 
 1. **SAE probe vs. circuit analysis is unexplored.** P3 (CRV) does circuit-level analysis with transcoders, not SAEs. Combining SAE features with attribution graphs has not been attempted.
 
@@ -1264,7 +1388,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 17. Next Steps
+## 18. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

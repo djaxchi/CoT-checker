@@ -78,6 +78,98 @@ representation lacks failure-mode structure, since mid-layer or step-internal to
 Artifacts: `scripts/analysis/s3_failure_mode_scatter.py`, `s3_cluster_failures.py`, `s3_project_all.py`
 (+ sampling, labeling, and correction scripts); outputs under `results/s3_first_error/` (gitignored).
 
+### Stage 2 findings: layer × token ablation and the geometry of the signal (2026-06-19)
+
+Pre-paid the Stage-1 caveat: one 4-GPU pass encoded the natural PRM800K held-out test (6,000 steps,
+balanced 3,000 correct / 3,000 incorrect by rating ±1) capturing **first and last token at layers
+11, 17, 20, 22, 25, 28** of Qwen2.5-7B (4D tensor 6,000×6×2×3,584). Decodability = 5-fold balanced
+logistic regression, floor 0.50. Headline: sweeping every layer and both tokens **does not surface
+correctness clusters**; it pins down *where* the signal sits and *why* it never appears as separation.
+
+1. **Last token >> first, at every depth.** Last-token decodability peaks at **L20 = 0.742** (0.71
+   depth) and plateaus ~0.73 to the final layer; first-token is flat ~0.68 across all layers. Only the
+   last token has attended over the whole step. Actionable: the readout should be last-token (or
+   mean-pool), never first. This is a real fix, not a tuning knob.
+
+2. **L20 slightly beats the final layer.** L20/last (0.742) > L28/last (0.731) on accuracy and AUC and
+   after every control; mid-late layers hold the most abstract step-validity before the final layer
+   re-specializes toward next-token prediction.
+
+3. **The signal is real, mostly not a confound.** Incorrect steps are longer (median 246 vs 193
+   tokens) and later (step_idx 5.2 vs 4.4), but length+position alone decode only 0.583; after
+   regressing them out of every dim, decodability is still 0.711 (~87% of the lift survives). It is
+   carried by **direction, not magnitude**: row-normalizing (cosine) raises it to 0.766 and the raw
+   norm is near-useless (AUC 0.575).
+
+4. **Why no clusters: a 0.01%-variance linear margin.** The correctness direction holds **0.4 of 3,584
+   total variance (0.01%)** with class means only **d'=1.19 SD** apart (AUC 0.808). The top PC carries
+   none of it (0.517); removing the top-1 PC leaves 0.741; you must strip ~100-200 PCs to collapse it.
+   UMAP/HDBSCAN spend their dimensions on the 99.99% of variance that is topic/problem/length and never
+   surface it. A supervised projection onto the probe axis shows the shift plainly; an unsupervised map
+   cannot. There is no contradiction between strong linear decodability and an unstructured 2D map.
+
+5. **The minimal separating set exists but still does not cluster.** An L1 sparse probe keeps
+   **235/3,584 dims (6.6%)** at full accuracy (0.747; generalizes to 0.733 train→test); ~93% of
+   activations are statistically common to both classes and droppable. Yet mapping only the
+   discriminative 235 dims gives 2D-separability **0.660 vs a shuffled-label null of 0.654** and
+   HDBSCAN purity 0.61 vs 0.56. Correctness is a distributed linear direction, not a localizable
+   cluster of "error neurons."
+
+**Conclusion.** Stage 1's "incorrectness is diffuse" now holds across all layers and both tokens, with
+a mechanism: a genuine but very low-variance, low-effect-size linear direction, linearly decodable yet
+invisible to any variance- or neighborhood-based embedding. The natural balanced ceiling is ~0.74
+(optimistic: rating ±1 extremes vs ProcessBench's natural mix). This is the strongest motivation yet
+for the deferred SAE stage. Only a learned sparse basis can give this direction its own coordinate
+and make it discrete, interpretable, and clusterable.
+
+Artifacts: `scripts/analysis/s3_prm800k_layer_projection.py`, `s3_prm800k_probe_anatomy.py`,
+`s3_prm800k_minimal_subspace.py`, `s3_prm800k_supervised_view.py`; encode
+`scripts/encode_prm800k_multitoken_multilayer.py` (+ merge); outputs under `results/prm800k_layers/`
+(gitignored). Full writeup: `REPORT.md` §15.
+
+### Stage 3 findings: model-size scaling on the full natural PRM800K test (2026-06-19)
+
+Took the deployed dense readout (last layer L28 / last token) to the **full OpenAI PRM800K test set**
+(`phase2_test`, 24,244 candidate steps over 2,724 problems, problem-disjoint from train/val, natural
+**25.1% incorrect** = 18,169 correct / 6,075 incorrect) so the numbers are literature-comparable rather
+than on our balanced 6k. Encoded the set with each backbone (1.5B, 3B, 7B, 14B, 32B) in one 4-GPU node
+and evaluated each size's own probe in its own hidden space at its val-selected threshold.
+
+| size | AUC | F1 (inc) | bal-acc | oracle bal-acc | val→test gap |
+|---|---|---|---|---|---|
+| 1.5B | 0.776 | 0.543 | 0.703 | 0.706 | -0.018 |
+| 3B | 0.795 | 0.555 | 0.720 | 0.724 | -0.024 |
+| 7B | 0.806 | 0.579 | 0.730 | 0.734 | -0.036 |
+| 14B | 0.825 | 0.589 | 0.747 | 0.748 | -0.016 |
+| 32B | 0.828 | 0.588 | 0.749 | 0.753 | -0.019 |
+
+1. **Monotonic scaling, diminishing past 14B.** AUC rises 0.776 → 0.828 and balanced accuracy 0.703 →
+   0.749 across a 20x param range. The largest single step is 7B → 14B (AUC +0.019, bal-acc +0.017);
+   14B → 32B is nearly flat (AUC +0.003, F1 ties at ~0.589). 14B captures essentially all the available
+   linear correctness signal.
+
+2. **Thresholds transfer cleanly.** Deployed-threshold balanced accuracy is within ~0.003-0.005 of the
+   oracle ceiling at every size, and val→test gaps are small and negative (-0.016 to -0.036). The
+   val-selected thresholds hold on the full natural distribution with no overfit on unseen problems.
+
+3. **Low F1 is a base-rate artifact, not weak discrimination.** F1 on the incorrect class is 0.54-0.59
+   only because incorrect steps are the 25% minority. Backing out the 7B operating point: recall ≈ 0.70,
+   specificity ≈ 0.76, but precision ≈ 0.50 because correct steps outnumber incorrect 3:1, so a 0.76
+   specificity still leaks roughly as many false positives as there are true positives. The same probe
+   at the same threshold scores F1 0.720 on the balanced 6k set. AUC and balanced accuracy are
+   prevalence-invariant; F1 is not, so cross-paper comparison must lead with AUROC (~0.83 at scale) and
+   quote F1 only alongside the 25% base rate.
+
+**Conclusion.** As a step-correctness classifier on the full natural PRM800K test the dense probe reaches
+**AUROC ~0.83 / balanced accuracy ~0.75 at 14B-32B**, scaling smoothly with backbone size and
+generalizing cleanly to unseen problems. This is the literature-comparable headline; it reinforces that
+the ProcessBench gap is distribution shift, not a broken probe. The L20 best-correctness-layer eval
+(Stage 2: L20/last > L28/last) is still open here because it needs an L20-trained probe per size.
+
+Artifacts: `scripts/eval_prm800k_heldout_probe.py`, `scripts/aggregate_heldout_eval.py`; build
+`scripts/build_prm800k_heldout_test.py --full`; slurm `encode_prm800k_heldout_allsizes_tamia.sh` (+
+CPU-only re-eval `eval_prm800k_fulltest_allsizes_tamia.sh`); table `results/prm800k_test_full_eval/table.csv`.
+
 ---
 
 ## S2 — Fork-based representation shaping + model-size scaling (2026-06-05 → 06-09)

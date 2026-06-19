@@ -58,6 +58,11 @@ def load_prm800k_val(
     meta_path = merged_dir / f"{stem}_meta.jsonl"
     meta = [json.loads(l) for l in meta_path.read_text().splitlines() if l.strip()]
 
+    return _assemble(hidden, label, meta, stem)
+
+
+def _assemble(hidden: np.ndarray, label: np.ndarray, meta: list[dict],
+              stem: str) -> Prm800kStepData:
     n = hidden.shape[0]
     if len(meta) != n or label.shape[0] != n:
         raise ValueError(
@@ -78,3 +83,37 @@ def load_prm800k_val(
         completion_idx=col("completion_idx", lambda v: int(v) if v is not None else -1, -1).astype(np.int64),
         n_tokens=col("n_tokens", lambda v: int(v) if v is not None else -1, -1).astype(np.int64),
     )
+
+
+def load_prm800k_multitoken(
+    merged_dir: str | Path,
+    stem: str,
+    layer_idx: int,
+    token: str = "last",
+) -> Prm800kStepData:
+    """Slice one (layer, token) plane out of the 4D multi-token/multi-layer encoding.
+
+    Reads {stem}_h.npy of shape (n, L, T, H) plus {stem}_manifest.json (layer_indices,
+    token_order), resolves the requested layer/token to their stored positions, and
+    returns a :class:`Prm800kStepData` for that plane so the existing projection /
+    separation scripts run unchanged. The big array is mmapped; only the slice is
+    materialised.
+    """
+    merged_dir = Path(merged_dir)
+    manifest = json.loads((merged_dir / f"{stem}_manifest.json").read_text())
+    layers = list(manifest["layer_indices"])
+    tokens = list(manifest["token_order"])
+    if layer_idx not in layers:
+        raise ValueError(f"layer {layer_idx} not in stored layers {layers}")
+    if token not in tokens:
+        raise ValueError(f"token {token!r} not in stored tokens {tokens}")
+    lpos, tpos = layers.index(layer_idx), tokens.index(token)
+
+    h = np.load(merged_dir / f"{stem}_h.npy", mmap_mode="r")
+    if h.ndim != 4:
+        raise ValueError(f"{stem}_h.npy is {h.ndim}D, expected 4D (n,L,T,H)")
+    hidden = np.asarray(h[:, lpos, tpos, :]).astype(np.float32)
+    label = np.load(merged_dir / f"{stem}_y.npy").astype(np.int64)
+    meta = [json.loads(l) for l in
+            (merged_dir / f"{stem}_meta.jsonl").read_text().splitlines() if l.strip()]
+    return _assemble(hidden, label, meta, f"{stem}[L{layer_idx},{token}]")

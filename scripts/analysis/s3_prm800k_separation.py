@@ -43,7 +43,9 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import cross_val_predict
 from sklearn.preprocessing import StandardScaler
 
-from src.data.prm800k_val_data import DEFAULT_MERGED_DIR, load_prm800k_val
+from src.data.prm800k_val_data import (
+    DEFAULT_MERGED_DIR, load_prm800k_multitoken, load_prm800k_val,
+)
 from src.data.processbench_probe_data import DEFAULT_RUN_DIR, load_probe
 
 ROOT = Path("results/prm800k_val")
@@ -70,14 +72,21 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--merged_dir", type=Path, default=DEFAULT_MERGED_DIR)
     ap.add_argument("--stem", type=str, default="val_1k",
-                    help="encoding stem to load, e.g. val_1k or prm800k_heldout_test_6k")
+                    help="encoding stem to load, e.g. val_1k or prm800k_heldout_test")
+    ap.add_argument("--layer", type=int, default=None,
+                    help="if set, load this layer from a 4D multitoken encoding")
+    ap.add_argument("--token", type=str, default="last",
+                    help="token plane for --layer mode (first/last)")
     ap.add_argument("--run_dir", type=Path, default=DEFAULT_RUN_DIR)
     ap.add_argument("--out_dir", type=Path, default=ROOT)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    d = load_prm800k_val(args.merged_dir, stem=args.stem)
+    if args.layer is not None:
+        d = load_prm800k_multitoken(args.merged_dir, args.stem, args.layer, args.token)
+    else:
+        d = load_prm800k_val(args.merged_dir, stem=args.stem)
     y = d.label  # 0 = correct, 1 = incorrect
     n = len(d)
     print(f"[load] {n} steps | correct={(y==0).sum()} incorrect={(y==1).sum()}")

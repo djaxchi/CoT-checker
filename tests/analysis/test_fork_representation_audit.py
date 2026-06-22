@@ -102,6 +102,39 @@ def test_surface_features_detects_number_change():
     assert 0.0 <= f["token_overlap"] <= 1.0
 
 
+def test_auc_orientation():
+    # neg (label-1) scored higher than pos (label-0) -> AUC > 0.5, not < 0.5.
+    pos = np.array([0.0, 0.1, 0.2, 0.3])
+    neg = np.array([0.7, 0.8, 0.9, 1.0])
+    assert fa._auc(neg, pos) == pytest.approx(1.0)
+    assert fa._auc(pos, neg) == pytest.approx(0.0)   # swapped args would invert
+
+
+def test_surface_residualize_removes_length_component():
+    # Plant a delta = a*length_diff (pure surface) + small true direction.
+    rng = np.random.default_rng(7)
+    n = 300
+    ld = rng.normal(size=n)
+    surf = [{"length_diff": ld[i], "char_dissim": 0.0, "token_overlap": 1.0,
+             "number_diff": 0, "numbers_changed": 0, "operator_changed": 0} for i in range(n)]
+    surf_dir = np.array([1.0, 0.0, 0.0])
+    true_dir = np.array([0.0, 1.0, 0.0])
+    D = ld[:, None] * surf_dir[None, :] + 0.05 * rng.normal(size=(n, 1)) * true_dir[None, :]
+    X = fa.surface_design_matrix(surf)
+    D_res = fa.surface_residualize(D, X)
+    # the length-driven component on axis 0 should be largely gone
+    assert np.var(D_res[:, 0]) < 0.1 * np.var(D[:, 0])
+
+
+def test_minimal_edit_mask_keeps_similar_pairs():
+    surf = [{"token_overlap": ov, "length_diff": ld}
+            for ov, ld in [(0.9, 1), (0.2, 50), (0.95, 0), (0.1, 80), (0.8, 2)]]
+    mask = fa.minimal_edit_mask(surf, q=0.5)
+    # high-overlap, low length-diff pairs kept; low-overlap high-diff dropped
+    assert mask[2]            # ov 0.95, ld 0
+    assert not mask[3]        # ov 0.10, ld 80
+
+
 def test_trigger_rates_shape_and_sign():
     rng = np.random.default_rng(5)
     H_all = rng.normal(size=(100, 6))

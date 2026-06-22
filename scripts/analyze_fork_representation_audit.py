@@ -199,6 +199,37 @@ def within_role_deltas(X: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return X.astype(np.float64) - X[perm].astype(np.float64)
 
 
+SURFACE_KEYS = ("length_diff", "char_dissim", "token_overlap", "number_diff",
+                "numbers_changed", "operator_changed")
+
+
+def surface_design_matrix(surf: list[dict]) -> np.ndarray:
+    """(n, k+1) standardized surface features with an intercept column."""
+    S = np.array([[s[k] for k in SURFACE_KEYS] for s in surf], dtype=np.float64)
+    Sz = (S - S.mean(0)) / (S.std(0) + 1e-9)
+    return np.column_stack([np.ones(len(Sz)), Sz])
+
+
+def surface_residualize(D: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """Remove the linear component of each Delta dim explained by surface features.
+
+    D_resid = D - X (X^+ D). X is the design matrix from surface_design_matrix.
+    This is the matched-fork analogue of the REPORT S15.3 length+position
+    residualization: if the correctness direction is genuinely non-surface, the
+    probe ordering and mu_D / w alignment should mostly survive.
+    """
+    beta, *_ = np.linalg.lstsq(X, D, rcond=None)
+    return D - X @ beta
+
+
+def minimal_edit_mask(surf: list[dict], q: float = 0.5) -> np.ndarray:
+    """Keep forks where pos/neg differ minimally: high token_overlap AND small
+    |length_diff| (both past the q-quantile). Surface-controlled by construction."""
+    tok = np.array([s["token_overlap"] for s in surf], dtype=np.float64)
+    ld = np.abs(np.array([s["length_diff"] for s in surf], dtype=np.float64))
+    return (tok >= np.quantile(tok, q)) & (ld <= np.quantile(ld, 1.0 - q))
+
+
 def uncentered_pc1(D: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """First UNCENTERED right singular vector of D, plus centered PCA scores (3 comps)."""
     U, S, Vt = np.linalg.svd(D, full_matrices=False)
@@ -497,7 +528,7 @@ def main() -> None:
             "P_neg_gt_pos": float(np.mean(margin > 0)),
             "mean_margin": float(margin.mean()),
             "median_margin": float(np.median(margin)),
-            "auc_pooled": _auc(sp, sn),
+            "auc_pooled": _auc(sn, sp),   # neg = label-1 class, pos = label-0
         }
         if not args.no_plots:
             plot_probe_axis(sp, sn, out / "plots")
@@ -619,6 +650,36 @@ def main() -> None:
         metrics["controls"]["fake_cos_muD_w"] = cosine(Dfake.mean(0), w)
         metrics["controls"]["labelswap_margin_flips"] = bool(
             np.all(np.sign((-D) @ w) == -np.sign(D @ w + 1e-12)))
+
+    # ---- 5b. surface residualization + minimal-edit subset (zero-cost, reuses D)
+    # Does the matched-Delta signal survive removing the inter-sibling length/lexical
+    # difference? If correctness is non-surface, mu_D/w alignment and the paired probe
+    # ordering should mostly hold (cf. REPORT S15.3, where 87% of the lift survived).
+    Xsurf = surface_design_matrix(surf)
+    D_res = surface_residualize(D, Xsurf)
+    mu_res = D_res.mean(0)
+    res = {"common_energy": common_energy(D_res),
+           "cos_muRes_w": cosine(mu_res, w) if w is not None else None,
+           "true_over_fake_energy": (common_energy(D_res) /
+               common_energy(fake_unmatched_deltas(Hp, Hn, rng)) if w is not None else None)}
+    if w is not None:
+        res["P_neg_gt_pos_resid"] = float(np.mean((D_res @ w) > 0))
+        res["margin_retained_vs_raw"] = float(np.mean((D_res @ w) > 0) - np.mean((D @ w) > 0))
+    metrics["residualized_surface"] = res
+
+    me_mask = minimal_edit_mask(surf, q=0.5)
+    n_me = int(me_mask.sum())
+    me = {"n_kept": n_me, "frac_kept": float(me_mask.mean())}
+    if n_me >= 20:
+        Dme = D[me_mask]
+        me["common_energy"] = common_energy(Dme)
+        me["cos_muD_w"] = cosine(Dme.mean(0), w) if w is not None else None
+        if w is not None:
+            me["P_neg_gt_pos"] = float(np.mean((Dme @ w) > 0))
+    metrics["minimal_edit"] = me
+    print(f"[audit] residualized: cos(muRes,w)={res.get('cos_muRes_w') or float('nan'):.3f} "
+          f"P(neg>pos)_resid={res.get('P_neg_gt_pos_resid', float('nan')):.3f}  |  "
+          f"minimal-edit n={n_me} cos(muD,w)={me.get('cos_muD_w') or float('nan'):.3f}")
 
     # surface confound correlations
     conf = _surface_confounds(surf, wmargin, delta_norm, pca_scores[:, 0], cos_mu, w is not None)
@@ -799,6 +860,26 @@ def _write_summary(out, args, metrics, triples, sig_rows, sim, items, has_probe)
     verdict = "GREEN LIGHT" if n_pass >= max(3, len(rows) - 1) else "WEAK / HOLD"
     L.append(f"\n**{n_pass}/{len(rows)} criteria pass -> {verdict}** for the L20 multilayer re-encode. "
              "Cross-size margin correlation is evaluated separately by the aggregator.\n")
+
+    rs = metrics.get("residualized_surface")
+    me = metrics.get("minimal_edit")
+    if rs:
+        L.append("## Surface control: is the matched signal real or lexical?\n")
+        L.append("Removing the inter-sibling length/lexical difference from every Delta "
+                 "(REPORT S15.3 analogue). If correctness is non-surface, the paired ordering "
+                 "and mu/w alignment mostly survive; if it collapses, the matched signal was "
+                 "mostly surface.\n")
+        if has_probe:
+            L.append(f"- **P(neg>pos) after residualization: {rs['P_neg_gt_pos_resid']:.3f}** "
+                     f"(raw {metrics['probe']['P_neg_gt_pos']:.3f}, "
+                     f"delta {rs['margin_retained_vs_raw']:+.3f}).")
+            L.append(f"- cos(mu_resid, w) = {rs['cos_muRes_w']:.3f} (raw {c.get('cos_muD_w', float('nan')):.3f}).")
+        L.append(f"- residualized common energy = {rs['common_energy']:.4f}.")
+        if me and "P_neg_gt_pos" in me:
+            L.append(f"- **minimal-edit subset** (n={me['n_kept']}, high token-overlap + small "
+                     f"|length_diff|): P(neg>pos)={me['P_neg_gt_pos']:.3f}, "
+                     f"cos(mu_D,w)={me['cos_muD_w']:.3f}.")
+        L.append("")
 
     L.append("## Selected forks (qualitative)\n")
     L.append("Most-typical (high cos(delta, mu_D)) and most-atypical (low) forks; "

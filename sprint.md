@@ -122,6 +122,35 @@ invisible to any variance- or neighborhood-based embedding. The natural balanced
 for the deferred SAE stage. Only a learned sparse basis can give this direction its own coordinate
 and make it discrete, interpretable, and clusterable.
 
+**Representation analysis & figures (REPORT §15).** The geometry is the payload of this stage; the
+plots make the "decodable-but-invisible" paradox concrete. Each is in `results/prm800k_layers/`
+(gitignored), cross-referenced to the REPORT subsection that reads it.
+
+- `layer_decodability.png` (§15.2) — last vs first token decodability across L11–L28. Shows last-token
+  peak at **L20 = 0.742** plateauing to the final layer, first-token flat ~0.68. This is *why* the
+  readout switched to last-token (never first) and to L20 over L28.
+- `probe_anatomy/anatomy_L20_last.png` (+ L20_first, L28_last, L28_first) (§15.3–15.4) — the confound
+  audit and variance breakdown. Visualizes that the margin is **direction not magnitude** (cosine 0.766
+  > full 0.742 > raw-norm 0.556), survives length+position residualization (0.711, ~87% of lift is
+  content), and that the probe direction holds only **0.4/3,584 variance (0.01%)** with class means
+  **d'=1.19** apart — heavy-overlap shift, not two blobs.
+- `minimal_subspace/minimal_subspace.png` (§15.5) — the L1 sparse probe keeps **235/3,584 dims (6.6%)**
+  at full accuracy (0.747, generalizes 0.733 train→test), yet those discriminative dims map in 2D at
+  0.660 vs a shuffled null of 0.654. The "minimal separating set exists but still won't cluster" panel:
+  a distributed linear direction, not localizable "error neurons."
+- `supervised_view_L20_last.png` (§15.4) — the resolution of the paradox: a *supervised* projection
+  onto the probe axis shows the class shift plainly, while UMAP/PCA spend both axes on the 99.99% of
+  variance (topic/problem/length) orthogonal to correctness and show nothing.
+
+**Interpretation (why this matters for the program).** Correctness at this readout is a genuine but
+low-variance (0.01%), low-effect (d'≈1.2) **linear direction** — linearly decodable to ~0.74 yet
+invisible to every variance- or neighborhood-based embedding, for *any* (layer, token). That is the
+sharpest motivation yet for the deferred SAE stage: only a learned sparse basis can allocate a
+dedicated coordinate to a 0.01%-variance direction and turn this margin into discrete, interpretable,
+clusterable features. Two readout fixes are now locked in for all downstream S3 work: last-token (or
+mean-pool) over first, and L20 over the final layer. Caveats: residualization removes only *linear*
+confound, and the 6k held-out set is the artificial rating ±1 balanced extremes (optimistic ceiling).
+
 Artifacts: `scripts/analysis/s3_prm800k_layer_projection.py`, `s3_prm800k_probe_anatomy.py`,
 `s3_prm800k_minimal_subspace.py`, `s3_prm800k_supervised_view.py`; encode
 `scripts/encode_prm800k_multitoken_multilayer.py` (+ merge); outputs under `results/prm800k_layers/`

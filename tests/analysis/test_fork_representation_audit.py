@@ -126,6 +126,25 @@ def test_surface_residualize_removes_length_component():
     assert np.var(D_res[:, 0]) < 0.1 * np.var(D[:, 0])
 
 
+def test_surface_residualize_preserves_mean_when_surface_uncorrelated():
+    # Surface uncorrelated with the margin -> residualization must NOT remove the
+    # directional signal (guards against the intercept/mean-removal artifact).
+    rng = np.random.default_rng(11)
+    n, H = 400, 32
+    w = np.zeros(H); w[0] = 1.0
+    D = rng.normal(size=(n, H)); D[:, 0] += 0.7      # consistent shift along w
+    surf = [{"length_diff": float(rng.normal()), "char_dissim": float(rng.normal()),
+             "token_overlap": float(rng.normal()), "number_diff": float(rng.normal()),
+             "numbers_changed": float(rng.normal()), "operator_changed": float(rng.normal()),
+             "neg_has_final": 0, "pos_has_final": 0} for _ in range(n)]
+    X = fa.surface_design_matrix(surf)
+    D_res = fa.surface_residualize(D, X)
+    p_raw = np.mean((D @ w) > 0)
+    p_res = np.mean((D_res @ w) > 0)
+    assert abs(p_res - p_raw) < 0.05                 # margin survives (was 0.5 with the bug)
+    assert (D_res @ w).mean() > 0.4                  # mu_D preserved
+
+
 def test_minimal_edit_mask_keeps_similar_pairs():
     surf = [{"token_overlap": ov, "length_diff": ld}
             for ov, ld in [(0.9, 1), (0.2, 50), (0.95, 0), (0.1, 80), (0.8, 2)]]

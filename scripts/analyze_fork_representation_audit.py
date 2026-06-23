@@ -211,15 +211,18 @@ def surface_design_matrix(surf: list[dict]) -> np.ndarray:
 
 
 def surface_residualize(D: np.ndarray, X: np.ndarray) -> np.ndarray:
-    """Remove the linear component of each Delta dim explained by surface features.
+    """Remove the surface-explained variation from each Delta dim, PRESERVING mu_D.
 
-    D_resid = D - X (X^+ D). X is the design matrix from surface_design_matrix.
-    This is the matched-fork analogue of the REPORT S15.3 length+position
-    residualization: if the correctness direction is genuinely non-surface, the
-    probe ordering and mu_D / w alignment should mostly survive.
+    X = [intercept, standardized surface...] from surface_design_matrix. We fit the
+    full model but subtract only the surface columns' contribution (beta[1:]), NOT
+    the intercept. Subtracting the intercept too would mean-center every dim and so
+    strip mu_D -- the consistent displacement that *is* the directional signal --
+    making P(neg>pos) collapse to ~0.5 regardless of surface (a pure mean-removal
+    artifact). Keeping the mean makes P(neg>pos)_resid answer the intended question:
+    does the directional margin survive removing the surface-correlated variation?
     """
     beta, *_ = np.linalg.lstsq(X, D, rcond=None)
-    return D - X @ beta
+    return D - X[:, 1:] @ beta[1:]
 
 
 def minimal_edit_mask(surf: list[dict], q: float = 0.5) -> np.ndarray:

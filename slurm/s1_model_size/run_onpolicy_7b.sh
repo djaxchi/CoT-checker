@@ -2,9 +2,9 @@
 #SBATCH --job-name=s1ms_onpolicy
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=h100:1
+#SBATCH --gpus-per-node=h100:4
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=0
 #SBATCH --time=04:00:00
 #SBATCH --output=%x-%j.out

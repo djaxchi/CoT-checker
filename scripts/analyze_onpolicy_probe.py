@@ -37,7 +37,41 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.inspect_margin_drivers import auc, load_probe, read_jsonl  # noqa: E402
+# Defined locally (not imported from inspect_margin_drivers) so the analysis has NO
+# matplotlib dependency: stage 4 must run in any venv, plots are optional/guarded.
+
+
+def read_jsonl(path) -> list[dict]:
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+def load_probe(path, hidden_dim: int):
+    import torch
+    obj = torch.load(path, map_location="cpu")
+    state = obj.get("state_dict", obj) if isinstance(obj, dict) else obj
+    wkey = next(k for k in state if k.endswith("fc.weight") or k.endswith("weight"))
+    bkey = next((k for k in state if k.endswith("fc.bias") or k.endswith("bias")), None)
+    w = np.asarray(state[wkey], dtype=np.float64).reshape(-1)
+    if w.shape[0] != hidden_dim:
+        raise ValueError(f"probe dim {w.shape[0]} != hidden {hidden_dim}")
+    b = float(np.asarray(state[bkey]).reshape(-1)[0]) if bkey else 0.0
+    return w, b
+
+
+def auc(score: np.ndarray, label: np.ndarray) -> float:
+    """AUC of score for the positive class label==1 (incorrect)."""
+    order = np.argsort(score)
+    ranks = np.empty(len(score)); ranks[order] = np.arange(1, len(score) + 1)
+    n1 = label.sum(); n0 = len(label) - n1
+    if n1 == 0 or n0 == 0:
+        return float("nan")
+    return float((ranks[label == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
 def bootstrap_auc_ci(score, label, n_boot=2000, seed=0):

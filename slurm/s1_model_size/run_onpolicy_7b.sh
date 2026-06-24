@@ -6,8 +6,10 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=04:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=%x-%j.out
+# Time is deliberately tight (smoke = ~7 min; full 300x4 ~= 75 min) so the job
+# schedules fast. For a larger run override on submit: sbatch --time=HH:MM:SS ...
 #
 # Stage 1 (decisive control): generate the model's OWN reasoning steps, grade them by
 # final-answer match, encode them in the probe's readout, and test whether the probe

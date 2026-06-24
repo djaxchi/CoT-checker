@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Stage 1 verdict: does the probe separate the model's OWN correct vs incorrect steps?
+
+Takes the encoded on-policy step items (encode_prm800k_forks.py over the
+generate_onpolicy_steps.py output) plus, optionally, their confidence sidecar, and the
+probe, then reports whether the probe separates steps of correct vs incorrect
+trajectories among on-policy generations (where perplexity is uniformly low).
+
+Two readouts:
+  - STEP-level AUC: pooled steps, label = trajectory-incorrect, with a bootstrap CI.
+  - TRAJECTORY-level AUC: mean probe score per trajectory vs its correctness (less
+    label noise than the per-step outcome label).
+
+The decisive sanity it also prints: on-policy generated steps should have much LOWER
+NLL than the human fork negatives -- confirming the perplexity confound really is
+removed in this experiment.
+
+Inputs:
+  --h           encoded on-policy items hidden states (_h.npy)
+  --meta        their _meta.jsonl (carries role/label/fork_id via item passthrough)
+  --items       {stem}_items.jsonl from generate_onpolicy_steps.py (labels + traj id)
+  --probe       linear_probe.pt
+  [--confidence onpolicy confidence sidecar jsonl]
+  [--fork_neg_confidence fork confidence jsonl, for the NLL contrast]
+  --out         output dir
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from scripts.inspect_margin_drivers import auc, load_probe, read_jsonl  # noqa: E402
+
+
+def bootstrap_auc_ci(score, label, n_boot=2000, seed=0):
+    rng = np.random.default_rng(seed)
+    n = len(label)
+    aucs = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        l = label[idx]
+        if l.sum() == 0 or l.sum() == n:
+            continue
+        aucs.append(auc(score[idx], l))
+    if not aucs:
+        return float("nan"), float("nan")
+    return float(np.percentile(aucs, 2.5)), float(np.percentile(aucs, 97.5))
+
+
+def trajectory_scores(fork_ids, score, label):
+    """Mean probe score per trajectory and its (constant) correctness label."""
+    by: dict[str, list] = {}
+    for fid, s, l in zip(fork_ids, score, label):
+        by.setdefault(fid, [[], l])[0].append(s)
+    tids = list(by.keys())
+    tscore = np.array([np.mean(by[t][0]) for t in tids])
+    tlabel = np.array([by[t][1] for t in tids])
+    return tscore, tlabel
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--h", required=True, type=Path)
+    ap.add_argument("--meta", required=True, type=Path)
+    ap.add_argument("--items", required=True, type=Path)
+    ap.add_argument("--probe", required=True, type=Path)
+    ap.add_argument("--confidence", type=Path, default=None)
+    ap.add_argument("--fork_neg_confidence", type=Path, default=None)
+    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--no_plots", action="store_true")
+    args = ap.parse_args()
+    (args.out / "plots").mkdir(parents=True, exist_ok=True)
+
+    H = np.load(args.h).astype(np.float64)
+    meta = read_jsonl(args.meta)
+    items = {it["item_uid"]: it for it in read_jsonl(args.items)}
+    w, b = load_probe(args.probe, H.shape[1])
+
+    rows = [m for m in meta if items.get(m["item_uid"]) is not None]
+    idx = np.array([m["row"] for m in rows])
+    label = np.array([int(items[m["item_uid"]]["label"]) for m in rows])
+    fork_ids = [items[m["item_uid"]]["fork_id"] for m in rows]
+    score = H[idx] @ w + b
+    n = len(rows)
+    if label.sum() == 0 or label.sum() == n:
+        sys.exit("[onpolicy] need both correct and incorrect trajectories; "
+                 "got all one class (check generation diversity / temperature).")
+
+    step_auc = auc(score, label)
+    lo, hi = bootstrap_auc_ci(score, label)
+    tscore, tlabel = trajectory_scores(fork_ids, score, label)
+    traj_auc = auc(tscore, tlabel)
+    tlo, thi = bootstrap_auc_ci(tscore, tlabel)
+
+    metrics = {
+        "n_steps": int(n),
+        "n_trajectories": int(len(tlabel)),
+        "incorrect_step_rate": float(label.mean()),
+        "incorrect_traj_rate": float(tlabel.mean()),
+        "step_auc": round(step_auc, 4),
+        "step_auc_ci95": [round(lo, 4), round(hi, 4)],
+        "trajectory_auc": round(traj_auc, 4),
+        "trajectory_auc_ci95": [round(tlo, 4), round(thi, 4)],
+    }
+
+    # perplexity-removed sanity: on-policy NLL vs fork negatives
+    if args.confidence is not None and args.confidence.exists():
+        crows = [r for r in read_jsonl(args.confidence) if r.get("nll_mean") is not None]
+        on_nll = np.array([r["nll_mean"] for r in crows], dtype=float)
+        metrics["onpolicy_nll_mean"] = round(float(on_nll.mean()), 4)
+        if args.fork_neg_confidence is not None and args.fork_neg_confidence.exists():
+            frows = [r for r in read_jsonl(args.fork_neg_confidence)
+                     if r.get("role") == "negative" and r.get("nll_mean") is not None]
+            neg_nll = np.array([r["nll_mean"] for r in frows], dtype=float)
+            metrics["fork_negative_nll_mean"] = round(float(neg_nll.mean()), 4)
+            metrics["nll_drop_onpolicy_vs_fork_neg"] = round(
+                float(neg_nll.mean() - on_nll.mean()), 4)
+
+    (args.out / "metrics.json").write_text(json.dumps(metrics, indent=2))
+
+    verdict = ("probe SEPARATES the model's own correct/incorrect steps "
+               "(correctness signal, not surprise/distribution)"
+               if traj_auc > 0.6 else
+               "probe does NOT separate on-policy steps -> may be a distribution detector")
+    L = [f"# Stage 1: probe on the model's OWN generations\n",
+         f"- on-policy steps: {n}  ({label.mean():.1%} from incorrect trajectories)",
+         f"- trajectories: {len(tlabel)}  ({tlabel.mean():.1%} incorrect)\n",
+         f"## Does the probe separate correct vs incorrect (low-perplexity) own steps?",
+         f"- **step-level AUC = {step_auc:.3f}**  (95% CI {lo:.3f}-{hi:.3f})",
+         f"- **trajectory-level AUC = {traj_auc:.3f}**  (95% CI {tlo:.3f}-{thi:.3f})",
+         f"\n-> {verdict}\n"]
+    if "nll_drop_onpolicy_vs_fork_neg" in metrics:
+        L += ["## Perplexity-removed sanity (the manipulation worked)",
+              f"- on-policy step NLL = {metrics['onpolicy_nll_mean']:.3f} nats",
+              f"- fork *negative* NLL = {metrics['fork_negative_nll_mean']:.3f} nats",
+              f"- drop = {metrics['nll_drop_onpolicy_vs_fork_neg']:+.3f}  "
+              "(own steps are far less surprising, yet the probe still separates them)\n"]
+    L += ["## Caveat",
+          "Outcome labels are trajectory-level (a wrong-answer solution may contain "
+          "correct early steps), so the step-level AUC is a lower bound; the "
+          "trajectory-mean AUC has less label noise."]
+    (args.out / "onpolicy_report.md").write_text("\n".join(L))
+
+    if not args.no_plots:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            GREEN, RED = "#2c7fb8", "#e6550d"
+            fig, ax = plt.subplots(figsize=(6.5, 4.5))
+            ax.hist(tscore[tlabel == 0], bins=30, alpha=0.6, color=GREEN, label="correct traj")
+            ax.hist(tscore[tlabel == 1], bins=30, alpha=0.6, color=RED, label="incorrect traj")
+            ax.set_xlabel("mean probe score (higher=incorrect)")
+            ax.set_title(f"on-policy trajectory scores (AUC {traj_auc:.3f})")
+            ax.legend(); fig.tight_layout()
+            fig.savefig(args.out / "plots" / "onpolicy_traj_scores.png", dpi=150)
+            plt.close(fig)
+        except Exception as e:
+            print(f"[onpolicy] plot skipped: {e}")
+
+    print(f"[onpolicy] step AUC {step_auc:.3f} ({lo:.3f}-{hi:.3f})  "
+          f"traj AUC {traj_auc:.3f} ({tlo:.3f}-{thi:.3f})")
+    print(f"[onpolicy] -> {verdict}")
+    print(f"[onpolicy] wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()

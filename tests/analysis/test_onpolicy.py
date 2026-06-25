@@ -86,3 +86,59 @@ def test_bootstrap_ci_brackets_true_auc():
     lo, hi = ana.bootstrap_auc_ci(score, label, n_boot=500)
     assert lo < point < hi
     assert lo > 0.5            # clearly-separated signal stays above chance
+
+
+# --------------------------------------------------------------------------- #
+# F1 at a threshold (headline metric): oracle, val-selected, trivial baseline
+# --------------------------------------------------------------------------- #
+
+def test_oracle_f1_perfectly_separable_is_one():
+    score = np.array([0.0, 0.1, 0.2, 0.9, 1.0, 1.1])
+    label = np.array([0, 0, 0, 1, 1, 1])
+    f1, thr, prec, rec = ana.oracle_f1(score, label)
+    assert f1 == pytest.approx(1.0)
+    assert prec == pytest.approx(1.0) and rec == pytest.approx(1.0)
+    # threshold lands on the lowest positive score (rule is score >= thr)
+    assert 0.2 < thr <= 0.9
+
+
+def test_oracle_f1_matches_bruteforce():
+    rng = np.random.default_rng(3)
+    score = rng.normal(0, 1, 200)
+    label = (rng.random(200) < 0.4).astype(int)
+    f1_vec, _, _, _ = ana.oracle_f1(score, label)
+    best = 0.0
+    for t in np.unique(score):
+        f1, _, _ = ana._f1_at(score, label, t)
+        best = max(best, f1)
+    assert f1_vec == pytest.approx(best, abs=1e-9)
+
+
+def test_oracle_f1_beats_trivial_when_signal_present():
+    # separable signal -> oracle F1 should clear the predict-all-positive strawman
+    rng = np.random.default_rng(1)
+    n = 300
+    label = np.r_[np.zeros(n // 2), np.ones(n // 2)].astype(int)
+    score = np.r_[rng.normal(0, 1, n // 2), rng.normal(3, 1, n // 2)]
+    f1, _, _, _ = ana.oracle_f1(score, label)
+    trivial = 2 * label.mean() / (1 + label.mean())
+    assert f1 > trivial
+
+
+def test_val_selected_f1_freezes_threshold_on_held_out_half():
+    rng = np.random.default_rng(2)
+    n = 400
+    label = np.r_[np.zeros(n // 2), np.ones(n // 2)].astype(int)
+    score = np.r_[rng.normal(0, 1, n // 2), rng.normal(3, 1, n // 2)]
+    f1_test, thr, prec, rec, f1_val = ana.val_selected_f1(score, label)
+    assert 0.0 <= f1_test <= 1.0 and 0.0 <= f1_val <= 1.0
+    # honest (held-out) F1 should not exceed the oracle ceiling on the same data
+    oracle, _, _, _ = ana.oracle_f1(score, label)
+    assert f1_test <= oracle + 1e-9
+
+
+def test_f1_helpers_handle_degenerate_single_class():
+    score = np.array([0.1, 0.2, 0.3])
+    label = np.array([0, 0, 0])
+    f1, thr, p, r = ana.oracle_f1(score, label)
+    assert np.isnan(f1)

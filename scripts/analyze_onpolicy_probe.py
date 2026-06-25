@@ -74,6 +74,54 @@ def auc(score: np.ndarray, label: np.ndarray) -> float:
     return float((ranks[label == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
 
 
+def _f1_at(score, label, thr):
+    """F1/precision/recall for the rule 'predict incorrect (1) iff score >= thr'."""
+    pred = (score >= thr).astype(int)
+    tp = int(((pred == 1) & (label == 1)).sum())
+    fp = int(((pred == 1) & (label == 0)).sum())
+    fn = int(((pred == 0) & (label == 1)).sum())
+    if tp == 0:
+        return 0.0, 0.0, 0.0
+    prec = tp / (tp + fp); rec = tp / (tp + fn)
+    return 2 * prec * rec / (prec + rec), prec, rec
+
+
+def oracle_f1(score, label):
+    """Max-F1 threshold on this set (a ceiling; peeks at labels). Vectorized sweep.
+
+    Returns (f1, thr, precision, recall) where the rule is score >= thr -> incorrect.
+    """
+    order = np.argsort(-score)
+    l = label[order].astype(float)
+    P = l.sum()
+    if P == 0 or P == len(l):
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    tp = np.cumsum(l)
+    fp = np.cumsum(1 - l)
+    prec = tp / (tp + fp)
+    rec = tp / P
+    f1 = np.where(tp > 0, 2 * prec * rec / (prec + rec + 1e-12), 0.0)
+    k = int(np.argmax(f1))
+    thr = float(score[order][k])
+    return float(f1[k]), thr, float(prec[k]), float(rec[k])
+
+
+def val_selected_f1(score, label, seed=0):
+    """Pick the F1-max threshold on a random val half, evaluate F1 on the test half.
+
+    Returns (f1_test, thr, precision_test, recall_test, f1_val). The deployable number.
+    """
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(label))
+    half = len(label) // 2
+    vi, ti = perm[:half], perm[half:]
+    if label[vi].sum() in (0, len(vi)) or label[ti].sum() in (0, len(ti)):
+        return (float("nan"),) * 5
+    f1_val, thr, _, _ = oracle_f1(score[vi], label[vi])
+    f1_t, p_t, r_t = _f1_at(score[ti], label[ti], thr)
+    return f1_t, thr, p_t, r_t, f1_val
+
+
 def bootstrap_auc_ci(score, label, n_boot=2000, seed=0):
     rng = np.random.default_rng(seed)
     n = len(label)
@@ -134,11 +182,27 @@ def main() -> None:
     traj_auc = auc(tscore, tlabel)
     tlo, thi = bootstrap_auc_ci(tscore, tlabel)
 
+    # Headline metric (per Djalil): F1 at a threshold. Oracle = ceiling (peeks at
+    # labels); val-selected = deployable (threshold frozen on a val half). F1 is NOT
+    # prevalence-invariant, so only compare it across runs at the SAME base rate.
+    s_orf1, s_orthr, s_orp, s_orr = oracle_f1(score, label)
+    s_vf1, s_vthr, s_vp, s_vr, _ = val_selected_f1(score, label)
+    t_orf1, t_orthr, t_orp, t_orr = oracle_f1(tscore, tlabel)
+    t_vf1, t_vthr, t_vp, t_vr, _ = val_selected_f1(tscore, tlabel)
+
     metrics = {
         "n_steps": int(n),
         "n_trajectories": int(len(tlabel)),
         "incorrect_step_rate": float(label.mean()),
         "incorrect_traj_rate": float(tlabel.mean()),
+        "step_f1_oracle": round(s_orf1, 4),
+        "step_f1_oracle_pr": [round(s_orp, 4), round(s_orr, 4)],
+        "step_f1_valselected": round(s_vf1, 4),
+        "step_f1_valselected_pr": [round(s_vp, 4), round(s_vr, 4)],
+        "trajectory_f1_oracle": round(t_orf1, 4),
+        "trajectory_f1_oracle_pr": [round(t_orp, 4), round(t_orr, 4)],
+        "trajectory_f1_valselected": round(t_vf1, 4),
+        "trajectory_f1_valselected_pr": [round(t_vp, 4), round(t_vr, 4)],
         "step_auc": round(step_auc, 4),
         "step_auc_ci95": [round(lo, 4), round(hi, 4)],
         "trajectory_auc": round(traj_auc, 4),
@@ -158,6 +222,12 @@ def main() -> None:
             metrics["nll_drop_onpolicy_vs_fork_neg"] = round(
                 float(neg_nll.mean() - on_nll.mean()), 4)
 
+    # trivial "predict-all-incorrect" F1 = 2*br/(1+br): the strawman F1 must beat.
+    step_triv = 2 * label.mean() / (1 + label.mean())
+    traj_triv = 2 * tlabel.mean() / (1 + tlabel.mean())
+    metrics["step_f1_trivial_allpos"] = round(float(step_triv), 4)
+    metrics["trajectory_f1_trivial_allpos"] = round(float(traj_triv), 4)
+
     (args.out / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
     verdict = ("probe SEPARATES the model's own correct/incorrect steps "
@@ -168,8 +238,13 @@ def main() -> None:
          f"- on-policy steps: {n}  ({label.mean():.1%} from incorrect trajectories)",
          f"- trajectories: {len(tlabel)}  ({tlabel.mean():.1%} incorrect)\n",
          f"## Does the probe separate correct vs incorrect (low-perplexity) own steps?",
-         f"- **step-level AUC = {step_auc:.3f}**  (95% CI {lo:.3f}-{hi:.3f})",
-         f"- **trajectory-level AUC = {traj_auc:.3f}**  (95% CI {tlo:.3f}-{thi:.3f})",
+         f"Headline = F1 (pos=incorrect). Trivial 'predict-all-incorrect' baseline must be beaten.\n",
+         f"| level | F1 val-selected | F1 oracle | trivial all-pos | AUC (95% CI) |",
+         f"|---|---|---|---|---|",
+         f"| step | **{s_vf1:.3f}** (P {s_vp:.2f}/R {s_vr:.2f}) | {s_orf1:.3f} | "
+         f"{step_triv:.3f} | {step_auc:.3f} ({lo:.3f}-{hi:.3f}) |",
+         f"| trajectory | **{t_vf1:.3f}** (P {t_vp:.2f}/R {t_vr:.2f}) | {t_orf1:.3f} | "
+         f"{traj_triv:.3f} | {traj_auc:.3f} ({tlo:.3f}-{thi:.3f}) |",
          f"\n-> {verdict}\n"]
     if "nll_drop_onpolicy_vs_fork_neg" in metrics:
         L += ["## Perplexity-removed sanity (the manipulation worked)",
@@ -200,8 +275,9 @@ def main() -> None:
         except Exception as e:
             print(f"[onpolicy] plot skipped: {e}")
 
-    print(f"[onpolicy] step AUC {step_auc:.3f} ({lo:.3f}-{hi:.3f})  "
-          f"traj AUC {traj_auc:.3f} ({tlo:.3f}-{thi:.3f})")
+    print(f"[onpolicy] traj F1 val={t_vf1:.3f} oracle={t_orf1:.3f} "
+          f"trivial={traj_triv:.3f}  (AUC {traj_auc:.3f} {tlo:.3f}-{thi:.3f})")
+    print(f"[onpolicy] step F1 val={s_vf1:.3f} oracle={s_orf1:.3f} trivial={step_triv:.3f}")
     print(f"[onpolicy] -> {verdict}")
     print(f"[onpolicy] wrote {args.out}")
 

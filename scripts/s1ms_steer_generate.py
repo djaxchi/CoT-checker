@@ -79,6 +79,9 @@ def main() -> None:
     p.add_argument("--local_files_only", action="store_true")
     p.add_argument("--run_name", type=str, required=True)
     p.add_argument("--n_samples", type=int, default=4)
+    p.add_argument("--gen_batch", type=int, default=16,
+                   help="problems per generate call; effective batch = gen_batch*n_samples. "
+                        "Bigger = better H100 use until OOM (try 16-32 at 7B).")
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--max_new_tokens", type=int, default=1024)
@@ -122,6 +125,7 @@ def main() -> None:
                                         local_files_only=args.local_files_only)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
+    tok.padding_side = "left"        # left-pad so generated tokens start at a common column
     try:
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path, local_files_only=args.local_files_only, dtype=dtype)
@@ -163,20 +167,18 @@ def main() -> None:
             v = (cond["alpha"] * info["s_layer"]) * u
             steer["vec"] = torch.tensor(v, device=device, dtype=dtype)
 
-    # ---- problems + sharded work units ----------------------------------
+    # ---- problems, sharded BY PROBLEM, batched generation ---------------
     problems = unique_problems(read_jsonl(args.fork_items))
     if args.max_problems > 0:
         problems = problems[:args.max_problems]
-    # flat unit index over (condition, problem); this shard takes idx % n_shards == shard_idx
-    units = [(ci, pi) for ci in range(len(conds)) for pi in range(len(problems))]
-    mine = [(ci, pi) for k, (ci, pi) in enumerate(units)
-            if k % args.n_shards == args.shard_idx]
-    # group by condition to set the hook once per condition
-    by_cond: dict[int, list[int]] = {}
-    for ci, pi in mine:
-        by_cond.setdefault(ci, []).append(pi)
+    # each shard owns a disjoint subset of problems for ALL conditions, and batches them
+    # gen_batch at a time -> a much larger effective batch (gen_batch*n_samples) per H100.
+    my_pis = [pi for pi in range(len(problems)) if pi % args.n_shards == args.shard_idx]
+    chunks = [my_pis[i:i + args.gen_batch] for i in range(0, len(my_pis), args.gen_batch)]
+    n_calls = len(conds) * len(chunks)
     print(f"[gen] shard {args.shard_idx}/{args.n_shards}: {len(conds)} conds x "
-          f"{len(problems)} problems -> {len(mine)} units ({args.n_samples} samples each)",
+          f"{len(my_pis)} problems in {len(chunks)} chunks of <= {args.gen_batch} "
+          f"-> {n_calls} generate calls (effective batch <= {args.gen_batch*args.n_samples})",
           flush=True)
 
     gen_base = dict(max_new_tokens=args.max_new_tokens,
@@ -190,34 +192,37 @@ def main() -> None:
     rows: list[dict] = []
     t0 = time.perf_counter()
     done = 0
-    for ci in sorted(by_cond):
-        cond = conds[ci]
+    for cond in conds:
         set_condition(cond)
-        for pi in by_cond[ci]:
-            prob = problems[pi]
-            enc = tok(build_prompt(prob["problem"]), return_tensors="pt").to(device)
-            plen = enc["input_ids"].shape[1]
-            torch.manual_seed(args.seed + pi)        # fixed per-problem -> paired across conds
+        for chunk in chunks:
+            prompts = [build_prompt(problems[pi]["problem"]) for pi in chunk]
+            enc = tok(prompts, return_tensors="pt", padding=True).to(device)
+            plen = enc["input_ids"].shape[1]         # left-padded: prompts end at plen-1
+            # seed depends only on the chunk (stable across conditions) -> baseline-paired
+            torch.manual_seed(args.seed + chunk[0])
             with torch.no_grad():
                 gen = model.generate(**enc, **gen_base)
-            for s in range(gen.shape[0]):
-                new_ids = gen[s, plen:]
-                text = tok.decode(new_ids, skip_special_tokens=True)
-                g = grade(text, prob["ground_truth_answer"])
-                rows.append({
-                    "cond_id": cond["cond_id"], "layer": cond["layer"],
-                    "direction": cond["direction"], "alpha": cond["alpha"],
-                    "fork_id": prob["fork_id"], "sample_idx": s,
-                    "pred": g["pred"], "correct": bool(g["correct"]),
-                    "gradeable": bool(g["gradeable"]),
-                    "gen_len": int((new_ids != tok.pad_token_id).sum().item()),
-                    "n_steps": len(split_into_steps(text)),
-                    "solution": text,
-                })
+            # row b*n_samples + s -> problem chunk[b], sample s
+            for bi, pi in enumerate(chunk):
+                prob = problems[pi]
+                for s in range(args.n_samples):
+                    new_ids = gen[bi * args.n_samples + s, plen:]
+                    text = tok.decode(new_ids, skip_special_tokens=True)
+                    g = grade(text, prob["ground_truth_answer"])
+                    rows.append({
+                        "cond_id": cond["cond_id"], "layer": cond["layer"],
+                        "direction": cond["direction"], "alpha": cond["alpha"],
+                        "fork_id": prob["fork_id"], "sample_idx": s,
+                        "pred": g["pred"], "correct": bool(g["correct"]),
+                        "gradeable": bool(g["gradeable"]),
+                        "gen_len": int((new_ids != tok.pad_token_id).sum().item()),
+                        "n_steps": len(split_into_steps(text)),
+                        "solution": text,
+                    })
             done += 1
-            if done % 25 == 0:
+            if done % 10 == 0 or done == n_calls:
                 gr = np.mean([r["correct"] for r in rows]) if rows else 0.0
-                print(f"[gen] {done}/{len(mine)} units  ({time.perf_counter()-t0:.0f}s)  "
+                print(f"[gen] {done}/{n_calls} calls  ({time.perf_counter()-t0:.0f}s)  "
                       f"rolling correct-rate={gr:.3f}", flush=True)
 
     with open(out_path, "w", encoding="utf-8") as f:

@@ -25,7 +25,9 @@
 #   4. analyze_steer_causality.py  dose-response, paired repair/corrupt, fluency, dense-vs-
 #      sparse, causal-vs-diagnostic -> steer_causality_report.md + PNGs.
 #
-# SMOKE FIRST: N_PROBLEMS=20 ALPHAS_GEN="-2 2" to confirm the harness end-to-end (~10 min).
+# SMOKE / CALIBRATION FIRST: alpha scales by s_layer (~100), so keep it a small fraction.
+#   N_PROBLEMS=20 DIRECTIONS=probe ALPHAS_GEN="-0.4 -0.2 -0.1 -0.05 0.05 0.1 0.2 0.4" \
+#   MAX_NEW_TOKENS=512  -> find the band where P(correct) bends but gradeable stays high.
 # Phase the budget by invoking twice: Phase A DIRECTIONS="probe sparse_restricted" with a
 # full ALPHAS_GEN; Phase B DIRECTIONS="meandiff top_pc random_0 ..." at the +/- peak alphas.
 #
@@ -47,8 +49,11 @@ TAG="${TAG:-qwen2_5_7b}"
 LAYERS="${LAYERS:-20 28}"
 DEPLOYED_LAYER="${DEPLOYED_LAYER:-28}"
 DIRECTIONS="${DIRECTIONS:-}"                 # empty = all directions in the npz
-ALPHAS_TIER0="${ALPHAS_TIER0:-0.5 1 2 4}"   # magnitudes; battery mirrors to +/-
-ALPHAS_GEN="${ALPHAS_GEN:--4 -2 -1 1 2 4}"  # signed; 0 baseline always added
+# alpha is a fraction of the median residual norm s_layer (~100 at 7B/L20), so alpha>=1
+# DOUBLES the residual and destroys generation. Operating range is small fractions; the
+# smoke is a calibration sweep to find where the margin bends but text stays gradeable.
+ALPHAS_TIER0="${ALPHAS_TIER0:-0.05 0.1 0.2 0.4}"                      # magnitudes; +/- mirrored
+ALPHAS_GEN="${ALPHAS_GEN:--0.4 -0.2 -0.1 -0.05 0.05 0.1 0.2 0.4}"     # signed; 0 baseline added
 N_PROBLEMS="${N_PROBLEMS:-150}"
 N_SAMPLES="${N_SAMPLES:-4}"
 TEMPERATURE="${TEMPERATURE:-0.8}"

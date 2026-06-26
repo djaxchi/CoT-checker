@@ -56,6 +56,7 @@ ALPHAS_TIER0="${ALPHAS_TIER0:-0.05 0.1 0.2 0.4}"                      # magnitud
 ALPHAS_GEN="${ALPHAS_GEN:--0.4 -0.2 -0.1 -0.05 0.05 0.1 0.2 0.4}"     # signed; 0 baseline added
 N_PROBLEMS="${N_PROBLEMS:-150}"
 N_SAMPLES="${N_SAMPLES:-4}"
+STEER_SCOPE="${STEER_SCOPE:-generated}"   # generated: steer only decode steps, not the prompt
 TEMPERATURE="${TEMPERATURE:-0.8}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 
@@ -121,7 +122,7 @@ for g in 0 1 2 3; do
       --run_name "s1ms_${TAG}_steergen" \
       --n_samples "$N_SAMPLES" --temperature "$TEMPERATURE" \
       --max_new_tokens "$MAX_NEW_TOKENS" --max_problems "$N_PROBLEMS" \
-      --shard_idx "$g" --n_shards 4 --force \
+      --steer_scope "$STEER_SCOPE" --shard_idx "$g" --n_shards 4 --force \
       2>&1 | tee "$LOG_DIR/steergen_shard${g}.log"
   ) &
   pids+=("$!")

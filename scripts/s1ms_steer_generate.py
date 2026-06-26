@@ -84,6 +84,10 @@ def main() -> None:
     p.add_argument("--max_new_tokens", type=int, default=1024)
     p.add_argument("--max_problems", type=int, default=150)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--steer_scope", choices=["all", "generated"], default="all",
+                   help="all: add the vector at every position every forward (incl. the "
+                        "problem prompt). generated: only at decode steps, leaving the "
+                        "prompt representation untouched (cleaner causal intervention).")
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--n_shards", type=int, default=1)
     p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
@@ -128,14 +132,18 @@ def main() -> None:
     model = model.to(device).eval()
     layers = get_decoder_layers(model)
 
-    steer = {"vec": None}
+    steer = {"vec": None, "scope": args.steer_scope}
 
     def hook(_m, _i, out):
         if steer["vec"] is None:
             return out
-        if isinstance(out, tuple):
-            return (out[0] + steer["vec"],) + tuple(out[1:])
-        return out + steer["vec"]
+        o = out[0] if isinstance(out, tuple) else out
+        # generated-only: with KV cache, decode steps have seq len 1; the prefill (problem
+        # prompt) is the >1 forward, so skip it and leave the prompt representation untouched.
+        if steer["scope"] == "generated" and o.shape[1] > 1:
+            return out
+        o = o + steer["vec"]
+        return (o,) + tuple(out[1:]) if isinstance(out, tuple) else o
 
     hook_state = {"layer": None, "handle": None}
 
@@ -220,6 +228,7 @@ def main() -> None:
         "shard_idx": args.shard_idx, "n_shards": args.n_shards,
         "n_conditions": len(conds), "n_problems": len(problems),
         "n_samples": args.n_samples, "temperature": args.temperature,
+        "steer_scope": args.steer_scope,
         "max_new_tokens": args.max_new_tokens, "alphas": sorted(set(args.alphas) | {0.0}),
         "directions": directions, "layers": sorted(npz_by_layer),
         "n_rows": len(rows), "created_at": datetime.now(timezone.utc).isoformat(),

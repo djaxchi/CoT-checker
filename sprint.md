@@ -199,6 +199,76 @@ Artifacts: `scripts/eval_prm800k_heldout_probe.py`, `scripts/aggregate_heldout_e
 `scripts/build_prm800k_heldout_test.py --full`; slurm `encode_prm800k_heldout_allsizes_tamia.sh` (+
 CPU-only re-eval `eval_prm800k_fulltest_allsizes_tamia.sh`); table `results/prm800k_test_full_eval/table.csv`.
 
+### Stage 4 findings: what the L28 signal actually encodes — confound elimination (2026-06-25)
+
+Stage 2 located the margin (a 0.01%-variance linear direction); Stage 4 asks *what it is*. Eliminated
+candidate explanations in order, each with an A/B control, on matched PRM800K forks (1000/size,
+anchor/pos/neg sharing a prefix) and then on the model's own generations.
+
+1. **Matched-fork audit.** The supervised margin `w·(h_neg−h_pos)` is real, non-surface, and **scales**:
+   P(neg>pos) 0.686→0.782 (1.5B→32B), survives length+lexical residualization (7B 0.749→0.776) and the
+   surface-matched minimal-edit subset (0.723); surface explains only ~13–20% of margin variance, almost
+   all `length_diff`. Falsified the stronger claim that matched differencing *unsupervisedly* isolates
+   the direction (cos(μ_Δ, w)≈0.07). **L20 multilayer re-encode = NO-GO** (signal already healthy +
+   surface-robust at L28; geometry never isolates correctness at any layer).
+
+2. **Per-step drivers.** Pooled score AUC (0.665→0.736) is **not** length (removing it nudges AUC up),
+   numeric, position, or answer-presence (removing all four drops 7B AUC only 0.699→0.694).
+
+3. **Confidence/perplexity battery — GATE A (PASSED).** Surprise is ruled out harder than length: each
+   of {nll_mean, nll_max, entropy, logit_gap} alone predicts the label at AUC ~0.47–0.56 vs probe 0.699;
+   removing all four moves probe AUC 0.699→0.697 (fraction of lift removed 0.01–0.02 at every size). With
+   scale, raw surprise *drops* (nll_pos 0.860→0.672) while probe AUC *rises* — opposite trends, not the
+   same signal.
+
+4. **On-policy control — GATE B (PASSED).** The forks use human-written negatives, so the probe could be
+   reading "off-distribution human text." Decisive test: the model's **own** generations (uniformly
+   low-perplexity). 7B, 1200 generated trajectories (53.2% incorrect by final-answer match), 11679 steps.
+   On-policy step NLL 0.617 vs fork-negative 0.804 (drop +0.187 nats), yet the probe still separates:
+   **trajectory AUC 0.720 (95% CI 0.691–0.748)**, step AUC 0.615.
+
+**Honest F1 caveat (headline metric is F1 at a threshold).** On this on-policy set F1 is unflattering by
+construction: 53% incorrect makes the trivial predict-all-incorrect F1 = 0.694 (traj) / 0.747 (step).
+Trajectory **oracle** F1 0.728 clears trivial, but the deployable **val-selected** F1 0.686 dips just
+under it, and step F1 = trivial exactly. A 0.72-AUC signal on a near-balanced positive-heavy set cannot
+push max-F1 past the all-positive corner — F1's prevalence-dependence works against the probe here. On
+the natural 25%-incorrect PRM800K test the same probe scores F1 0.58 vs a 0.40 trivial bar (clear win),
+so the deployable F1/reliability headline belongs on the natural distribution, not this balanced set.
+
+**Verdict.** After ruling out length, numeric, position, answer-presence, perplexity/surprise (GATE A)
+**and** off-distribution-ness (GATE B), the residual is **correctness** — genuine, distributed,
+low-variance, scaling. Next: name the direction `w` (logit-lens through `W_U`, per-token DLA, optional
+steering) then the deferred SAE stage; compute the deployable F1/reliability statement on the natural
+held-out test. Writeup REPORT §15.7; artifacts `runs/fork_rep_audit/<tag>/` (gitignored); stage plan
+`~/.claude/plans/piped-wishing-platypus.md`.
+
+### Stage 5 findings: is `w` causal? Additive steering during generation (2026-06-26)
+
+Tested the plan's causal question on 7B: add `+/- alpha * s_layer * w_hat` to the residual at the
+L20 and L28 decoder blocks DURING the model's own generation, grade the final answer, vs matched-norm
+controls. `w_hat` per-layer (L20 trained in-space, L28 deployed), oriented toward correct so
+`alpha>0` should repair / `alpha<0` corrupt. `alpha` is a fraction of median residual norm
+`s_layer~100`. Decode-only steering (prompt untouched), paired to the alpha=0 baseline.
+
+1. **Scale cliff.** `alpha>=1` (vector >= residual norm) destroys generation for every direction:
+   P(correct)->0, gradeable collapses, probe logit hits +/-835. Usable regime is small fractions.
+2. **Readout moves (Tier-0).** Teacher-forced fork margin rises with toward-correct steering (probe
+   0.074->0.441 at alpha+2); the probe logit shifts as expected. The direction is movable.
+3. **Behavior does NOT move (Tier-1).** n=400/cell (100 problems x4, paired), gradeable=1.000,
+   baseline P(correct)=0.375, dP SE~0.03. No antisymmetric repair/corrupt: the faint trend is
+   BACKWARDS (toward-incorrect mildly helps) and <1.5 SE. **probe ≈ random** at every matched alpha
+   (dP within 0.04); at +0.2 probe corrupts MORE (0.267 vs 0.213) and repairs LESS (0.084 vs 0.116)
+   than a random push. Only real effect is direction-agnostic degradation with `|alpha|`.
+
+**Verdict.** ✗ `w` is a **diagnostic readout, not a causal lever** (additive steering, L20/L28, 7B):
+the readout shifts but on-policy correctness does not, and `w` is no better than a random direction.
+Exactly the disambiguation the plan set up. Caveat: falsifies *additive* steering only, NOT activation
+patching (the stronger test; could still flip it). Next: either activation-patching confirmation, or
+pivot to naming `w` (logit-lens/`W_U`, per-token DLA) + SAE stage. Writeup REPORT §15.8; code
+`scripts/{build_steering_directions,s1ms_steer_generate,analyze_steer_causality}.py`,
+`s1ms_steer_forks.py --directions_npz`, `slurm/s1_model_size/run_steer_causality_7b.sh`; artifacts
+`runs/fork_rep_audit/qwen2_5_7b/steer_causality/` (gitignored).
+
 ---
 
 ## S2 — Fork-based representation shaping + model-size scaling (2026-06-05 → 06-09)

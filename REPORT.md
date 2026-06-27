@@ -1053,6 +1053,131 @@ localizable cluster of "error neurons."
   interpretable, clusterable features. Caveats: residualization removes only linear confound (matched
   to the linear probe), and the held-out set is the artificial balanced extremes.
 
+### 15.7 What the direction encodes: ruling out every confound (S3 Stage 4)
+
+§15.1–15.6 established *where* and *how* the correctness margin sits (a 0.01%-variance linear
+direction, last-token, L20≈L28). This stage asks *what it is*: genuine correctness, or a confound the
+linear probe happens to track. We eliminated candidates in order, each with its own A/B control. The
+readout under test throughout is the deployed L28/last DenseLinear probe; the per-step pooled score AUC
+is 0.665→0.736 across Qwen2.5 1.5B→32B.
+
+1. **Matched-fork audit** (`analyze_fork_representation_audit.py`, 1000 PRM800K forks/size,
+   anchor/positive/negative sharing a prefix). The supervised margin `w·(h_neg−h_pos)` is a real,
+   non-surface, **scaling** correctness signal: P(neg>pos) 0.686→0.782 across sizes; it survives
+   residualizing out length+lexical (7B 0.749→0.776) and holds on the surface-matched minimal-edit
+   subset (0.723). Surface explains only ~13–20% of margin variance (ridge CV R², peak 7B 0.205),
+   almost all of it `length_diff`. *Falsified* the audit's own stronger hypothesis that matched
+   differencing **unsupervisedly** isolates the direction (cos(μ_Δ, w)≈0.07 at every size) — same
+   low-variance story as §15.4.
+
+2. **Per-step driver analysis** (`inspect_margin_drivers.py`). The pooled score is **not** length
+   (removing it nudges AUC *up*), and removing length+step_idx+numeric+has_answer together drops 7B AUC
+   only 0.699→0.694. The strongest cheap correlate is `numeric` (partial corr 0.31) but it is
+   label-neutral (corr with label 0.10) — a computational-step modulation, not the correctness signal.
+
+3. **Confidence/perplexity battery — GATE A** (`encode_fork_confidence.py` +
+   `analyze_confidence_battery.py`; the user's prime suspect). Surprise is ruled out harder than length.
+   (i) *Sufficiency:* each of {nll_mean, nll_max, entropy_mean, logit_gap_mean} alone predicts the label
+   at AUC ~0.47–0.56 vs probe 0.699. (ii) *Subsumption:* removing all four moves probe AUC 0.699→0.697
+   (fraction of lift removed 0.01–0.02 at every size). (iii) *No confound:* each feature's corr with the
+   label is tiny (−0.01..+0.09). (iv) *Reverse:* each feature collapses to AUC ~0.45–0.55 once the score
+   is removed. Cleanest tell: with scale, raw surprise **drops** (nll_pos 0.860→0.672) while probe AUC
+   **rises** — opposite trends, so they cannot be the same signal.
+
+4. **On-policy control — GATE B** (`generate_onpolicy_steps.py` → encode → `analyze_onpolicy_probe.py`).
+   The forks still use *human-written* negatives, so the probe could read "off-distribution human text"
+   rather than wrong reasoning. Decisive control: test on the model's **own** generations, which are
+   uniformly low-perplexity by construction. 7B, 1200 generated trajectories (53.2% incorrect by
+   final-answer match), 11679 steps. The manipulation worked — on-policy step NLL 0.617 vs fork-negative
+   NLL 0.804 (drop +0.187 nats) — yet the probe still separates: **trajectory AUC 0.720 (95% CI
+   0.691–0.748)**, step AUC 0.615. Surprise/OOD-text is dead as an explanation.
+
+**The honest F1 caveat (the headline metric).** At a *threshold*, the same on-policy result is
+unflattering, and deliberately so: this set is 53% incorrect, so the trivial "predict-all-incorrect"
+F1 = 2p/(1+p) is already 0.69 (traj) / 0.75 (step). Trajectory **oracle** F1 0.728 clears trivial 0.694,
+but the deployable **val-selected** F1 0.686 dips just *under* it, and step F1 = trivial *exactly*
+(0.747). A 0.72-AUC signal on a near-balanced positive-heavy set cannot push max-F1 far past the
+all-positive corner. F1's prevalence-dependence works against the probe here. On the *natural* PRM800K
+test (§ Stage 3, 25% incorrect) the same probe scores F1 0.58 vs a 0.40 trivial bar — a clear win. So
+the probe is a useful thresholded detector; the on-policy set is the right experiment for the *causal
+dissociation* but the wrong base rate for the *deployable F1 headline*, which belongs on the natural
+distribution.
+
+**Takeaway.** After ruling out length, numeric density, step position, answer-presence, model
+surprise/perplexity (GATE A) **and** off-distribution-ness (GATE B), the residual is correctness. It is
+genuine, distributed, low-variance, and scales with backbone size — the same content §15.4 located
+geometrically. Next: name the direction `w` (logit-lens through `W_U`, per-token DLA, optional steering)
+then the SAE stage; report the deployable F1/reliability statement on the natural held-out test.
+Artifacts under `runs/fork_rep_audit/<tag>/` (gitignored); stage plan
+`~/.claude/plans/piped-wishing-platypus.md`.
+
+### 15.8 Is `w` causal? Activation steering during generation (S3 Stage 5)
+
+§15.7 established that the residual is correctness, distributed and scaling. That is still
+correlational: `w` reads the model's state. Stage 5 asks whether `w` is a causal lever or only a
+diagnostic readout, by the test from the research plan: add `+/- alpha * s_layer * w_hat` to the
+residual stream of Qwen2.5-7B during the model's own generation and measure whether final-answer
+correctness moves with a dose-response, against matched-norm control directions. We inject at the
+decoder block whose output is `hidden_states[L]` for L in {20, 28}: L20 is upstream so layers
+21 to 28 can react (the strong test), L28 is the deployed probe's own space (a shallow readout
+test). `w_hat` is the unit probe direction in each layer's space (L20 trained on the layer cache,
+L28 the deployed probe), oriented toward correct so `alpha > 0` should repair and `alpha < 0`
+should corrupt. `s_layer` is the median residual norm, so `alpha` is a fraction of typical
+residual magnitude. Final answers are graded by `src/eval/math_grade.grade`. Code:
+`scripts/build_steering_directions.py`, `scripts/s1ms_steer_generate.py`,
+`scripts/analyze_steer_causality.py`, and `scripts/s1ms_steer_forks.py --directions_npz` for the
+teacher-forced Tier-0 pre-check; launcher `slurm/s1_model_size/run_steer_causality_7b.sh`.
+
+**Calibration.** `s_layer` at 7B/L20 is about 100. At `alpha = 2` the injected vector exceeds the
+residual norm and destroys generation regardless of direction: P(correct) collapses to ~0, the
+gradeable rate craters, the probe logit is driven to about +/-835 (baseline -1.3), and meandiff at
++2 emits length-3 outputs. The usable regime is small fractions. Steering is applied only at decode
+steps (`--steer_scope generated`), leaving the problem prompt untouched, which removes a
+prompt-corruption confound.
+
+**Tier-0 readout moves.** The teacher-forced fork battery confirms the sign and that the readout is
+movable: steering toward correct raises the fork margin `logp(correct) - logp(incorrect)` (probe
+0.074 at alpha=0 to 0.441 at alpha=+2) and drives the probe logit down. So the direction does shift
+the model's relative preference between pre-written correct and incorrect sibling continuations.
+
+**Tier-1 behavior does not move.** On 100 PRM800K problems x 4 samples (n=400 per cell, paired to
+the alpha=0 baseline by problem and sample index), generated-scope, gradeable=1.000 throughout
+(P(correct) baseline 0.375, dP standard error about 0.03):
+
+| layer | dir | alpha | dP | repair | corrupt |
+|---|---|---|---|---|---|
+| L20 | probe | -0.2 | +0.010 | 0.144 | 0.213 |
+| L20 | probe | -0.1 | +0.010 | 0.104 | 0.147 |
+| L20 | probe | +0.1 | -0.003 | 0.112 | 0.193 |
+| L20 | probe | +0.2 | -0.047 | 0.084 | 0.267 |
+| L20 | random | +0.2 | -0.008 | 0.116 | 0.213 |
+| L28 | probe | -0.1 | +0.023 | 0.132 | 0.160 |
+| L28 | probe | +0.1 | -0.010 | 0.096 | 0.187 |
+| L28 | random | +0.2 | -0.013 | 0.120 | 0.233 |
+
+Three readings, all pointing the same way:
+
+1. **No antisymmetric repair/corrupt pattern.** A causal `w` needs `alpha > 0` to repair and
+   `alpha < 0` to corrupt. The faint trend is the opposite (toward incorrect mildly helps, toward
+   correct mildly hurts: L20 probe +0.2 gives dP -0.047 and the highest corruption 0.267) and every
+   effect is under about 1.5 standard errors.
+2. **probe is indistinguishable from random.** At each matched alpha the probe and a random
+   direction of equal norm differ by at most 0.04 in dP. At +0.2 the probe corrupts slightly more
+   (0.267 vs 0.213) and repairs slightly less (0.084 vs 0.116) than random.
+3. **The only real effect is direction-agnostic degradation.** Larger `|alpha|` raises corruption
+   for both probe and random; that is perturbation, not correctness control. The intermediate
+   `alpha = 0.4` run already showed symmetric degradation (corrupt 0.529 at L20 probe +0.4), so no
+   repair window hides between the clean regime (`|alpha| <= 0.2`) and destruction (`|alpha| >= 1`).
+
+**Verdict.** For additive residual steering at L20 and L28 on 7B, `w` is a **diagnostic readout,
+not a causal variable**: the readout moves (Tier-0 margin and probe logit shift with alpha) while
+on-policy correctness does not, and the probe direction is no more effective than a random push.
+This is exactly the disambiguation the plan set up. Caveat: this falsifies additive steering only.
+It does not test activation patching (swapping the `w`-component between matched correct and
+incorrect runs), which is the stronger causal probe and the one intervention that could still flip
+the verdict. Otherwise the program moves to naming `w` (logit-lens through `W_U`, per-token DLA) and
+the SAE stage. Artifacts under `runs/fork_rep_audit/qwen2_5_7b/steer_causality/` (gitignored).
+
 ---
 
 ## 16. Limitations

@@ -156,6 +156,7 @@ def main() -> None:
                                        "*** SUSPECT: likely wrong layer/hook ***")
         manifest = {
             "layer": L, "sae_folder": folder, "trainer": args.trainer,
+            "sae_id": f"{folder}/trainer_{args.trainer}",
             "k": int(ae.k.item()), "threshold": float(ae.threshold.item()),
             "dict_size": int(ae.dict_size), "activation_dim": int(ae.activation_dim),
             "n": n, "recon_fvu": round(fvu, 4), "fvu_gate": gate,

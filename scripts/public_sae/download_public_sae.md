@@ -153,3 +153,77 @@ in-distribution activations); a layer/indexing mismatch yields FVU near or above
 1.0 and the script flags it loudly. (Our prompt format + last-token-of-step
 readout is mildly OOD vs the SAE's chat/pile training, so a somewhat elevated FVU
 is expected; a *catastrophic* FVU means the pairing or hook is wrong.)
+
+---
+
+## 5. GemmaScope arm (Gemma-2-9B base) — the clean public-SAE test
+
+Why: the Qwen2.5-Instruct SAE reconstructs our last-token deep-layer readout
+poorly (FVU 0.58 at L20, 0.92 at L28) even though it is healthy in-distribution
+(its own eval reports FVU ~0.19 at both layers). Cause: andyrdt filtered
+outlier-norm activations, dropped the first 8 tokens, and pooled over all
+positions; we read the last token at deep layers, where Qwen's massive
+activations live (confirmed: one residual dim holds ~20% of energy; L28 norm is
+3.5x L20). GemmaScope is trained on the full activation distribution over all
+positions, so our readout should be in-distribution. We run dense AND SAE on the
+same Gemma-2-9B base model, so the comparison is matched, and the dense-h row
+also re-establishes that the correctness signal transfers to Gemma.
+
+### Layer mapping (Gemma-2-9B: 42 blocks, hidden 3584)
+
+GemmaScope `layer_N` = residual stream = output of block N = `hidden_states[N+1]`.
+We read a mid and a late layer (parameterized, FVU-gated):
+
+| readout | GemmaScope folder            | hidden_states idx |
+|---------|------------------------------|-------------------|
+| **L20** | `layer_20/width_16k/canonical` | 21 (output blk 20) |
+| **L31** | `layer_31/width_16k/canonical` | 32 (output blk 31) |
+
+`width_16k` for the pilot; `width_131k` is the bigger-dictionary option
+(`WIDTH=width_131k sbatch ...`). GemmaScope is JumpReLU; `params.npz` keys:
+`W_enc (3584,d_sae)`, `W_dec (d_sae,3584)`, `b_enc`, `b_dec`, `threshold`.
+
+### Pre-fetch — GATED (needs an HF token + accepted licences)
+
+Both `google/gemma-2-9b` and `google/gemma-scope-9b-pt-res-canonical` are
+gated. On huggingface.co, log in and click "Agree and access" on BOTH repos
+first, then on the login node:
+
+```bash
+export HF_HOME=/scratch/d/dchikhi/hf
+export HF_TOKEN=hf_xxx          # a token from an account that accepted the licences
+source "$HF_HOME/dlenv/bin/activate"   # the venv with huggingface_hub from step 2
+
+python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+H = os.environ["HF_HOME"]
+# Gemma-2-9B BASE backbone (full repo)
+snapshot_download("google/gemma-2-9b",
+                  local_dir=f"{H}/models/google/gemma-2-9b", token=True)
+# GemmaScope canonical residual SAEs: only the 2 pilot layers, width_16k
+snapshot_download("google/gemma-scope-9b-pt-res-canonical",
+                  local_dir=f"{H}/models/google/gemma-scope-9b-pt-res-canonical",
+                  allow_patterns=["layer_20/width_16k/canonical/*",
+                                  "layer_31/width_16k/canonical/*"],
+                  token=True)
+print("done")
+PY
+```
+
+Verify, then submit:
+
+```bash
+GS=/scratch/d/dchikhi/hf/models/google/gemma-scope-9b-pt-res-canonical
+ls -lh "$GS"/layer_20/width_16k/canonical/params.npz \
+       "$GS"/layer_31/width_16k/canonical/params.npz
+ls -d  /scratch/d/dchikhi/hf/models/google/gemma-2-9b
+
+cd ~/CoT-checker
+LIMIT=200 sbatch slurm/s1_model_size/run_gemma_sae_audit_9b.sh   # smoke first
+sbatch        slurm/s1_model_size/run_gemma_sae_audit_9b.sh      # full 6K
+```
+
+Same two gates as the Qwen arm: the per-shard log must print `[audit] OK`
+(readout = last token of step), and `[gsae] L20/L31 FVU=… [OK]` in the encode log
+(GemmaScope should be far healthier than the Qwen-Instruct SAE here).

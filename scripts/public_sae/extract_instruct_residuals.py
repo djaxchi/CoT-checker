@@ -1,26 +1,26 @@
-"""Extract Qwen2.5-7B-INSTRUCT residual-stream activations for the public-SAE audit.
+"""Extract residual-stream activations for the public-SAE audit (model-general).
 
-This is the Instruct-matched arm of the public-SAE representation audit (there is
-no public base-7B SAE; see scripts/public_sae/download_public_sae.md). It reuses
-the EXACT prompt format, tokenization and last-token-of-candidate_step readout of
-scripts/encode_prm800k_hidden_states.py, but:
+Used by both arms of the audit:
+  * Qwen2.5-7B-Instruct (Instruct-matched arm; there is no public base-7B SAE), and
+  * Gemma-2-9B base (GemmaScope arm).
+It reuses the EXACT prompt format, tokenization and last-token-of-candidate_step
+readout of scripts/encode_prm800k_hidden_states.py.
 
-  * loads `Qwen/Qwen2.5-7B-Instruct` (NOT base 7B), and
-  * saves TWO residual readouts per example in one forward pass:
-        h_L20 = hidden_states[20]  (output of block 19  == SAE resid_post_layer_19)
-        h_L28 = hidden_states[28]  (output of block 27  == SAE resid_post_layer_27)
+Which residual readouts to save is set by --layer_map (name:hidden_states_index).
+hidden_states[0]=embeddings, hidden_states[i]=output of block i-1. For an SAE whose
+folder is 'layer_N' (residual stream = output of block N), use index N+1:
+  Qwen2.5  L20<-resid_post_layer_19 => index 20 ; L28<-resid_post_layer_27 => 28
+  Gemma-2-9B  L20<-GemmaScope layer_20 => index 21 ; L31<-layer_31 => 32
 
 Sharding (4-GPU fan-out): a deterministic global_index is assigned over the full
 file order; with --num_shards 4 only global_index %% 4 == shard_idx is encoded.
 
-Per-shard output (npz): runs/.../shards/shard_{g}.npz with arrays
-  h_L20 (n,3584) f16, h_L28 (n,3584) f16, y (n,) i32, global_index (n,) i64,
-  n_tokens (n,) i32   (+ uid/problem_id/step_idx kept in the merged meta jsonl).
+Per-shard output (npz): shards/shard_{g}.npz with arrays h_{name} (n,H) f16 per
+readout, y (n,) i32, global_index (n,) i64, n_tokens (n,) i32 (+ a .meta.jsonl
+sidecar). --merge combines shards into merged/heldout_{name}_h.npy + heldout_y.npy
++ heldout_meta.jsonl (sorted by global_index), the layout encode/probe consume.
 
---merge combines the shard npz files into merged/heldout_{L20,L28}_h.npy,
-heldout_y.npy and heldout_meta.jsonl (sorted by global_index), the layout the
-encode/probe steps consume.
-
+Gemma-2 note: pass --attn_impl eager for faithful activations (soft-capping).
 Offline: pass --local_files_only; the Slurm wrapper exports HF_HUB_OFFLINE=1 etc.
 """
 
@@ -42,10 +42,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from encode_prm800k_hidden_states import (  # noqa: E402
     git_commit, read_jsonl, tokenize_example, write_jsonl,
 )
-
-# Our S3 readouts as positions in the HF output_hidden_states tuple
-# (0 = embeddings, i = output of block i-1). See download_public_sae.md §4.
-LAYER_HS_IDX = {"L20": 20, "L28": 28}
 
 
 def audit_readout(tokenizer, examples, max_seq_len, pad_token_id, n=6):
@@ -81,7 +77,7 @@ def audit_readout(tokenizer, examples, max_seq_len, pad_token_id, n=6):
 
 
 def extract_shard(jsonl_path, out_path, tokenizer, model, device, max_seq_len,
-                  batch_size, pad_token_id, shard_idx, num_shards, limit):
+                  batch_size, pad_token_id, shard_idx, num_shards, limit, layer_map):
     examples = read_jsonl(jsonl_path)
     for gi, ex in enumerate(examples):
         ex["global_index"] = gi
@@ -91,7 +87,7 @@ def extract_shard(jsonl_path, out_path, tokenizer, model, device, max_seq_len,
         examples = [e for e in examples if e["global_index"] % num_shards == shard_idx]
     n = len(examples)
     H = model.config.hidden_size
-    h = {k: np.zeros((n, H), dtype=np.float16) for k in LAYER_HS_IDX}
+    h = {k: np.zeros((n, H), dtype=np.float16) for k in layer_map}
     y = np.zeros(n, dtype=np.int32)
     gidx = np.zeros(n, dtype=np.int64)
     ntok = np.zeros(n, dtype=np.int32)
@@ -125,7 +121,7 @@ def extract_shard(jsonl_path, out_path, tokenizer, model, device, max_seq_len,
             # token of this example's UNPADDED sequence (right-padding only).
             assert cand == len(ids_list[b]) - 1, "cand not last real token (padding/index drift)"
             assert masks[b][cand] == 1, "cand points at a pad position"
-            for k, li in LAYER_HS_IDX.items():
+            for k, li in layer_map.items():
                 h[k][i + b] = hs[li][b, cand, :].detach().to(torch.float16).cpu().numpy()
             y[i + b] = ex["label"]
             gidx[i + b] = ex["global_index"]
@@ -140,7 +136,8 @@ def extract_shard(jsonl_path, out_path, tokenizer, model, device, max_seq_len,
             print(f"[extract] {i}/{n} ({time.perf_counter()-t0:.0f}s)", flush=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(out_path, h_L20=h["L20"], h_L28=h["L28"], y=y, global_index=gidx, n_tokens=ntok)
+    save_arrays = {f"h_{k}": v for k, v in h.items()}
+    np.savez(out_path, y=y, global_index=gidx, n_tokens=ntok, **save_arrays)
     # meta sidecar (jsonl) so merge can reconstruct uid/problem_id/step_idx
     write_jsonl(out_path.with_suffix(".meta.jsonl"), meta)
     print(f"[extract] wrote {out_path} ({out_path.stat().st_size/1e6:.1f} MB)", flush=True)
@@ -148,14 +145,19 @@ def extract_shard(jsonl_path, out_path, tokenizer, model, device, max_seq_len,
 
 def merge_shards(shard_dir: Path, out_dir: Path, n_shards: int):
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows_h = {"L20": [], "L28": []}
     rows_y, rows_g, rows_meta = [], [], []
+    rows_h: dict[str, list] = {}
+    layer_names: list[str] = []
     for g in range(n_shards):
         npz = shard_dir / f"shard_{g}.npz"
         if not npz.exists():
             sys.exit(f"[merge] FATAL missing shard {npz}")
         d = np.load(npz)
-        rows_h["L20"].append(d["h_L20"]); rows_h["L28"].append(d["h_L28"])
+        if not layer_names:  # discover layer readouts from the first shard's h_* keys
+            layer_names = [k[2:] for k in d.files if k.startswith("h_")]
+            rows_h = {L: [] for L in layer_names}
+        for L in layer_names:
+            rows_h[L].append(d[f"h_{L}"])
         rows_y.append(d["y"]); rows_g.append(d["global_index"])
         rows_meta.extend(json.loads(l) for l in
                          npz.with_suffix(".meta.jsonl").read_text().splitlines() if l.strip())
@@ -165,7 +167,7 @@ def merge_shards(shard_dir: Path, out_dir: Path, n_shards: int):
         sys.exit("[merge] FATAL global_index not a clean partition (dupes/gaps)")
     y_all = np.concatenate(rows_y)[order]
     meta_all = [rows_meta[k] for k in order]
-    for L in ("L20", "L28"):
+    for L in layer_names:
         h_all = np.concatenate(rows_h[L])[order]
         np.save(out_dir / f"heldout_{L}_h.npy", h_all)
         print(f"[merge] heldout_{L}_h.npy {h_all.shape}", flush=True)
@@ -174,9 +176,9 @@ def merge_shards(shard_dir: Path, out_dir: Path, n_shards: int):
     (out_dir / "extract_manifest.json").write_text(json.dumps({
         "n": int(len(y_all)), "n_correct": int((y_all == 0).sum()),
         "n_incorrect": int((y_all == 1).sum()), "n_shards": n_shards,
-        "layers_hidden_states_idx": LAYER_HS_IDX, "git_commit": git_commit(),
+        "layers": layer_names, "git_commit": git_commit(),
     }, indent=2))
-    print(f"[merge] n={len(y_all)} -> {out_dir}", flush=True)
+    print(f"[merge] n={len(y_all)} layers={layer_names} -> {out_dir}", flush=True)
 
 
 def main() -> None:
@@ -185,6 +187,12 @@ def main() -> None:
     ap.add_argument("--out", type=Path, help="per-shard npz output path")
     ap.add_argument("--model_name_or_path", type=str, default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--local_files_only", action="store_true")
+    ap.add_argument("--layer_map", nargs="+", default=["L20:20", "L28:28"],
+                    help="readout name:hidden_states_index pairs. hidden_states[0]=embeddings, "
+                         "hidden_states[i]=output of block i-1. For a GemmaScope/Qwen-Scope SAE "
+                         "'layer_N' (output of block N), use index N+1. Default = Qwen2.5 L20/L28.")
+    ap.add_argument("--attn_impl", type=str, default=None,
+                    help="attn_implementation (e.g. 'eager' for Gemma-2 activation fidelity)")
     ap.add_argument("--max_seq_len", type=int, default=-1)
     ap.add_argument("--batch_size", type=int, default=16)
     ap.add_argument("--shard_idx", type=int, default=0)
@@ -204,23 +212,29 @@ def main() -> None:
     if not (args.jsonl and args.out):
         sys.exit("extract mode needs --jsonl and --out")
 
+    layer_map = {}
+    for spec in args.layer_map:
+        name, idx = spec.rsplit(":", 1)
+        layer_map[name] = int(idx)
+
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.model_name_or_path,
                                         local_files_only=args.local_files_only)
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    load_kw = dict(local_files_only=args.local_files_only)
+    if args.attn_impl:
+        load_kw["attn_implementation"] = args.attn_impl
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path, local_files_only=args.local_files_only,
-            dtype=torch.float16)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
+                                                     dtype=torch.float16, **load_kw)
     except TypeError:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path, local_files_only=args.local_files_only,
-            torch_dtype=torch.float16)
+        model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path,
+                                                     torch_dtype=torch.float16, **load_kw)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device).eval()
 
     n_blocks = model.config.num_hidden_layers
-    for k, li in LAYER_HS_IDX.items():
+    for k, li in layer_map.items():
         if li > n_blocks:
             sys.exit(f"[extract] {k}=hidden_states[{li}] but model has only "
                      f"{n_blocks} blocks ({n_blocks+1} hidden_states).")
@@ -229,7 +243,7 @@ def main() -> None:
         msl = int(getattr(model.config, "max_position_embeddings", 32768) or 32768)
 
     extract_shard(args.jsonl, args.out, tok, model, device, msl, args.batch_size,
-                  pad, args.shard_idx, args.num_shards, args.limit)
+                  pad, args.shard_idx, args.num_shards, args.limit, layer_map)
 
 
 if __name__ == "__main__":

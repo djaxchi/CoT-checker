@@ -131,25 +131,18 @@ def _scatter(ax, x, y_axis, label, title, xl="", yl=""):
 
 
 def build_report(args, rows, layers):
-    L0 = layers[0]
-    lines = ["# Public-SAE representation audit (Qwen2.5-7B-Instruct)", ""]
+    lines = [f"# {args.title} ({args.model_label})", ""]
     lines += ["## 1. Model and SAE", "",
-              "* **Case: Instruct-matched** (no public base-7B residual SAE exists; see "
-              "`scripts/public_sae/download_public_sae.md`).",
-              "* Backbone: `Qwen/Qwen2.5-7B-Instruct`. SAE: "
-              "`andyrdt/saes-qwen2.5-7b-instruct`, BatchTopK, dict_size 131072.",
-              ""]
+              f"* Backbone: `{args.model_label}`. SAE: {args.sae_label}.", ""]
     for L in layers:
         man = json.loads((args.sae_dir / f"{L}_t{args.trainer}_encode_manifest.json").read_text())
-        lines.append(f"  * {L} <- `{man['sae_folder']}/trainer_{args.trainer}` "
+        lines.append(f"  * {L} <- `{man.get('sae_id', man['sae_folder'])}` "
                      f"(k={man['k']}); recon FVU={man['recon_fvu']} [{man['fvu_gate']}]; "
                      f"active/row median={man['active_per_row_median']:.0f}; "
                      f"feats ever active={man['n_features_ever_active']}.")
     em = json.loads((args.enc_dir / "extract_manifest.json").read_text())
-    lines += ["", "> **Caveat:** Instruct SAE + Instruct backbone (matched). The S3 base-7B "
-              "dense caches are NOT used here except for the example text/labels. The "
-              "prompt is the S3 base-style prompt (no chat template), mildly OOD vs the "
-              "SAE's chat/pile training - the FVU gate above is the empirical check.", ""]
+    if args.case_note:
+        lines += ["", f"> **Caveat:** {args.case_note}", ""]
     lines += ["## 2. Dataset and split", "",
               f"* PRM800K held-out steps, n={em['n']} "
               f"(correct={em['n_correct']}, incorrect={em['n_incorrect']}).",
@@ -208,6 +201,14 @@ def main() -> None:
     ap.add_argument("--layers", nargs="+", default=["L20", "L28"])
     ap.add_argument("--trainer", type=int, default=1)
     ap.add_argument("--test_size", type=float, default=0.3)
+    ap.add_argument("--title", type=str, default="Public-SAE representation audit")
+    ap.add_argument("--model_label", type=str, default="Qwen2.5-7B-Instruct")
+    ap.add_argument("--sae_label", type=str,
+                    default="`andyrdt/saes-qwen2.5-7b-instruct`, BatchTopK, dict_size 131072")
+    ap.add_argument("--case_note", type=str,
+                    default="Instruct SAE + Instruct backbone (matched). Base-7B dense caches "
+                            "are NOT used except for example text/labels. Prompt is the S3 "
+                            "base-style prompt (no chat template); the FVU gate is the check.")
     args = ap.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 

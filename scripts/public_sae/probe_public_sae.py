@@ -252,11 +252,18 @@ def main() -> None:
             "pearson_dense_vs_z_score": float(np.corrcoef(p_h, p_z)[0, 1]),
             "top_feat_contrib": contrib[order[:200]].tolist(),
         }
-        if args.sae_root is not None:
+        # SAE->h direction map (fig F). Prefer a saved decoder.npy (format-agnostic,
+        # written by encode_gemma_sae.py); fall back to the Qwen BatchTopK ae.pt.
+        Wdec = None
+        dec_npy = args.sae_dir / f"{L}_t{t}_decoder.npy"
+        if dec_npy.exists():
+            Wdec = np.load(dec_npy)                          # (act_dim, dict_size)
+        elif args.sae_root is not None:
             import torch
             sd = torch.load(args.sae_root / man["sae_folder"] / f"trainer_{t}" / "ae.pt",
                             map_location="cpu")
             Wdec = sd["decoder.weight"].float().numpy()     # (act_dim, dict_size)
+        if Wdec is not None:
             v_sae_to_h = Wdec @ coef_z                       # (act_dim,)
             direction.update({
                 "cos_saemap_vs_dense": _cos(v_sae_to_h, w_dense_raw),

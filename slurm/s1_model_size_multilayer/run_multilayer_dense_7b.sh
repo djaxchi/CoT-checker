@@ -48,13 +48,10 @@ mkdir -p "$PRM_ML" "$PB_ML" "$MERGED" "$PB_EVAL" "$LOG_DIR"
 LOG="$LOG_DIR/run_multilayer_dense.log"
 
 # All 28 transformer layers (hidden_states indices 1..N): fracs i/N round to i.
+# Generated with awk (always on PATH) so this does not depend on `module load python`,
+# which has not run yet at this point in the script.
 NLAYERS="${NLAYERS:-28}"
-LAYER_FRACS="$(python - "$NLAYERS" <<'PY'
-import sys
-n = int(sys.argv[1])
-print(" ".join(f"{i/n:.6f}" for i in range(1, n + 1)))
-PY
-)"
+LAYER_FRACS="$(awk -v n="$NLAYERS" 'BEGIN{for(i=1;i<=n;i++) printf "%.6f ", i/n}')"
 
 s1ms_env_setup
 echo "[ml] TAG=$TAG model=$MODEL_ID layers=all($NLAYERS) bs=$BS" | tee "$LOG"

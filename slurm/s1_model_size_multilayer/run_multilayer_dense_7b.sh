@@ -27,8 +27,12 @@
 set -euo pipefail
 
 TAG="${TAG:-qwen2_5_7b}"
-HERE_REAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-S1MS_DIR="${S1MS_DIR:-$HERE_REAL/../s1_model_size}"
+# sbatch copies this script to a spool dir, so ${BASH_SOURCE} does NOT point at the
+# repo. Resolve the checkout from the submit dir (where `sbatch` was invoked) with a
+# $HOME fallback, then find the shared S1 config relative to it.
+REPO_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$HOME/CoT-checker}}"
+S1MS_DIR="${S1MS_DIR:-$REPO_ROOT/slurm/s1_model_size}"
+[[ -f "$S1MS_DIR/models.env" ]] || { echo "[ml] FATAL: cannot find $S1MS_DIR/models.env; set PROJECT_ROOT or S1MS_DIR" >&2; exit 1; }
 # shellcheck disable=SC1091
 source "$S1MS_DIR/models.env"
 # shellcheck disable=SC1091

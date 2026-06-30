@@ -538,11 +538,12 @@ def train_linear_probe(
     patience: int,
     device: torch.device,
     seed: int,
+    weight_decay: float = 0.0,
 ) -> LinearProbe:
     rng = np.random.default_rng(seed)
     in_dim = z_train.shape[1]
     probe = LinearProbe(in_dim).to(device)
-    opt = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=0.0)
+    opt = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=weight_decay)
 
     z_train_t = torch.from_numpy(z_train).to(device)
     y_train_t = torch.from_numpy(y_train.astype(np.float32)).to(device)

@@ -59,6 +59,9 @@ def main() -> None:
     p.add_argument("--epochs_probe", type=int, default=50)
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--lr_probe", type=float, default=1e-3)
+    p.add_argument("--weight_decay", type=float, default=0.0,
+                   help="AdamW L2. 0.0 = original pipeline. Helps the wide multilayer "
+                        "concat probe (100k-dim) where the offline bake-off needed strong L2.")
     p.add_argument("--early_stopping_patience", type=int, default=5)
     p.add_argument("--threshold_grid", type=str, default=None,
                    help="Float step in (0,1) or comma list. Default 0.1..1.0 "
@@ -102,6 +105,7 @@ def main() -> None:
         patience=args.early_stopping_patience,
         device=device,
         seed=args.seed,
+        weight_decay=args.weight_decay,
     )
     probe_train_time = time.time() - t0
     torch.save(probe.state_dict(), args.out_dir / "linear_probe.pt")
@@ -143,6 +147,7 @@ def main() -> None:
         "epochs_probe": args.epochs_probe,
         "batch_size": args.batch_size,
         "lr_probe": args.lr_probe,
+        "weight_decay": args.weight_decay,
         "early_stopping_patience": args.early_stopping_patience,
         "probe_train_time_sec": probe_train_time,
         "selected_threshold": sel_t,

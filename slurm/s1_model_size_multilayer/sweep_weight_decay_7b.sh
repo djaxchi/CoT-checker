@@ -2,11 +2,13 @@
 #SBATCH --job-name=s1ms_ml_wdsweep
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=h100:1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=64G
+#SBATCH --gpus-per-node=h100:4
+#SBATCH --cpus-per-task=48
+#SBATCH --mem=0
 #SBATCH --time=00:40:00
 #SBATCH --output=%x-%j.out
+# NOTE: TamIA allocates h100 GPUs by whole node, so we must request h100:4 even though
+# this sweep only re-trains a linear probe on cached features (no model load, no encode).
 #
 # Weight-decay sweep for the all-layer (concat, 100k-dim) DenseLinear probe.
 #

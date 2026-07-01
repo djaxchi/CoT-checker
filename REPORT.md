@@ -1180,7 +1180,94 @@ the SAE stage. Artifacts under `runs/fork_rep_audit/qwen2_5_7b/steer_causality/`
 
 ---
 
-## 16. Limitations
+## 16. Combining All Layers for the Dense Probe
+
+§15 established that the correctness signal is a distributed linear direction present at every
+layer, not a property of the last layer alone. That raises an engineering question for the
+deployable pipeline of §13: if every layer carries a slice of the signal, does concatenating all
+of them into one probe input beat the single last-layer probe on ProcessBench PB-F1?
+
+An offline check on the balanced held-out set (§15 data, 6,000 steps, 5-fold out-of-fold) said
+maybe. Stacking the six stored layers lifted last-token ROC-AUC from about 0.80 (best single layer,
+L17, in this 5-fold setup) to 0.847 leakage-free (concatenate raw features plus strong L2) and 0.854
+via a per-layer score meta-probe. Two guardrails emerged and both matter below: the gain needed
+strong L2 (LogisticRegression C=0.05 clearly beat C=1.0), and it was purely linear (QDA and kNN
+density underperformed the linear probe, and PCA compression to 256 dims dropped AUC to 0.83). Like
+all §15 numbers this is an optimistic in-distribution ceiling on the rating ±1 extremes, not a
+ProcessBench figure.
+
+### 16.1 Setup
+
+We repeated the small-scale §13 DenseLinear experiment (Qwen2.5-7B, `probe_train_40k` / `val_1k`,
+ProcessBench PB-F1) changing only the representation. Every one of the 28 transformer layers is
+captured in a single forward pass, concatenated column-wise into a 100,352-dim vector (28 × 3,584),
+and z-scored per dimension with statistics fit once on the training split and reused for val and every
+ProcessBench subset. Standardization is required, not cosmetic: the DenseLinear probe trains on raw
+hidden states with AdamW, and layers whose norms differ by ~100x (deep layers, massive-activation
+dimensions) otherwise swamp the gradient. Everything downstream is byte-identical to §13: the same
+probe trainer, the same PRM800K-val balanced-accuracy threshold selection, the same first-error-scan
+PB-F1 evaluator, the same aggregator.
+
+Scripts: `scripts/encode_prm800k_multilayer.py`, `scripts/encode_processbench_multilayer.py`,
+`scripts/assemble_multilayer_concat.py` (the one new piece: concat plus z-score into the existing
+`{stem}_h.npy` contract), driven by `slurm/s1_model_size_multilayer/run_multilayer_dense_7b.sh`.
+Offline analysis in `scripts/analysis/s3_repr_separation.py` and `s3_repr_combine.py`.
+
+### 16.2 Result: a small oracle gain, a val-selected regression
+
+| representation | macro F1 oracle | macro F1 val-selected |
+|---|---|---|
+| last layer only (§13 baseline) | 0.4132 | 0.2369 |
+| all 28 layers, concatenated (wd=0) | **0.4333** | 0.1781 |
+| delta | **+0.020** | −0.059 |
+
+Per-subset oracle PB-F1: gsm8k 0.454 → 0.479, math 0.447 → 0.440, olympiadbench 0.377 → 0.419,
+omnimath 0.375 → 0.396. The oracle gain is broad (three of four subsets up) and driven by
+olympiadbench (+0.041) and gsm8k (+0.026).
+
+The val-selected score dropped 0.059, concentrated in gsm8k (0.394 → 0.205). The cause is the probe,
+not the representation: trained with `weight_decay=0.0`, the 100,352-dim probe fit PRM800K-val
+slightly worse than the 3,584-dim single-layer probe (balanced accuracy 0.750 vs 0.766), and its
+selected threshold moved from 0.5 to 0.3, which over-flags errors on ProcessBench and collapses
+Acc(correct).
+
+### 16.3 Weight-decay sweep
+
+We swept AdamW L2 over {0, 1e-4, 1e-3, 1e-2, 1e-1, 1.0}, reusing the cached features (seconds per
+point, no re-encode; `slurm/s1_model_size_multilayer/sweep_weight_decay_7b.sh`).
+
+| weight_decay | macro F1 oracle | macro F1 val-selected |
+|---|---|---|
+| 0 / 1e-4 / 1e-3 | 0.4333 | 0.1781 |
+| 1e-2 | 0.4332 | 0.1774 |
+| **1e-1** | 0.4319 | **0.2190** |
+| 1.0 | 0.4191 | 0.1886 |
+
+Decay below ~1e-1 is inert: AdamW's decoupled decay at lr=1e-3 is negligible, so 0 through 1e-2 give
+identical numbers. Only 1e-1 bites, and it is the best trade-off: it recovers about 70% of the
+val-selected drop (0.178 → 0.219, still 0.018 short of the 0.237 baseline) while holding oracle at
+0.432 (+0.019). At 1.0 the probe over-regularizes and both metrics fall. L2 recovers most of the val
+regression but does not push oracle further (best oracle is at wd=0). Plot:
+`results/repr_combine/wd_sweep.png`.
+
+### 16.4 Verdict
+
+Combining all 28 layers is a small, real win, not a breakthrough. At the best configuration (wd=1e-1)
+it is strictly better on oracle PB-F1 (0.432, +0.019, about 5% relative) and essentially tied on the
+deployable val-selected metric (0.219, −0.018). Three observations converge on why the ceiling is
+low. The offline balanced-heldout AUC gain (0.80 → 0.85) does not convert into PB-F1, so detection is
+not the bottleneck; §9 and §13 already located it at first-error localization. The signal is linear
+and distributed, so nothing beyond a regularized linear combination helps (offline: QDA, kNN, PCA all
+lose). And static last-token geometry plateaus around 0.85 AUC regardless of how the layers are
+combined. The remaining lever is a different signal class, behavioral uncertainty such as semantic
+entropy of resampled continuations, not more of the same static representation.
+
+Artifacts: `results/repr_combine/wd_sweep.png` and `results/repr_combine/combine_ranking.png`; run
+outputs under `runs/s1_model_size_dense/qwen2_5_7b_multilayer/` (gitignored).
+
+---
+
+## 17. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -1189,7 +1276,7 @@ the SAE stage. Artifacts under `runs/fork_rep_audit/qwen2_5_7b/steer_causality/`
 
 ---
 
-## 17. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 18. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
 ### 17.1 Overview
 
@@ -1513,7 +1600,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 18. Next Steps
+## 19. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

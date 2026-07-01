@@ -2,16 +2,20 @@
 #SBATCH --job-name=s3_token_traj
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
-#SBATCH --gpus=h100:1
-#SBATCH --cpus-per-task=12
+#SBATCH --gpus-per-node=h100:4
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=00:45:00
 #SBATCH --output=%x-%j.out
 
 # Per-token re-encode of the PRM800K 6k held-out test: apply the L28 dense probe to
 # EVERY step token (+ L20 diagnostic) with the model's per-token certainty, then plot
 # the token heatmap / spike / certainty-coincidence figures. Same items + tokenization
 # as the §15 encode, just keeping the full span instead of {first,last}.
+#
+# TamIA allocates h100 by whole node, so we take all 4 GPUs and shard the items across
+# them (one process per GPU), then cat the per-shard jsonl (each step lives entirely in
+# one shard, so token order is preserved) and plot.
 #
 # Usage:
 #   sbatch slurm/s3_token_incorrectness_tamia.sh
@@ -62,11 +66,30 @@ EXTRA=()
 [[ "${FORCE:-0}" == "1" ]] && EXTRA+=(--force)
 [[ -n "${LIMIT:-}" ]] && EXTRA+=(--limit "$LIMIT")
 
-python scripts/analysis/s3_token_incorrectness_extract.py \
-  --items "$ITEMS" --probe "$PROBE" --out_dir "$OUT_DIR" --stem "$STEM" \
-  --model_name_or_path "$MODEL_NAME_OR_PATH" --local_files_only \
-  --layers $LAYERS --probe_layer "$PROBE_LAYER" \
-  --batch_size "$BATCH_SIZE" --max_seq_len -1 "${EXTRA[@]}"
+NUM_SHARDS="${NUM_SHARDS:-4}"
+pids=()
+for i in $(seq 0 $((NUM_SHARDS - 1))); do
+  CUDA_VISIBLE_DEVICES="$i" python scripts/analysis/s3_token_incorrectness_extract.py \
+    --items "$ITEMS" --probe "$PROBE" --out_dir "$OUT_DIR" --stem "$STEM" \
+    --model_name_or_path "$MODEL_NAME_OR_PATH" --local_files_only \
+    --layers $LAYERS --probe_layer "$PROBE_LAYER" \
+    --batch_size "$BATCH_SIZE" --max_seq_len -1 \
+    --shard_idx "$i" --num_shards "$NUM_SHARDS" "${EXTRA[@]}" \
+    > "$OUT_DIR/extract_shard${i}.log" 2>&1 &
+  pids+=($!)
+done
+fail=0
+for p in "${pids[@]}"; do wait "$p" || fail=1; done
+if [[ $fail -ne 0 ]]; then
+  echo "[FATAL] a shard failed; tails below:"; tail -n 40 "$OUT_DIR"/extract_shard*.log
+  exit 1
+fi
+
+# Merge shards (each step is wholly within one shard, so cat preserves token order).
+cat "$OUT_DIR/${STEM}_shard"*"_tokens.jsonl" > "$OUT_DIR/${STEM}_tokens.jsonl"
+cat "$OUT_DIR/${STEM}_shard"*"_steps.jsonl"  > "$OUT_DIR/${STEM}_steps.jsonl"
+echo "[merge] $(wc -l < "$OUT_DIR/${STEM}_tokens.jsonl") token rows, "\
+"$(wc -l < "$OUT_DIR/${STEM}_steps.jsonl") steps"
 
 # Plotting is cheap + non-essential; never let it fail the compute job.
 python scripts/analysis/s3_token_incorrectness_plot.py \

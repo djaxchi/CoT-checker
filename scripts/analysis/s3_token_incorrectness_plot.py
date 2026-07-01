@@ -43,6 +43,23 @@ from src.analysis.token_trajectory import coincidence, spike_stats  # noqa: E402
 GREEN, RED = "#2c7fb8", "#e6550d"
 CMAP = "coolwarm"
 
+# Per-token certainty metrics. "confidence" (p_top1 / logit_gap) is how peaked the
+# model's OWN next-token distribution is (higher = more certain); "surprise" (nll /
+# entropy) is about the realized token / distribution spread (higher = LESS certain).
+# nll and p_top1 are different: nll = -log p(realized token); p_top1 = p(model's top
+# token) regardless of what was written.
+CERTAINTY = {
+    "p_top1":    {"label": "confidence  p(top token)",             "more_certain": "high"},
+    "logit_gap": {"label": "confidence margin  logit(top1-top2)",  "more_certain": "high"},
+    "entropy":   {"label": "entropy (uncertainty)",                "more_certain": "low"},
+    "nll":       {"label": "nll (surprise of realized token)",     "more_certain": "low"},
+}
+
+
+def _uncertainty(col_vals: np.ndarray, more_certain: str) -> np.ndarray:
+    """Orient a certainty column so HIGHER always means LESS certain (for argmax=dip)."""
+    return -col_vals if more_certain == "high" else col_vals
+
 
 def read_jsonl(path: Path) -> list[dict]:
     with open(path) as f:
@@ -76,11 +93,12 @@ def _score_key(layer: int) -> str:
 # 1. token heatmap
 # --------------------------------------------------------------------------- #
 
-def plot_step_heatmap(step_rows, layer, out_path, cols=14):
+def plot_step_heatmap(step_rows, layer, out_path, cert="p_top1", cols=14):
     scores = np.array([r[_score_key(layer)] for r in step_rows])
     probs = sigmoid(scores)
     toks = [prettify(r["token"]) for r in step_rows]
-    nll = np.array([r["nll"] for r in step_rows])
+    cert_vals = np.array([r[cert] for r in step_rows])
+    cert_label = CERTAINTY[cert]["label"]
     T = len(step_rows)
     rows_n = int(np.ceil(T / cols))
 
@@ -110,8 +128,10 @@ def plot_step_heatmap(step_rows, layer, out_path, cols=14):
     axc.axvline(peak, color=RED, lw=1.0, ls="--")
     axc.set_ylim(0, 1); axc.set_ylabel("P(inc)", fontsize=8)
     axt = axc.twinx()
-    axt.plot(x, nll, "-", color="#7a0177", lw=1.0, alpha=0.7, label="nll (surprise)")
-    axt.set_ylabel("nll", fontsize=8, color="#7a0177")
+    axt.plot(x, cert_vals, "-", color="#7a0177", lw=1.0, alpha=0.7, label=cert_label)
+    axt.set_ylabel(cert, fontsize=8, color="#7a0177")
+    if cert == "p_top1":
+        axt.set_ylim(0, 1)
     axc.set_xlabel("token position in step", fontsize=8)
     axc.set_xlim(-0.5, T - 0.5)
     fig.tight_layout()
@@ -182,64 +202,73 @@ def plot_spike(steps, layer, out_path):
 # 3. coincidence
 # --------------------------------------------------------------------------- #
 
-def plot_coincidence(rows, steps, layer, out_path):
+def plot_coincidence(rows, steps, layer, out_path, cert="p_top1"):
     sk = _score_key(layer)
     score = np.array([r[sk] for r in rows])
     label = np.array([r["label"] for r in rows])
-    nll = np.array([r["nll"] for r in rows])
-    entropy = np.array([r["entropy"] for r in rows])
+    cvals = np.array([r[cert] for r in rows])
+    meta = CERTAINTY[cert]
+    label_txt, more_certain = meta["label"], meta["more_certain"]
+    dip_word = "least-certain" if more_certain == "high" else "most-surprising"
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.4))
-    # (a) pooled scatter probe score vs nll
+    # (a) pooled scatter probe score vs the certainty metric
     ax = axes[0]
     for lb, col, name in ((0, GREEN, "correct"), (1, RED, "incorrect")):
         m = label == lb
-        ax.scatter(nll[m], score[m], s=4, c=col, alpha=0.25, linewidths=0, label=name)
-    r_all = np.corrcoef(nll, score)[0, 1]
-    ax.set_xlabel("per-token nll (surprise)"); ax.set_ylabel(f"L{layer} probe score")
-    ax.set_title(f"probe score vs surprise (r={r_all:.2f})", fontsize=9)
-    ax.set_xlim(np.percentile(nll, [0.5, 99]))
+        ax.scatter(cvals[m], score[m], s=4, c=col, alpha=0.25, linewidths=0, label=name)
+    r_all = float(np.corrcoef(cvals, score)[0, 1])
+    ax.set_xlabel(f"per-token {label_txt}"); ax.set_ylabel(f"L{layer} probe score")
+    ax.set_title(f"probe score vs {cert} (r={r_all:.2f})", fontsize=9)
+    ax.set_xlim(np.percentile(cvals, [0.5, 99.5]))
     ax.legend(fontsize=8)
 
-    # (b) within-step argmax distance (incorrect steps)
+    # (b) within-step distance: firing token vs the LEAST-certain token
     ax = axes[1]
-    dist, corr_nll = [], []
+    dist, corr_c = [], []
     for rw in steps.values():
         if rw[0]["label"] != 1 or rw[0]["n_step_tokens"] < 4:
             continue
-        s = [r[sk] for r in rw]; u = [r["nll"] for r in rw]
-        c = coincidence(s, u)
+        s = np.array([r[sk] for r in rw])
+        cv = np.array([r[cert] for r in rw])
+        c = coincidence(s, _uncertainty(cv, more_certain))  # argmax(unc) = least-certain tok
         dist.append(c["argmax_distance_frac"])
-        if not np.isnan(c["within_step_corr"]):
-            corr_nll.append(c["within_step_corr"])
+        wc = np.corrcoef(s, cv)[0, 1]  # signed corr with the certainty metric itself
+        if not np.isnan(wc):
+            corr_c.append(wc)
     ax.hist(dist, bins=np.linspace(0, 1, 21), color=RED, alpha=0.7)
     ax.axvline(np.median(dist), color="k", lw=1.5, ls="--",
                label=f"median={np.median(dist):.2f}")
-    ax.set_xlabel("|argmax(probe) - argmax(nll)| / (T-1)")
-    ax.set_title("firing token vs most-surprising token\n(incorrect steps; 0 = same token)",
+    ax.set_xlabel(f"|argmax(probe) - argmax({dip_word})| / (T-1)")
+    ax.set_title(f"firing token vs {dip_word} token\n(incorrect steps; 0 = same token)",
                  fontsize=9)
     ax.legend(fontsize=8)
 
-    # (c) within-step corr distribution
+    # (c) within-step corr(probe, certainty) distribution
     ax = axes[2]
-    ax.hist(corr_nll, bins=np.linspace(-1, 1, 31), color="#7a0177", alpha=0.7)
-    ax.axvline(np.median(corr_nll), color="k", lw=1.5, ls="--",
-               label=f"median r={np.median(corr_nll):.2f}")
+    ax.hist(corr_c, bins=np.linspace(-1, 1, 31), color="#7a0177", alpha=0.7)
+    ax.axvline(np.median(corr_c), color="k", lw=1.5, ls="--",
+               label=f"median r={np.median(corr_c):.2f}")
     ax.axvline(0, color="grey", lw=0.8)
-    ax.set_xlabel("within-step corr(probe score, nll)")
-    ax.set_title("does probe track surprise inside a step?", fontsize=9)
+    ax.set_xlabel(f"within-step corr(probe score, {cert})")
+    ax.set_title(f"does probe track {cert} inside a step?", fontsize=9)
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
 
     inc_m = label == 1
+    # pooled corr of the probe score with EVERY certainty metric, so nothing is hidden.
+    pooled_all = {k: float(np.corrcoef(np.array([r[k] for r in rows]), score)[0, 1])
+                  for k in CERTAINTY}
     return {
-        "pooled_corr_probe_nll_all": float(r_all),
-        "pooled_corr_probe_nll_incorrect": float(np.corrcoef(nll[inc_m], score[inc_m])[0, 1]),
-        "pooled_corr_probe_entropy_all": float(np.corrcoef(entropy, score)[0, 1]),
+        "certainty_metric": cert,
+        f"pooled_corr_probe_{cert}_all": r_all,
+        f"pooled_corr_probe_{cert}_incorrect":
+            float(np.corrcoef(cvals[inc_m], score[inc_m])[0, 1]),
+        "pooled_corr_probe_vs_all_certainty": pooled_all,
         "median_argmax_distance_incorrect": float(np.median(dist)),
-        "median_within_step_corr_probe_nll_incorrect": float(np.median(corr_nll)),
+        f"median_within_step_corr_probe_{cert}_incorrect": float(np.median(corr_c)),
     }
 
 
@@ -249,6 +278,10 @@ def main() -> None:
     ap.add_argument("--tokens", type=Path, required=True, help="{stem}_tokens.jsonl")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--probe_layer", type=int, default=28)
+    ap.add_argument("--certainty", choices=list(CERTAINTY), default="p_top1",
+                    help="per-token certainty axis. p_top1/logit_gap = the model's "
+                         "CONFIDENCE (its own top-token prob/margin); nll/entropy = "
+                         "surprise/uncertainty. Default p_top1 (confidence).")
     ap.add_argument("--n_examples", type=int, default=9)
     ap.add_argument("--cols", type=int, default=14, help="tokens per heatmap row")
     args = ap.parse_args()
@@ -261,24 +294,33 @@ def main() -> None:
     steps = group_by_step(rows)
     print(f"[plot] {len(rows)} tokens over {len(steps)} steps", flush=True)
 
+    if args.certainty not in rows[0]:
+        sys.exit(f"certainty '{args.certainty}' not in tokens file; "
+                 f"available: {[k for k in CERTAINTY if k in rows[0]]}")
+
     made = []
     for uid, tag in select_examples(steps, args.probe_layer, args.n_examples):
         safe = uid.replace("::", "__").replace("/", "_")
         p = args.out / "examples" / f"{tag}__{safe}.png"
-        plot_step_heatmap(steps[uid], args.probe_layer, p, cols=args.cols)
+        plot_step_heatmap(steps[uid], args.probe_layer, p, cert=args.certainty, cols=args.cols)
         made.append(str(p))
 
     spike_metrics = plot_spike(steps, args.probe_layer, args.out / "spike_structure.png")
     coin_metrics = plot_coincidence(rows, steps, args.probe_layer,
-                                    args.out / "coincidence.png")
+                                    args.out / "coincidence.png", cert=args.certainty)
     made += [str(args.out / "spike_structure.png"), str(args.out / "coincidence.png")]
 
-    metrics = {"probe_layer": args.probe_layer, "n_steps": len(steps),
-               "n_tokens": len(rows), "spike": spike_metrics, "coincidence": coin_metrics}
+    metrics = {"probe_layer": args.probe_layer, "certainty_metric": args.certainty,
+               "n_steps": len(steps), "n_tokens": len(rows),
+               "spike": spike_metrics, "coincidence": coin_metrics}
     (args.out / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
-    verdict = ("localized spike" if spike_metrics["peakiness_median_incorrect"]
-               > spike_metrics["peakiness_median_correct"] + 0.1 else "diffuse / plateau")
+    # Report the raw incorrect-vs-correct peakiness GAP, not a knife-edge binary label.
+    peak_gap = (spike_metrics["peakiness_median_incorrect"]
+                - spike_metrics["peakiness_median_correct"])
+    verdict = (f"gap {peak_gap:+.2f} sigma -> "
+               + ("essentially diffuse (no localized spike)" if abs(peak_gap) < 0.25
+                  else "some localization"))
     summary = [
         "# Per-token incorrectness trajectory (PRM800K 6k held-out)\n",
         f"- probe layer L{args.probe_layer}; {len(steps)} steps, {len(rows)} tokens\n",
@@ -289,15 +331,19 @@ def main() -> None:
         f"{spike_metrics['argmax_at_last_token_frac_incorrect']*100:.0f}% of incorrect steps "
         f"(vs {spike_metrics['argmax_at_last_token_frac_correct']*100:.0f}% correct) "
         "-- how much of the firing is the step-end position the probe was trained on\n",
-        "## Coincidence with certainty",
-        f"- pooled corr(probe, nll) = {coin_metrics['pooled_corr_probe_nll_all']:.2f} "
-        f"(incorrect-only {coin_metrics['pooled_corr_probe_nll_incorrect']:.2f})",
-        f"- within incorrect steps: median |argmax(probe)-argmax(nll)| = "
+        f"## Coincidence with certainty (metric = {args.certainty})",
+        f"- pooled corr(probe, {args.certainty}) = "
+        f"{coin_metrics[f'pooled_corr_probe_{args.certainty}_all']:.2f} "
+        f"(incorrect-only {coin_metrics[f'pooled_corr_probe_{args.certainty}_incorrect']:.2f})",
+        "- pooled corr(probe, .) for every metric: "
+        + ", ".join(f"{k} {v:+.2f}"
+                    for k, v in coin_metrics["pooled_corr_probe_vs_all_certainty"].items()),
+        f"- within incorrect steps: median |argmax(probe)-argmax(least-certain)| = "
         f"{coin_metrics['median_argmax_distance_incorrect']:.2f} of step length; "
-        f"median within-step corr = "
-        f"{coin_metrics['median_within_step_corr_probe_nll_incorrect']:.2f}",
-        "  (near 0 distance + positive corr => the firing token IS the surprising token;",
-        "   large distance + ~0 corr => the detector is not just per-token surprise)\n",
+        f"median within-step corr(probe,{args.certainty}) = "
+        f"{coin_metrics[f'median_within_step_corr_probe_{args.certainty}_incorrect']:.2f}",
+        "  (for p_top1: POSITIVE corr => probe fires on CONFIDENT tokens = 'confidently",
+        "   wrong'; near-0 distance => firing token is the least-certain token)\n",
         "## Plots",
         "- `spike_structure.png`, `coincidence.png`, `examples/*.png`",
     ]

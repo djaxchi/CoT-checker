@@ -34,13 +34,14 @@ STEM="${STEM:-prm800k_heldout_test}"
 LAYERS="${LAYERS:-20 28}"
 PROBE_LAYER="${PROBE_LAYER:-28}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
-HF_CACHE="${HF_CACHE:-$SCRATCH/hf_cache}"
-
-mkdir -p "$OUT_DIR" "$HF_CACHE"
-export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
-export HF_DATASETS_CACHE="$HF_CACHE/datasets"
+# The 7B weights are cached under the S1 HF cache (models.env HF_CACHE_ROOT), NOT
+# $SCRATCH/hf_cache; pointing HF_HOME elsewhere makes offline mode miss the model.
+source "$PROJECT_ROOT/slurm/s1_model_size/models.env"
+mkdir -p "$OUT_DIR"
+export HF_HOME="${HF_HOME:-$HF_CACHE_ROOT}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 
 cd "$PROJECT_ROOT"
 GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"

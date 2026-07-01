@@ -93,67 +93,95 @@ def _score_key(layer: int) -> str:
 # 1. token heatmap
 # --------------------------------------------------------------------------- #
 
+PROBE_C, CONF_C = "#d6301d", "#2166ac"   # red = probe (incorrect), blue = confidence
+
+
 def plot_step_heatmap(step_rows, layer, out_path, cert="p_top1", cols=14):
-    scores = np.array([r[_score_key(layer)] for r in step_rows])
-    probs = sigmoid(scores)
-    toks = [prettify(r["token"]) for r in step_rows]
-    cert_vals = np.array([r[cert] for r in step_rows])
+    """One step, token by token: a colour strip of P(incorrect) + two aligned curves,
+    P(incorrect) from the probe (red) and the model's confidence (blue), on one 0..1
+    axis. Where both are high = the model is sure AND the probe says wrong."""
+    pinc = sigmoid(np.array([r[_score_key(layer)] for r in step_rows]))  # 0..1
+    conf = np.array([r[cert] for r in step_rows])
     cert_label = CERTAINTY[cert]["label"]
+    is_prob = cert in ("p_top1", "p_realized")     # already a 0..1 probability
+    toks = [prettify(r["token"]) for r in step_rows]
     T = len(step_rows)
     rows_n = int(np.ceil(T / cols))
 
     grid = np.full((rows_n, cols), np.nan)
     for k in range(T):
-        grid[k // cols, k % cols] = probs[k]
+        grid[k // cols, k % cols] = pinc[k]
 
     fig, (axh, axc) = plt.subplots(
-        2, 1, figsize=(0.95 * cols, 0.62 * rows_n + 2.4),
-        gridspec_kw={"height_ratios": [rows_n + 0.5, 2.2]})
-    norm = TwoSlopeNorm(vmin=0.0, vcenter=0.5, vmax=1.0)
-    axh.imshow(grid, cmap=CMAP, norm=norm, aspect="auto")
-    for k in range(T):
-        r, c = k // cols, k % cols
-        axh.text(c, r, toks[k], ha="center", va="center", fontsize=8,
-                 family="monospace",
-                 color="white" if abs(probs[k] - 0.5) > 0.32 else "black")
-    axh.set_xticks([]); axh.set_yticks([])
-    lab = "INCORRECT" if step_rows[0]["label"] == 1 else "correct"
-    peak = int(np.argmax(scores))
-    axh.set_title(f"{step_rows[0]['uid']}  [{lab}]  L{layer} P(incorrect) per token "
-                  f"(reading order; peak tok #{peak})", fontsize=9)
+        2, 1, figsize=(1.05 * cols, 0.6 * rows_n + 3.2),
+        gridspec_kw={"height_ratios": [rows_n + 0.5, 3.2]})
 
+    # -- token strip, coloured by P(incorrect) --
+    axh.imshow(grid, cmap=CMAP, norm=TwoSlopeNorm(vmin=0.0, vcenter=0.5, vmax=1.0),
+               aspect="auto")
+    for k in range(T):
+        r, c = divmod(k, cols)
+        axh.text(c, r, toks[k], ha="center", va="center", fontsize=8, family="monospace",
+                 color="white" if abs(pinc[k] - 0.5) > 0.32 else "black")
+    axh.set_xticks([]); axh.set_yticks([])
+    lab = "INCORRECT step" if step_rows[0]["label"] == 1 else "correct step"
+    axh.set_title(f"{step_rows[0]['uid']}   [{lab}]\n"
+                  f"token colour = P(incorrect) from the L{layer} probe   "
+                  f"(red = probe says WRONG, blue = says right)", fontsize=9)
+
+    # -- two aligned per-token curves on one probability axis --
     x = np.arange(T)
-    axc.plot(x, probs, "-o", ms=3, color="#333", label="P(incorrect)")
-    axc.axhline(0.5, color="grey", lw=0.7, ls=":")
-    axc.axvline(peak, color=RED, lw=1.0, ls="--")
-    axc.set_ylim(0, 1); axc.set_ylabel("P(inc)", fontsize=8)
-    axt = axc.twinx()
-    axt.plot(x, cert_vals, "-", color="#7a0177", lw=1.0, alpha=0.7, label=cert_label)
-    axt.set_ylabel(cert, fontsize=8, color="#7a0177")
-    if cert == "p_top1":
-        axt.set_ylim(0, 1)
-    axc.set_xlabel("token position in step", fontsize=8)
+    axc.plot(x, pinc, "-o", ms=3, lw=1.6, color=PROBE_C,
+             label="P(incorrect)  — the probe's score")
+    if is_prob:
+        axc.plot(x, conf, "-o", ms=3, lw=1.6, color=CONF_C,
+                 label="confidence  — model's p(top token)")
+        both = (pinc > 0.5) & (conf > 0.5)
+        axc.fill_between(x, 0, 1, where=both, step="mid", color=PROBE_C, alpha=0.10,
+                         label="confidently WRONG  (both above 0.5)")
+        axc.set_ylim(0, 1); axc.set_ylabel("probability  (0 to 1)", fontsize=9)
+    else:                                          # non-probability certainty -> twin axis
+        axc.set_ylim(0, 1); axc.set_ylabel("P(incorrect)", fontsize=9, color=PROBE_C)
+        axt = axc.twinx(); axt.plot(x, conf, "-", color=CONF_C, lw=1.4, alpha=0.85)
+        axt.set_ylabel(cert_label, fontsize=8, color=CONF_C)
+    axc.axhline(0.5, color="grey", lw=0.8, ls=":")
+    axc.set_xlabel("token position   (0 = first token of the step  ->  last token)",
+                   fontsize=9)
     axc.set_xlim(-0.5, T - 0.5)
+    axc.legend(fontsize=8, loc="upper left", framealpha=0.92, ncol=1)
+    axc.set_title("per token: how sure the model is (blue) vs how WRONG the probe thinks "
+                  "it is (red)", fontsize=9)
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
 
 
 def select_examples(steps, layer, n):
-    """Most-localized incorrect firings, plateau incorrect, and top false-fire correct."""
-    def prom(rows):
-        return spike_stats([r[_score_key(layer)] for r in rows])["prominence"]
-    def peaky(rows):
-        return spike_stats([r[_score_key(layer)] for r in rows])["peakiness"]
+    """Teaching set for the confidently-wrong story, by mean P(incorrect) & confidence:
+      confwrong        incorrect step, BOTH probe and confidence high (the headline case)
+      uncertain_wrong  incorrect step, probe high but confidence LOW (contrast)
+      confident_correct correct step, confidence high and probe low (control)
+    """
+    sk = _score_key(layer)
+    def means(rows):
+        pinc = sigmoid(np.array([r[sk] for r in rows]))
+        conf = np.array([r["p_top1"] for r in rows])
+        return float(pinc.mean()), float(conf.mean())
 
-    inc = [u for u, rw in steps.items() if rw[0]["label"] == 1 and rw[0]["n_step_tokens"] >= 4]
-    cor = [u for u, rw in steps.items() if rw[0]["label"] == 0 and rw[0]["n_step_tokens"] >= 4]
-    inc_spiky = sorted(inc, key=lambda u: peaky(steps[u]), reverse=True)
-    inc_flat = sorted(inc, key=lambda u: peaky(steps[u]))
-    cor_hot = sorted(cor, key=lambda u: prom(steps[u]), reverse=True)
+    inc, cor = [], []
+    for u, rw in steps.items():
+        if rw[0]["n_step_tokens"] < 6:
+            continue
+        mp, mc = means(rw)
+        (inc if rw[0]["label"] == 1 else cor).append((u, mp, mc))
+    confwrong = sorted(inc, key=lambda t: min(t[1], t[2]), reverse=True)   # both high
+    uncwrong = sorted(inc, key=lambda t: t[1] - t[2], reverse=True)        # wrong, unsure
+    confright = sorted(cor, key=lambda t: t[2] - t[1], reverse=True)       # sure, right
     k = max(1, n // 3)
     picks = []
-    for grp, tag in ((inc_spiky, "inc_spiky"), (inc_flat, "inc_flat"), (cor_hot, "cor_hot")):
+    for grp, tag in ((confwrong, "confwrong"), (uncwrong, "uncertain_wrong"),
+                     (confright, "confident_correct")):
+        grp = [u for u, *_ in grp]
         for u in grp[:k]:
             if u not in [p[0] for p in picks]:
                 picks.append((u, tag))
@@ -172,9 +200,12 @@ def plot_spike(steps, layer, out_path):
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))
     for ax, key, title in (
-        (axes[0], "peakiness", "peakiness  (peak-mean)/std\nhigh = one token spikes"),
-        (axes[1], "prominence", "prominence  peak - median (logits)"),
-        (axes[2], "argmax_frac", "position of peak token in step\n(1.0 = last token)")):
+        (axes[0], "peakiness", "Does one token stand out in the step?\n"
+                               "top token's height above the step average (sigma)"),
+        (axes[1], "prominence", "How far the top token sits above the typical token\n"
+                                "(probe logits)"),
+        (axes[2], "argmax_frac", "Where in the step is the top token?\n"
+                                 "(0 = first token, 1 = last token)")):
         vi = np.array([f[key] for f in inc]); vc = np.array([f[key] for f in cor])
         lo, hi = np.percentile(np.concatenate([vi, vc]), [1, 99])
         bins = np.linspace(lo, hi, 30)
@@ -218,9 +249,15 @@ def plot_coincidence(rows, steps, layer, out_path, cert="p_top1"):
         m = label == lb
         ax.scatter(cvals[m], score[m], s=4, c=col, alpha=0.25, linewidths=0, label=name)
     r_all = float(np.corrcoef(cvals, score)[0, 1])
-    ax.set_xlabel(f"per-token {label_txt}"); ax.set_ylabel(f"L{layer} probe score")
-    ax.set_title(f"probe score vs {cert} (r={r_all:.2f})", fontsize=9)
+    ax.set_xlabel(f"per-token {label_txt}  ->")
+    ax.set_ylabel(f"L{layer} probe score  (higher = more incorrect)  ->")
+    trend = ("up-right = fires MORE on confident tokens" if more_certain == "high"
+             else "down-right = fires LESS on surprising tokens")
+    ax.set_title(f"1 dot = 1 token.  {trend}\ncorr = {r_all:+.2f}", fontsize=9)
     ax.set_xlim(np.percentile(cvals, [0.5, 99.5]))
+    if more_certain == "high":
+        ax.text(0.97, 0.03, "confidently wrong ->", transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=8, color=PROBE_C, style="italic")
     ax.legend(fontsize=8)
 
     # (b) within-step distance: firing token vs the LEAST-certain token
@@ -239,9 +276,9 @@ def plot_coincidence(rows, steps, layer, out_path, cert="p_top1"):
     ax.hist(dist, bins=np.linspace(0, 1, 21), color=RED, alpha=0.7)
     ax.axvline(np.median(dist), color="k", lw=1.5, ls="--",
                label=f"median={np.median(dist):.2f}")
-    ax.set_xlabel(f"|argmax(probe) - argmax({dip_word})| / (T-1)")
-    ax.set_title(f"firing token vs {dip_word} token\n(incorrect steps; 0 = same token)",
-                 fontsize=9)
+    ax.set_xlabel(f"gap between them  (0 = same token,  1 = opposite ends of the step)")
+    ax.set_title(f"Is the probe's top token the {dip_word} token?\n"
+                 "(each incorrect step; left pile = yes, spread = no)", fontsize=9)
     ax.legend(fontsize=8)
 
     # (c) within-step corr(probe, certainty) distribution
@@ -250,8 +287,9 @@ def plot_coincidence(rows, steps, layer, out_path, cert="p_top1"):
     ax.axvline(np.median(corr_c), color="k", lw=1.5, ls="--",
                label=f"median r={np.median(corr_c):.2f}")
     ax.axvline(0, color="grey", lw=0.8)
-    ax.set_xlabel(f"within-step corr(probe score, {cert})")
-    ax.set_title(f"does probe track {cert} inside a step?", fontsize=9)
+    ax.set_xlabel(f"corr(probe, {cert}) inside one step   (<0 left | 0 | right >0)")
+    ax.set_title("Inside a step, do probe score & confidence rise together?\n"
+                 "(one bar = one incorrect step; right of 0 = yes)", fontsize=9)
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out_path, dpi=140)

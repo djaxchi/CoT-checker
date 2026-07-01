@@ -150,8 +150,13 @@ def encode_file(
     limit: int | None = None,
     shard_idx: int = 0,
     num_shards: int = 1,
+    layer: int = -1,
 ) -> dict:
     """Encode one JSONL file. Returns per-file stats.
+
+    ``layer`` selects which ``outputs.hidden_states`` index to read (0 = embeddings,
+    num_hidden_layers = final). Default -1 = the final layer (L28 for Qwen2.5-7B), the
+    original deployed readout; pass e.g. 20 to encode L20/last instead.
 
     Sharding: a deterministic ``global_index`` is assigned to every example in
     file order BEFORE sharding, so every worker agrees on the ordering. When
@@ -243,8 +248,9 @@ def encode_file(
                 use_cache=False,
             )
 
-        # Extract hidden state at the last token of candidate_step for each example
-        last_layer = outputs.hidden_states[-1]  # (batch, seq_len, hidden_dim)
+        # Extract hidden state at the last token of candidate_step for each example,
+        # from the requested layer (default -1 = final layer).
+        last_layer = outputs.hidden_states[layer]  # (batch, seq_len, hidden_dim)
         del outputs  # free GPU memory immediately
 
         for b_idx, (ex, cand_idx) in enumerate(zip(batch_exs, batch_cand_last_idx)):
@@ -385,6 +391,10 @@ def main() -> None:
     parser.add_argument("--num_shards", type=int, default=1,
                         help="Total number of shards (e.g. 4 for 4-GPU encoding).")
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--layer", type=int, default=-1,
+                        help="hidden_states index to read (0=embeddings .. "
+                             "num_hidden_layers=final). Default -1 = final layer (the "
+                             "original L28 readout). Pass 20 to encode L20/last.")
     parser.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--save_dtype", choices=["float16", "float32"], default="float16")
     parser.add_argument("--limit_per_file", type=int, default=None,
@@ -485,6 +495,12 @@ def main() -> None:
             f"num_shards={args.num_shards}"
         )
 
+    n_layers = int(model.config.num_hidden_layers)
+    if not (args.layer == -1 or 0 <= args.layer <= n_layers):
+        sys.exit(f"[encode] --layer {args.layer} out of range [-1, {n_layers}]")
+    print(f"[encode] reading hidden_states[{args.layer}] "
+          f"({'final layer' if args.layer == -1 else f'L{args.layer}'})", flush=True)
+
     gpu_info = get_gpu_info()
     t_all_start = time.perf_counter()
 
@@ -523,6 +539,7 @@ def main() -> None:
             limit=args.limit_per_file,
             shard_idx=args.shard_idx,
             num_shards=args.num_shards,
+            layer=args.layer,
         )
         files_manifest[stem] = {
             "jsonl_path": stats["jsonl_path"],
@@ -561,7 +578,7 @@ def main() -> None:
         "tokenizer_name": args.model_name_or_path,
         "offline": True,
         "local_files_only": args.local_files_only,
-        "layer": "last",
+        "layer": "last" if args.layer == -1 else int(args.layer),
         "token_position": "last token of candidate_step",
         "length_policy": "no truncation (fail-hard on overlength)",
         "max_seq_len": args.max_seq_len,

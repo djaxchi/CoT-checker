@@ -53,14 +53,23 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from encode_prm800k_hidden_states import git_commit, read_jsonl, write_jsonl  # noqa: E402
 from encode_prm800k_multitoken_multilayer import tokenize_span  # noqa: E402
 from inspect_margin_drivers import load_probe  # noqa: E402
-from src.analysis.token_trajectory import coincidence, spike_stats  # noqa: E402
+from src.analysis.token_trajectory import (  # noqa: E402
+    coincidence,
+    representation_stats,
+    spike_stats,
+)
 
 
-def _certainty_and_scores(out, b_idx, first, last, ids, hs_layers, w_t, bias, device):
-    """Per-token certainty + per-layer probe score for one step, computed on device.
+def _certainty_and_scores(out, b_idx, first, last, ids, hs_layers, w_t, bias, device,
+                          active_tau=6.0):
+    """Per-token certainty + per-layer probe score & representation stats for one step.
 
-    Returns (token_ids, dict of (T,) numpy arrays). Mirrors
-    src.analysis.token_trajectory.per_token_certainty / probe_scores.
+    Returns (token_ids, arrs, scores, reprs):
+      arrs   dict of (T,) certainty arrays (nll/entropy/logit_gap/p_top1/p_realized);
+      scores {layer: (T,) probe score};
+      reprs  {layer: {hidden_l2/hidden_absmax/hidden_nact: (T,)}}.
+    Mirrors src.analysis.token_trajectory.per_token_certainty / probe_scores /
+    representation_stats.
     """
     import torch
 
@@ -77,10 +86,17 @@ def _certainty_and_scores(out, b_idx, first, last, ids, hs_layers, w_t, bias, de
     top2 = pl.topk(2, dim=-1).values
     logit_gap = top2[:, 0] - top2[:, 1]
 
-    scores = {}
+    scores, reprs = {}, {}
     for li, hs in hs_layers.items():
         htok = hs[b_idx, first:last + 1, :].float()          # (T, hidden)
         scores[li] = (htok @ w_t + bias).detach().cpu().numpy()
+        absh = htok.abs()
+        reprs[li] = {
+            "hidden_l2": htok.norm(dim=-1).detach().cpu().numpy(),
+            "hidden_absmax": absh.max(dim=-1).values.detach().cpu().numpy(),
+            "hidden_nact": (absh > float(active_tau)).sum(dim=-1)
+            .float().detach().cpu().numpy(),
+        }
 
     arrs = {
         "nll": nll.detach().cpu().numpy(),
@@ -90,7 +106,48 @@ def _certainty_and_scores(out, b_idx, first, last, ids, hs_layers, w_t, bias, de
         "p_realized": p_realized.detach().cpu().numpy(),
     }
     assert all(v.shape == (T,) for v in arrs.values())
-    return ids[first:last + 1], arrs, scores
+    return ids[first:last + 1], arrs, scores, reprs
+
+
+def item_uid(ex: dict) -> str:
+    """Stable per-item id. PRM800K heldout rows carry ``uid``; fork items ``item_uid``."""
+    return ex.get("uid") or ex.get("item_uid") or f"row{ex.get('global_index', '?')}"
+
+
+def is_step_item(ex: dict) -> bool:
+    """True if the row is a scorable reasoning step (not a fork anchor / empty stub).
+
+    Fork anchors embed only the shared prefix (role=="anchor", candidate_step="",
+    label=-1) and have no step tokens to trace; the heldout rows are all real steps.
+    """
+    if ex.get("role") == "anchor":
+        return False
+    if int(ex.get("label", 0)) < 0:
+        return False
+    return bool(str(ex.get("candidate_step", "")).strip())
+
+
+def select_step_items(examples: list, max_forks=None) -> list:
+    """Drop anchors/empty steps; optionally keep only the first ``max_forks`` forks.
+
+    Fork selection is by first-seen order of ``fork_id`` in the file so it is identical
+    across shards (each shard applies the same filter before index-sharding). Rows with
+    no ``fork_id`` (the heldout set) are unaffected by ``max_forks``.
+    """
+    steps = [ex for ex in examples if is_step_item(ex)]
+    if max_forks is None:
+        return steps
+    kept: dict = {}
+    for ex in steps:
+        fid = ex.get("fork_id")
+        if fid is None:
+            continue
+        if fid not in kept and len(kept) >= max_forks:
+            continue
+        kept[fid] = True
+    if not kept:                       # no fork ids present -> max_forks is a no-op
+        return steps
+    return [ex for ex in steps if ex.get("fork_id") in kept]
 
 
 def main() -> None:
@@ -110,6 +167,11 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--max_forks", type=int, default=None,
+                    help="fork items only: keep the first N distinct fork_ids "
+                         "(bounds cost for the overlay plot; whole forks kept)")
+    ap.add_argument("--active_tau", type=float, default=6.0,
+                    help="|h_i|>tau counts as a strongly-active hidden dim (hidden_nact)")
     ap.add_argument("--shard_idx", type=int, default=0)
     ap.add_argument("--num_shards", type=int, default=1)
     ap.add_argument("--force", action="store_true")
@@ -160,13 +222,19 @@ def main() -> None:
     for gi, ex in enumerate(examples):
         ex["global_index"] = gi
     n_total = len(examples)
+    # Drop fork anchors / empty stubs and (optionally) cap to the first N forks. Done
+    # identically in every shard BEFORE index-sharding so shards stay disjoint.
+    examples = select_step_items(examples, max_forks=args.max_forks)
+    n_steps = len(examples)
     if args.limit is not None:
         examples = examples[:args.limit]
     if args.num_shards > 1:
         examples = [e for e in examples
                     if e["global_index"] % args.num_shards == args.shard_idx]
     n = len(examples)
-    print(f"[tok-traj] {n}/{n_total} items (shard {args.shard_idx}/{args.num_shards}) "
+    n_forks = len({e["fork_id"] for e in examples if e.get("fork_id") is not None})
+    print(f"[tok-traj] {n}/{n_steps} steps ({n_total} rows in file, {n_forks} forks) "
+          f"shard {args.shard_idx}/{args.num_shards} "
           f"layers={args.layers} probe_layer={args.probe_layer}", flush=True)
 
     tok_rows: list[dict] = []
@@ -182,9 +250,9 @@ def main() -> None:
                 full, fi, la = tokenize_span(tok, ex["problem"], ex["prefix"],
                                              ex["candidate_step"], args.max_seq_len)
             except ValueError as e:
-                sys.exit(f"[tok-traj] FATAL overlength uid={ex.get('uid','?')}: {e}")
+                sys.exit(f"[tok-traj] FATAL overlength uid={item_uid(ex)}: {e}")
             if fi < 1:
-                sys.exit(f"[tok-traj] uid={ex.get('uid','?')} has no prefix token "
+                sys.exit(f"[tok-traj] uid={item_uid(ex)} has no prefix token "
                          "before the step; cannot form predictive logits.")
             ids_list.append(full)
             firsts.append(fi)
@@ -201,13 +269,16 @@ def main() -> None:
 
         for b, ex in enumerate(batch):
             first, last = firsts[b], lasts[b]
-            step_ids, arrs, scores = _certainty_and_scores(
-                out, b, first, last, ids_list[b], hs_layers, w_t, bias, device)
+            step_ids, arrs, scores, reprs = _certainty_and_scores(
+                out, b, first, last, ids_list[b], hs_layers, w_t, bias, device,
+                active_tau=args.active_tau)
             toks = tok.convert_ids_to_tokens(step_ids)
             T = len(step_ids)
+            uid = item_uid(ex)
             for t in range(T):
                 row = {
-                    "uid": ex["uid"], "problem_id": ex["problem_id"],
+                    "uid": uid, "fork_id": ex.get("fork_id"),
+                    "role": ex.get("role"), "problem_id": ex["problem_id"],
                     "step_idx": ex["step_idx"], "label": int(ex["label"]),
                     "rating": ex.get("rating"),
                     "tok_pos": t, "n_step_tokens": T,
@@ -220,11 +291,14 @@ def main() -> None:
                 }
                 for li in args.layers:
                     row[f"probe_score_l{li}"] = float(scores[li][t])
+                    for rk, rv in reprs[li].items():
+                        row[f"{rk}_l{li}"] = float(rv[t])
                 tok_rows.append(row)
             n_tokens_total += T
 
             s_probe = scores[args.probe_layer]
-            summary = {"uid": ex["uid"], "label": int(ex["label"]),
+            summary = {"uid": uid, "fork_id": ex.get("fork_id"),
+                       "role": ex.get("role"), "label": int(ex["label"]),
                        "rating": ex.get("rating"), "n_step_tokens": T,
                        **{f"spike_{k}": v for k, v in spike_stats(s_probe).items()}}
             for unc_name in ("nll", "entropy"):
@@ -246,6 +320,7 @@ def main() -> None:
         "probe": str(args.probe), "probe_layer": args.probe_layer,
         "layers": args.layers, "num_hidden_layers": num_layers,
         "hidden_size": hidden, "n_steps": n, "n_total_in_file": n_total,
+        "n_forks": n_forks, "max_forks": args.max_forks, "active_tau": args.active_tau,
         "n_tokens": n_tokens_total, "shard_idx": args.shard_idx,
         "num_shards": args.num_shards, "max_seq_len": args.max_seq_len,
         "created_at": datetime.now(timezone.utc).isoformat(),

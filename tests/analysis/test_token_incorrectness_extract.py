@@ -14,7 +14,11 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from src.analysis.token_trajectory import per_token_certainty, probe_scores
+from src.analysis.token_trajectory import (
+    per_token_certainty,
+    probe_scores,
+    representation_stats,
+)
 
 _SCRIPT = (Path(__file__).resolve().parent.parent.parent
            / "scripts" / "analysis" / "s3_token_incorrectness_extract.py")
@@ -37,9 +41,9 @@ def test_certainty_and_scores_matches_reference():
     out = SimpleNamespace(logits=torch.tensor(logits))
     hs_layers = {28: torch.tensor(hs28), 20: torch.tensor(hs20)}
     device = torch.device("cpu")
-    step_ids, arrs, scores = extract._certainty_and_scores(
+    step_ids, arrs, scores, reprs = extract._certainty_and_scores(
         out, b_idx, first, last, ids, hs_layers,
-        torch.tensor(w, dtype=torch.float32), bias, device)
+        torch.tensor(w, dtype=torch.float32), bias, device, active_tau=0.5)
 
     # reference: predictive rows for tokens [first..last] are logits[first-1..last-1]
     pred = logits[b_idx, first - 1:last, :]
@@ -51,8 +55,35 @@ def test_certainty_and_scores_matches_reference():
         np.testing.assert_allclose(arrs[k], ref[k], rtol=1e-4, atol=1e-4)
 
     for li, hs in ((28, hs28), (20, hs20)):
-        ref_score = probe_scores(hs[b_idx, first:last + 1, :], w, bias)
+        span = hs[b_idx, first:last + 1, :]
+        ref_score = probe_scores(span, w, bias)
         np.testing.assert_allclose(scores[li], ref_score, rtol=1e-4, atol=1e-4)
+        ref_repr = representation_stats(span, active_tau=0.5)
+        for rk in ("hidden_l2", "hidden_absmax", "hidden_nact"):
+            np.testing.assert_allclose(reprs[li][rk], ref_repr[rk], rtol=1e-4, atol=1e-4)
+
+
+def test_select_step_items_drops_anchors_and_caps_forks():
+    rows = [
+        {"role": "anchor", "candidate_step": "", "label": -1, "fork_id": "A"},
+        {"role": "positive", "candidate_step": "x", "label": 0, "fork_id": "A"},
+        {"role": "negative", "candidate_step": "y", "label": 1, "fork_id": "A"},
+        {"role": "positive", "candidate_step": "z", "label": 0, "fork_id": "B"},
+        {"role": "negative", "candidate_step": " ", "label": 1, "fork_id": "B"},  # empty step
+        {"role": "negative", "candidate_step": "w", "label": 1, "fork_id": "C"},
+    ]
+    kept = extract.select_step_items(rows, max_forks=None)
+    assert [r["fork_id"] for r in kept] == ["A", "A", "B", "C"]  # anchor + blank dropped
+
+    capped = extract.select_step_items(rows, max_forks=2)
+    assert {r["fork_id"] for r in capped} == {"A", "B"}          # first two forks only
+
+
+def test_select_step_items_noop_on_heldout_rows():
+    # Heldout rows carry no fork_id/role: max_forks must not drop them.
+    rows = [{"uid": "u0", "candidate_step": "a", "label": 0},
+            {"uid": "u1", "candidate_step": "b", "label": 1}]
+    assert extract.select_step_items(rows, max_forks=1) == rows
 
 
 def test_alignment_is_shifted_not_self():
@@ -67,7 +98,7 @@ def test_alignment_is_shifted_not_self():
     first, last = 2, 4                 # step tokens ids[2..4] = [2,3,4]
     out = SimpleNamespace(logits=torch.tensor(logits))
     hs = {28: torch.zeros((B, S, H))}
-    _, arrs, _ = extract._certainty_and_scores(
+    _, arrs, _, _ = extract._certainty_and_scores(
         out, 0, first, last, ids, hs, torch.zeros(H), 0.0, torch.device("cpu"))
     # predictive row for token position t is t-1: row1->tok1, row2->tok2, row3->tok3.
     # realized step tokens are [2,3,4]; row1 predicts 1 (not 2) -> high nll on first,

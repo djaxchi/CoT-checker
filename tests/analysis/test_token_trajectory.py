@@ -9,8 +9,35 @@ from src.analysis.token_trajectory import (
     coincidence,
     per_token_certainty,
     probe_scores,
+    representation_stats,
     spike_stats,
 )
+
+
+class TestRepresentationStats:
+    def test_known_vector(self):
+        # T=2, hidden=4. Row0 = [3,-4,0,0] -> l2=5, absmax=4; Row1 = [0,0,7,-1].
+        H = np.array([[3.0, -4.0, 0.0, 0.0], [0.0, 0.0, 7.0, -1.0]])
+        out = representation_stats(H, active_tau=6.0)
+        np.testing.assert_allclose(out["hidden_l2"], [5.0, math.sqrt(50.0)])
+        np.testing.assert_allclose(out["hidden_absmax"], [4.0, 7.0])
+        # only |7| > 6 -> row0 has 0 strong dims, row1 has 1.
+        np.testing.assert_allclose(out["hidden_nact"], [0.0, 1.0])
+
+    def test_shapes_and_tau(self):
+        rng = np.random.default_rng(1)
+        H = rng.standard_normal((5, 16))
+        out = representation_stats(H, active_tau=0.0)
+        for v in out.values():
+            assert v.shape == (5,)
+        # tau=0 counts every nonzero dim (all 80 entries a.s. nonzero -> 16 each).
+        np.testing.assert_allclose(out["hidden_nact"], np.full(5, 16.0))
+
+    def test_rejects_bad_shape(self):
+        with pytest.raises(ValueError):
+            representation_stats(np.zeros((0, 4)))
+        with pytest.raises(ValueError):
+            representation_stats(np.zeros(4))
 
 
 class TestPerTokenCertainty:

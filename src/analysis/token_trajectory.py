@@ -72,6 +72,30 @@ def probe_scores(H: np.ndarray, w: np.ndarray, b: float = 0.0) -> np.ndarray:
     return H @ w + float(b)
 
 
+def representation_stats(H: np.ndarray, active_tau: float = 6.0) -> dict:
+    """Per-token summaries of the dense hidden state (residual-stream) vector.
+
+    These are cheap dense proxies for the SAE-style quantities "how many features are
+    active" and "how strong is the strongest feature": we do NOT have a per-token SAE
+    wired into this pipeline, so on the raw residual stream we report
+
+      hidden_l2      : L2 norm ||h||_2               representation magnitude
+      hidden_absmax  : max_i |h_i|                    highest single activation
+      hidden_nact    : #{i : |h_i| > active_tau}      count of strongly-active dims
+
+    H : (T, hidden) per-token hidden states.  Returns a dict of (T,) float arrays.
+    """
+    H = np.asarray(H, dtype=np.float64)
+    if H.ndim != 2 or H.shape[0] == 0:
+        raise ValueError(f"H {H.shape} must be (T, hidden) with T > 0")
+    absH = np.abs(H)
+    return {
+        "hidden_l2": np.linalg.norm(H, axis=1),
+        "hidden_absmax": absH.max(axis=1),
+        "hidden_nact": (absH > float(active_tau)).sum(axis=1).astype(np.float64),
+    }
+
+
 def spike_stats(scores: np.ndarray) -> dict:
     """Localization of the incorrectness signal across a step's T token scores.
 

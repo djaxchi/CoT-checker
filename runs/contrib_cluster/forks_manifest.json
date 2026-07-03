@@ -1,0 +1,14 @@
+{
+  "created": "2026-07-03T16:45:32.961162+00:00",
+  "dataset": "tasksource/PRM800K",
+  "seed": 42,
+  "n_sessions_scanned": 101599,
+  "n_fork_steps_found": 56354,
+  "n_unique_pairs": 42797,
+  "n_sampled": 4000,
+  "n_dropped_overlength": 0,
+  "max_prefix_steps": 9,
+  "max_seq_len": 4096,
+  "prefix_steps_mean": 3.41925,
+  "note": "one correct + one wrong continuation per fork, same prefix; labels are for the pairs view only, main pipeline stays unsupervised"
+}

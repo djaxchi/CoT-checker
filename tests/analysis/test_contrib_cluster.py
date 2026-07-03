@@ -17,7 +17,11 @@ from src.analysis.contrib_cluster import (
     tag_entropy,
     tag_step,
 )
-from src.data.prm800k_trajectories import audit_trajectories, reconstruct_trajectory
+from src.data.prm800k_trajectories import (
+    audit_trajectories,
+    extract_fork_pairs,
+    reconstruct_trajectory,
+)
 
 # ---------------------------------------------------------------------------
 # Prefixes
@@ -188,6 +192,24 @@ def test_reconstruct_chosen_completion_path():
     traj = reconstruct_trajectory(_raw_sample(steps), 0, counters)
     assert traj is not None
     assert traj["steps"] == ["Start by adding.", "The answer is 4."]
+    assert "ratings" not in traj  # opt-in only
+
+
+def test_reconstruct_with_ratings():
+    steps = [
+        {"chosen_completion": 1,
+         "completions": [{"text": "bad", "rating": -1},
+                         {"text": "Start by adding.", "rating": 1}]},
+        {"human_completion": {"text": "Human fix."}, "completions": []},
+        {"chosen_completion": 0,
+         "completions": [{"text": "Maybe 4.", "rating": 0}]},
+    ]
+    counters: dict = {"malformed_samples": 0, "missing_problem": 0, "missing_steps": 0,
+                      "truncated_paths": 0, "too_few_steps": 0}
+    traj = reconstruct_trajectory(_raw_sample(steps), 0, counters, with_ratings=True)
+    assert traj is not None
+    assert traj["steps"] == ["Start by adding.", "Human fix.", "Maybe 4."]
+    assert traj["ratings"] == [1, "human", 0]
 
 
 def test_reconstruct_stops_at_missing_selection_and_drops_short():
@@ -201,6 +223,67 @@ def test_reconstruct_stops_at_missing_selection_and_drops_short():
     assert traj is None  # 1 usable step < 2
     assert counters["truncated_paths"] == 1
     assert counters["too_few_steps"] == 1
+
+
+def test_extract_fork_pairs():
+    steps = [
+        # step 1: chosen correct + one wrong sibling -> fork at empty prefix
+        {"chosen_completion": 0,
+         "completions": [{"text": "Add both sides.", "rating": 1},
+                         {"text": "Multiply wrongly.", "rating": -1},
+                         {"text": "Flagged bad.", "rating": -1, "flagged": True},
+                         {"text": "Neutral.", "rating": 0}]},
+        # step 2: single correct completion -> no fork, prefix advances
+        {"chosen_completion": 0, "completions": [{"text": "So x = 4.", "rating": 1}]},
+        # step 3: chosen correct + wrong -> fork with 2-step prefix
+        {"chosen_completion": 1,
+         "completions": [{"text": "Thus x = 9.", "rating": -1},
+                         {"text": "Thus x = 4.", "rating": 1}]},
+    ]
+    counters = {"skipped_sessions": 0, "forks_found": 0}
+    forks = extract_fork_pairs(_raw_sample(steps), counters)
+    assert counters["forks_found"] == 2
+    assert forks[0]["step_index"] == 1
+    assert forks[0]["prefix_steps"] == []
+    assert forks[0]["correct"] == "Add both sides."
+    assert forks[0]["wrongs"] == ["Multiply wrongly."]  # flagged + neutral excluded
+    assert forks[1]["step_index"] == 3
+    assert forks[1]["prefix_steps"] == ["Add both sides.", "So x = 4."]
+    assert forks[1]["correct"] == "Thus x = 4."
+    assert forks[1]["wrongs"] == ["Thus x = 9."]
+
+
+def test_extract_fork_pairs_needs_pos_and_neg():
+    steps = [
+        # -1 only (no +1 sibling): not a fork, even though it has a human step
+        {"human_completion": {"text": "Human step."},
+         "completions": [{"text": "wrong", "rating": -1}]},
+        {"chosen_completion": 0, "completions": [{"text": "ok", "rating": 1}]},
+    ]
+    counters = {"skipped_sessions": 0, "forks_found": 0}
+    assert extract_fork_pairs(_raw_sample(steps), counters) == []
+
+
+def test_extract_fork_pairs_non_chosen_positive_and_final_step():
+    steps = [
+        # chosen is rated 0, but a +1 sibling exists -> fork anchored on the +1
+        {"chosen_completion": 0,
+         "completions": [{"text": "Neutral step.", "rating": 0},
+                         {"text": "Good step.", "rating": 1},
+                         {"text": "Bad step.", "rating": -1}]},
+        # final step: rated pair but NO selection (session ended) -> still a fork
+        {"completions": [{"text": "Right end.", "rating": 1},
+                         {"text": "Wrong end.", "rating": -1}]},
+    ]
+    counters = {"skipped_sessions": 0, "forks_found": 0}
+    forks = extract_fork_pairs(_raw_sample(steps), counters)
+    assert counters["forks_found"] == 2
+    assert forks[0]["correct"] == "Good step."
+    assert forks[0]["wrongs"] == ["Bad step."]
+    # prefix advanced with the CHOSEN (neutral) step, not the +1 sibling
+    assert forks[1]["prefix_steps"] == ["Neutral step."]
+    assert forks[1]["correct"] == "Right end."
+    assert forks[1]["wrongs"] == ["Wrong end."]
 
 
 def test_audit_trajectories_counts():

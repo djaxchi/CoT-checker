@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=00:45:00
 #SBATCH --output=%x-%j.out
 
 # S4 contrib-cluster pipeline (exploratory, unsupervised — no correctness labels):

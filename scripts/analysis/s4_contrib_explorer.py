@@ -257,7 +257,9 @@ HTML_TEMPLATE = r"""<!doctype html>
               font-size: 12px; }
   #main { display: flex; flex: 1; min-height: 0; }
   #plotwrap { flex: 1; position: relative; }
-  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%;
+           cursor: grab; touch-action: none; }
+  canvas.panning { cursor: grabbing; }
   #side {
     width: 260px; border-left: 1px solid var(--border); padding: 10px 12px;
     overflow-y: auto; font-size: 12.5px;
@@ -483,8 +485,9 @@ function resize() {
   draw();
 }
 const PAD = 26;
-function px(i) { return PAD + xs[i] * (W - 2 * PAD); }
-function py(i) { return H - PAD - ys[i] * (H - 2 * PAD); }
+let view = {k: 1, tx: 0, ty: 0};          // zoom scale + pan offset (screen px)
+function px(i) { return (PAD + xs[i] * (W - 2 * PAD)) * view.k + view.tx; }
+function py(i) { return (H - PAD - ys[i] * (H - 2 * PAD)) * view.k + view.ty; }
 
 function draw() {
   if (!xs) return;
@@ -512,7 +515,38 @@ function draw() {
   ctx.globalAlpha = 1;
 }
 
+// ---- zoom & pan -----------------------------------------------------------
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const f = Math.exp(-e.deltaY * 0.0022);
+  const k = Math.min(80, Math.max(1, view.k * f));
+  const g = k / view.k;
+  view.tx = mx - (mx - view.tx) * g;
+  view.ty = my - (my - view.ty) * g;
+  view.k = k;
+  if (view.k === 1) { view.tx = 0; view.ty = 0; }
+  tip.style.display = 'none';
+  draw();
+}, {passive: false});
+let pan = null;
+cv.addEventListener('mousedown', e => {
+  pan = {x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, moved: false};
+  cv.classList.add('panning');
+});
+addEventListener('mouseup', () => { pan = null; cv.classList.remove('panning'); });
+cv.addEventListener('dblclick', () => { view = {k: 1, tx: 0, ty: 0}; draw(); });
+
 cv.addEventListener('mousemove', e => {
+  if (pan) {
+    view.tx = pan.tx + (e.clientX - pan.x);
+    view.ty = pan.ty + (e.clientY - pan.y);
+    if (Math.abs(e.clientX - pan.x) + Math.abs(e.clientY - pan.y) > 2) pan.moved = true;
+    tip.style.display = 'none';
+    draw();
+    return;
+  }
   const rect = cv.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
   let best = -1, bd = 90;
@@ -543,6 +577,8 @@ cv.addEventListener('mouseleave', () => tip.style.display = 'none');
 
 [selData, selRepr, selLayer, selStep, selColor].forEach(s => s.onchange = () => {
   hidden.clear();
+  if (s === selData || s === selRepr || s === selLayer)
+    view = {k: 1, tx: 0, ty: 0};   // new embedding -> reset zoom
   if (s === selData) rebuildControls();
   recompute();
 });
@@ -552,7 +588,8 @@ addEventListener('resize', resize);
 el('foot').textContent = 'Generated ' + D.generated + ' · ' +
   D.steps.n.toLocaleString() + ' golden-path steps' +
   (D.pairs ? ' · ' + D.pairs.nForks.toLocaleString() + ' matched fork pairs' : '') +
-  ' · views: ' + D.combos.join(', ');
+  ' · views: ' + D.combos.join(', ') +
+  ' · scroll = zoom, drag = pan, double-click = reset';
 // URL presets, e.g. explorer.html?data=pairs&repr=contribution&layer=28&color=label
 const q = new URLSearchParams(location.search);
 if (q.get('data') && D[q.get('data')]) selData.value = q.get('data');

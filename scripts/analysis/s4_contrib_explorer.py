@@ -343,6 +343,7 @@ D.reprs.forEach(r => selRepr.add(new Option(r, r)));
 D.layers.forEach(l => selLayer.add(new Option('L' + l, l)));
 selRepr.value = D.reprs.includes('contribution') ? 'contribution' : D.reprs[0];
 
+let highlight = null;   // {idxs:[...], path:bool} — traced trajectory or fork pair
 const COLOR_MODES = {
   steps: [['cluster','cluster'],['topTag','top regex tag'],['stepIndex','step index'],
           ['charLen','step length (chars)'],['tokenCount','prefix tokens'],
@@ -375,11 +376,12 @@ function rebuildControls() {
   el('notes').textContent = selData.value === 'pairs'
     ? 'Matched forks: one correct (+1) and one incorrect (-1) continuation of the ' +
       'IDENTICAL prefix, so position/length confounds cancel within a pair. Joint ' +
-      'UMAP per repr/layer, seed 42 — navigation only. Click a legend entry to isolate.'
+      'UMAP per repr/layer, seed 42 — navigation only. Click a legend entry to ' +
+      'isolate; click a point to link it to its pair partner (Esc clears).'
     : 'UMAP(cosine) of PCA-50 on L2-normalized vectors, seed 42 — navigation only, ' +
-      'not evidence of cluster structure. Click a legend entry to isolate it; click ' +
-      'again to restore. Correctness ratings are matched post-hoc and were never ' +
-      'used by the pipeline.';
+      'not evidence of cluster structure. Click a legend entry to isolate it. ' +
+      'Click a point to trace its trajectory step 1 → T (Esc clears). Correctness ' +
+      'ratings are matched post-hoc and were never used by the pipeline.';
 }
 
 function catInfo(m) {
@@ -504,7 +506,7 @@ function draw() {
       ctx.stroke();
     }
   }
-  ctx.globalAlpha = 0.62;
+  ctx.globalAlpha = highlight ? 0.18 : 0.62;
   for (let i = 0; i < n; i++) {
     if (!visible[i]) continue;
     ctx.fillStyle = colors[i];
@@ -513,6 +515,32 @@ function draw() {
     ctx.fill();
   }
   ctx.globalAlpha = 1;
+  if (highlight) {
+    const acc = dark ? '#3987e5' : '#2a78d6';
+    const ring = dark ? '#ffffff' : '#0b0b0b';
+    if (highlight.path && highlight.idxs.length > 1) {
+      ctx.strokeStyle = acc; ctx.lineWidth = 1.6; ctx.globalAlpha = 0.9;
+      ctx.beginPath();
+      ctx.moveTo(px(highlight.idxs[0]), py(highlight.idxs[0]));
+      for (let k = 1; k < highlight.idxs.length; k++)
+        ctx.lineTo(px(highlight.idxs[k]), py(highlight.idxs[k]));
+      ctx.stroke();
+    }
+    highlight.idxs.forEach((i, k) => {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = colors[i] || GRAY;
+      ctx.strokeStyle = ring; ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(px(i), py(i), r + 2.2, 0, 6.2832);
+      ctx.fill(); ctx.stroke();
+      if (highlight.path) {   // step number above each node of the traced path
+        ctx.fillStyle = ring;
+        ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(String(ds.stepIndex[i]), px(i), py(i) - r - 5);
+      }
+    });
+    ctx.globalAlpha = 1;
+  }
 }
 
 // ---- zoom & pan -----------------------------------------------------------
@@ -537,6 +565,37 @@ cv.addEventListener('mousedown', e => {
 });
 addEventListener('mouseup', () => { pan = null; cv.classList.remove('panning'); });
 cv.addEventListener('dblclick', () => { view = {k: 1, tx: 0, ty: 0}; draw(); });
+
+function nearestVisible(mx, my, maxD2) {
+  let best = -1, bd = maxD2;
+  for (let i = 0; i < ds.n; i++) {
+    if (!visible[i]) continue;
+    const dx = px(i) - mx, dy = py(i) - my, d = dx * dx + dy * dy;
+    if (d < bd) { bd = d; best = i; }
+  }
+  return best;
+}
+cv.addEventListener('click', e => {
+  if (pan && pan.moved) return;                       // drag, not a click
+  const rect = cv.getBoundingClientRect();
+  const best = nearestVisible(e.clientX - rect.left, e.clientY - rect.top, 120);
+  if (best < 0) { highlight = null; draw(); return; }
+  if (selData.value === 'pairs') {
+    const half = ds.nForks;
+    const j = best < half ? best + half : best - half;
+    highlight = {idxs: [best, j], path: true};        // partner + connecting line
+  } else {
+    const tid = ds.traj[best];
+    const idxs = [];
+    for (let i = 0; i < ds.n; i++) if (ds.traj[i] === tid) idxs.push(i);
+    idxs.sort((a, b) => ds.stepIndex[a] - ds.stepIndex[b]);
+    highlight = {idxs, path: true};
+  }
+  draw();
+});
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') { highlight = null; draw(); }
+});
 
 cv.addEventListener('mousemove', e => {
   if (pan) {
@@ -577,8 +636,10 @@ cv.addEventListener('mouseleave', () => tip.style.display = 'none');
 
 [selData, selRepr, selLayer, selStep, selColor].forEach(s => s.onchange = () => {
   hidden.clear();
-  if (s === selData || s === selRepr || s === selLayer)
+  if (s === selData || s === selRepr || s === selLayer) {
     view = {k: 1, tx: 0, ty: 0};   // new embedding -> reset zoom
+    highlight = null;
+  }
   if (s === selData) rebuildControls();
   recompute();
 });

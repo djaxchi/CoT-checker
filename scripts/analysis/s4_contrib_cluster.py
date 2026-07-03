@@ -302,8 +302,13 @@ def main() -> None:
                           stem, args.max_cards, args.min_card_size, args.seed)
 
             if not args.no_umap:
-                written = umap_plots(Xp, labels, tags_df, plots_dir, stem, args.seed)
-                print(f"[cluster] {stem}: {len(written)} plots", flush=True)
+                try:
+                    written = umap_plots(Xp, labels, tags_df, plots_dir, stem,
+                                         args.seed)
+                    print(f"[cluster] {stem}: {len(written)} plots", flush=True)
+                except ImportError as e:
+                    print(f"[cluster] {stem}: umap unavailable ({e}); "
+                          "skipping plots", flush=True)
             print(f"[cluster] {stem}: algo={algo} clusters={metrics['n_clusters']} "
                   f"noise={metrics['noise_ratio']:.1%} "
                   f"sil={metrics['silhouette']} "

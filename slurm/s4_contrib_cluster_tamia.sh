@@ -44,6 +44,15 @@ export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 
 cd "$PROJECT_ROOT"
+
+# Node-local venv from the offline wheelhouse (same pattern as every other
+# TamIA script). sklearn>=1.3 provides HDBSCAN; umap-learn is viz-only and
+# stage 5 skips plots if it is unavailable.
+virtualenv --no-download "$SLURM_TMPDIR/env"
+source "$SLURM_TMPDIR/env/bin/activate"
+pip install --no-index --upgrade pip
+pip install --no-index torch transformers numpy pandas pyarrow scikit-learn matplotlib
+pip install --no-index umap-learn || echo "[warn] umap-learn wheel unavailable; UMAP plots will be skipped"
 mkdir -p "$RUN_DIR"
 FORCE_FLAG=""; [ -n "$FORCE" ] && FORCE_FLAG="--force"
 LIMIT_FLAG=""; [ -n "$LIMIT" ] && LIMIT_FLAG="--limit $LIMIT"

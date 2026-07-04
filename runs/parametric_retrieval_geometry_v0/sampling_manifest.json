@@ -1,0 +1,217 @@
+{
+  "created": "2026-07-03T23:24:20.409190+00:00",
+  "git_commit": "1e5cd54",
+  "dataset": "google/WikiProfile",
+  "csv_url": "https://huggingface.co/datasets/google/WikiProfile/resolve/main/wikiprofile.csv",
+  "n_facts_total": 2150,
+  "n_facts_sampled": 800,
+  "seed": 42,
+  "qa_families": [
+    "direct",
+    "direct_natural",
+    "reverse",
+    "reverse_natural"
+  ],
+  "n_qa_instances": 3200,
+  "n_completion_instances": 800,
+  "gbc_bin_edges": {
+    "low": [
+      90,
+      1820
+    ],
+    "mid": [
+      1820,
+      121608
+    ],
+    "high": [
+      121639,
+      321824
+    ],
+    "very_high": [
+      321824,
+      10334413
+    ]
+  },
+  "allocation": [
+    {
+      "gbc_bin": "high",
+      "category": "Arts",
+      "n_facts": 36
+    },
+    {
+      "gbc_bin": "high",
+      "category": "Everyday Life",
+      "n_facts": 20
+    },
+    {
+      "gbc_bin": "high",
+      "category": "Geography",
+      "n_facts": 16
+    },
+    {
+      "gbc_bin": "high",
+      "category": "History",
+      "n_facts": 16
+    },
+    {
+      "gbc_bin": "high",
+      "category": "People",
+      "n_facts": 22
+    },
+    {
+      "gbc_bin": "high",
+      "category": "Philosophy & Religion",
+      "n_facts": 18
+    },
+    {
+      "gbc_bin": "high",
+      "category": "Science",
+      "n_facts": 27
+    },
+    {
+      "gbc_bin": "high",
+      "category": "Society",
+      "n_facts": 23
+    },
+    {
+      "gbc_bin": "high",
+      "category": "Technology",
+      "n_facts": 23
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Arts",
+      "n_facts": 28
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Everyday Life",
+      "n_facts": 25
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Geography",
+      "n_facts": 17
+    },
+    {
+      "gbc_bin": "low",
+      "category": "History",
+      "n_facts": 27
+    },
+    {
+      "gbc_bin": "low",
+      "category": "People",
+      "n_facts": 19
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Philosophy & Religion",
+      "n_facts": 12
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Science",
+      "n_facts": 21
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Society",
+      "n_facts": 30
+    },
+    {
+      "gbc_bin": "low",
+      "category": "Technology",
+      "n_facts": 21
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Arts",
+      "n_facts": 27
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Everyday Life",
+      "n_facts": 24
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Geography",
+      "n_facts": 21
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "History",
+      "n_facts": 20
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "People",
+      "n_facts": 22
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Philosophy & Religion",
+      "n_facts": 16
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Science",
+      "n_facts": 26
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Society",
+      "n_facts": 24
+    },
+    {
+      "gbc_bin": "mid",
+      "category": "Technology",
+      "n_facts": 20
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Arts",
+      "n_facts": 35
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Everyday Life",
+      "n_facts": 21
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Geography",
+      "n_facts": 14
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "History",
+      "n_facts": 16
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "People",
+      "n_facts": 32
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Philosophy & Religion",
+      "n_facts": 13
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Science",
+      "n_facts": 26
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Society",
+      "n_facts": 17
+    },
+    {
+      "gbc_bin": "very_high",
+      "category": "Technology",
+      "n_facts": 25
+    }
+  ]
+}

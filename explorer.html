@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoT-checker — experiment explorer</title>
+<!--
+  Manifest-driven experiment explorer. Serve from the repo root:
+      python -m http.server 8000     ->  http://localhost:8000/explorer.html
+  Each experiment publishes runs/<run>/explorer_payload/{manifest,instances,
+  panels,points_*}.json (see scripts/parametric_retrieval/
+  prg_build_explorer_payload.py). URL params: ?exp=<id>  ?manifest=<path>.
+  The older embedded-data explorer lives at runs/contrib_cluster/explorer.html.
+-->
+<style>
+  :root {
+    --bg:#1a1a19; --panel:#232322; --panel2:#2b2b29; --border:#3a3a37;
+    --ink:#e8e6e1; --ink2:#b0afab; --ink3:#6f6e69; --accent:#3987e5;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding:10px 16px 6px; border-bottom:1px solid var(--border);
+           display:flex; gap:14px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header .desc { color:var(--ink2); font-size:12px; }
+  select, button {
+    background:var(--panel2); color:var(--ink); border:1px solid var(--border);
+    border-radius:5px; padding:3px 6px; font-size:12px; }
+  button:hover, select:hover { border-color:var(--ink3); cursor:pointer; }
+  #controls { display:flex; gap:10px; padding:8px 16px; flex-wrap:wrap;
+              align-items:center; border-bottom:1px solid var(--border); }
+  #controls label { color:var(--ink2); font-size:11px; margin-right:2px; }
+  .chips { display:flex; gap:4px; flex-wrap:wrap; }
+  .chip { padding:2px 8px; border-radius:10px; border:1px solid var(--border);
+          font-size:11px; cursor:pointer; user-select:none; color:var(--ink2); }
+  .chip.on { color:var(--ink); border-color:currentColor; }
+  .chip .sw { display:inline-block; width:8px; height:8px; border-radius:2px;
+              margin-right:5px; }
+  #main { display:flex; gap:0; }
+  #scatterWrap { flex:1 1 auto; position:relative; min-width:0; }
+  #scatter { display:block; width:100%; height:640px; cursor:crosshair; }
+  #legend { width:210px; flex:0 0 210px; padding:10px 12px;
+            border-left:1px solid var(--border); font-size:12px; }
+  #legend h3 { font-size:11px; text-transform:uppercase; letter-spacing:.05em;
+               color:var(--ink3); margin:10px 0 4px; }
+  .lrow { display:flex; align-items:center; gap:7px; margin:3px 0;
+          color:var(--ink2); }
+  #tooltip { position:absolute; pointer-events:none; background:#111110f2;
+             border:1px solid var(--border); border-radius:6px; padding:8px 10px;
+             font-size:11.5px; max-width:380px; display:none; z-index:5;
+             color:var(--ink); box-shadow:0 4px 16px #0008; }
+  #tooltip .k { color:var(--ink3); }
+  #tooltip .q { color:var(--ink2); font-style:italic; }
+  #status { position:absolute; top:8px; left:12px; color:var(--ink3);
+            font-size:11px; }
+  #panels { display:grid; grid-template-columns:repeat(auto-fit,minmax(430px,1fr));
+            gap:14px; padding:14px 16px 30px; }
+  .panel { background:var(--panel); border:1px solid var(--border);
+           border-radius:8px; padding:12px 14px; overflow-x:auto; }
+  .panel h2 { font-size:12px; margin:0 0 8px; font-weight:600;
+              color:var(--ink2); text-transform:uppercase; letter-spacing:.05em; }
+  table { border-collapse:collapse; font-size:12px; }
+  th, td { padding:3px 9px; text-align:right; border-bottom:1px solid var(--border); }
+  th { color:var(--ink3); font-weight:500; }
+  td:first-child, th:first-child { text-align:left; }
+  .hmcell { cursor:pointer; }
+  #err { padding:30px; color:#e34948; font-size:14px; display:none; }
+  svg text { fill:var(--ink2); font-size:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CoT-checker explorer</h1>
+  <select id="selExp"></select>
+  <span class="desc" id="expDesc"></span>
+</header>
+
+<div id="controls">
+  <span><label>layer</label><select id="selLayer"></select></span>
+  <span><label>mode</label><select id="selMode"></select></span>
+  <span><label>position</label><select id="selPos"></select></span>
+  <span><label>color</label><select id="selColor">
+    <option value="retrieval_class">retrieval_class</option>
+    <option value="family">question_family</option>
+    <option value="gbc_bin">gbc_bin</option>
+    <option value="grading_status">grading_status</option>
+  </select></span>
+  <span class="chips" id="classChips"></span>
+  <span class="chips" id="famChips"></span>
+  <span class="chips" id="gbcChips"></span>
+  <span><label>category</label><select id="selCat"></select></span>
+  <span><label>subj type</label><select id="selSubj"></select></span>
+  <span><label>obj type</label><select id="selObj"></select></span>
+  <span><label>direct ✓</label><select id="selDOK">
+    <option value="">any</option><option value="1">correct</option>
+    <option value="0">incorrect</option></select></span>
+  <span><label>cot ✓</label><select id="selCOK">
+    <option value="">any</option><option value="1">correct</option>
+    <option value="0">incorrect</option></select></span>
+  <button id="btnReset">reset view</button>
+</div>
+
+<div id="err"></div>
+<div id="main">
+  <div id="scatterWrap">
+    <canvas id="scatter"></canvas>
+    <div id="status"></div>
+    <div id="tooltip"></div>
+  </div>
+  <div id="legend"></div>
+</div>
+
+<div id="panels">
+  <div class="panel"><h2>Class counts</h2><div id="pCounts"></div></div>
+  <div class="panel"><h2>Between/within ratio (Calinski-Harabasz) by layer × position
+    <span style="color:var(--ink3)">— * shuffle p ≤ 0.001 · click to open view</span></h2>
+    <div id="pHeat"></div></div>
+  <div class="panel"><h2>CoT trajectory: distance to centroids
+    <select id="selTrajSrc" style="margin-left:8px"></select>
+    <select id="selTrajMetric" style="margin-left:4px">
+      <option value="toward_retrieval">toward retrieval (d_nonret − d_ret)</option>
+      <option value="dist_direct_retrieval">dist to direct_retrieval</option>
+      <option value="dist_non_retrieved">dist to non_retrieved</option>
+    </select></h2><div id="pTraj"></div></div>
+  <div class="panel"><h2>Retrieval class by popularity bin</h2><div id="pGbc"></div></div>
+</div>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Experiment registry. New experiments: add an entry with a manifest path
+// (payload contract: manifest.json + instances.json + panels.json + points_*).
+// Entries with href instead of manifest link out to standalone explorers.
+// ---------------------------------------------------------------------------
+const EXPERIMENTS = [
+  {
+    "id": "parametric_retrieval_geometry_v0",
+    "title": "Parametric Retrieval Geometry v0 — Qwen2.5-7B",
+    "description": "WikiProfile closed-book retrieval-regime geometry using Qwen2.5-7B-Instruct hidden states.",
+    "manifest": "runs/parametric_retrieval_geometry_v0/explorer_payload/manifest.json"
+  },
+  {
+    "id": "contrib_cluster",
+    "title": "S4 Contribution Clusters (standalone)",
+    "description": "PRM800K step-representation clusters; embedded-data explorer.",
+    "href": "runs/contrib_cluster/explorer.html"
+  }
+];
+
+const MAIN_CLASSES = ["direct_retrieval","reasoning_unlocked",
+                      "unstable_retrieval","non_retrieved"];
+const FAMILIES = ["direct","direct_natural","reverse","reverse_natural","completion"];
+const GBC_BINS = ["low","mid","high","very_high"];
+// Validated categorical palette (dark surface): blue/orange/purple/red + green.
+const FAMILY_COLORS = {direct:"#3987e5", direct_natural:"#199e70",
+  reverse:"#cc7a00", reverse_natural:"#9467bd", completion:"#e34948"};
+const GBC_COLORS = {low:"#9ec5f4", mid:"#6da7ec", high:"#3987e5",
+                    very_high:"#1e5da8"};
+const STATUS_COLORS = {exact:"#3987e5", containment:"#6da7ec",
+  normalized_number:"#199e70", ambiguous:"#cc7a00", failed:"#e34948"};
+const SEQ = ["#12325c","#1e5da8","#3987e5","#6da7ec","#9ec5f4"]; // dark->light
+const TRAJ_STEPS = ["final_prompt_token","first_generated_token","se_q1","se_q2",
+  "se_q3","se_q4","token_before_final_answer","first_final_answer_token",
+  "final_answer_token"];
+const STEP_SHORT = {final_prompt_token:"prompt", first_generated_token:"gen0",
+  se_q1:"se₁", se_q2:"se₂", se_q3:"se₃", se_q4:"se₄",
+  token_before_final_answer:"pre-ans", first_final_answer_token:"ans0",
+  final_answer_token:"ans末"};
+
+let manifest=null, inst=null, panels=null, base="";
+const pointsCache = {};
+let pts=null;                 // current points file
+let view={k:1,tx:0,ty:0}, hoverIdx=-1;
+const F = {};                 // filter state
+
+const $ = id => document.getElementById(id);
+const canvas=$("scatter"), ctx=canvas.getContext("2d"), tip=$("tooltip");
+
+function classColors(){ return manifest.class_colors; }
+function colorOf(i){
+  const mode=$("selColor").value;
+  if(mode==="retrieval_class") return classColors()[inst.retrieval_class[i]]||"#888";
+  if(mode==="family") return FAMILY_COLORS[inst.family[i]]||"#888";
+  if(mode==="gbc_bin") return GBC_COLORS[inst.gbc_bin[i]]||"#888";
+  if(mode==="grading_status"){
+    const s=$("selMode").value==="cot"?inst.cot_greedy_status[i]
+                                      :inst.direct_greedy_status[i];
+    return STATUS_COLORS[s]||"#888";
+  }
+  return "#888";
+}
+function shapeOf(i){ return manifest.family_shapes[inst.family[i]]||"circle"; }
+
+// ---- filters ---------------------------------------------------------------
+function chipSet(el, values, colors, key){
+  F[key]=new Set(values);
+  el.innerHTML="";
+  values.forEach(v=>{
+    const c=document.createElement("span");
+    c.className="chip on"; c.dataset.v=v;
+    c.innerHTML=(colors?`<span class="sw" style="background:${colors[v]}"></span>`:"")+v;
+    if(colors) c.style.color=colors[v];
+    c.onclick=()=>{ if(F[key].has(v)) F[key].delete(v); else F[key].add(v);
+                    c.classList.toggle("on"); draw(); };
+    el.appendChild(c);
+  });
+}
+function passFilters(i){
+  if(!F.cls.has(inst.retrieval_class[i])) return false;
+  if(!F.fam.has(inst.family[i])) return false;
+  if(!F.gbc.has(inst.gbc_bin[i])) return false;
+  if($("selCat").value && inst.category[i]!==$("selCat").value) return false;
+  if($("selSubj").value && inst.subject_type[i]!==$("selSubj").value) return false;
+  if($("selObj").value && inst.object_type[i]!==$("selObj").value) return false;
+  const d=$("selDOK").value, c=$("selCOK").value;
+  if(d!=="" && String(+inst.direct_greedy_correct[i])!==d) return false;
+  if(c!==""){ if(inst.cot_greedy_correct[i]===null) return false;
+              if(String(+inst.cot_greedy_correct[i])!==c) return false; }
+  return true;
+}
+
+// ---- data loading ----------------------------------------------------------
+async function fetchJSON(path){
+  const r=await fetch(path);
+  if(!r.ok) throw new Error(`${r.status} ${path}`);
+  return r.json();
+}
+async function loadExperiment(entry){
+  const mPath = new URLSearchParams(location.search).get("manifest")||entry.manifest;
+  base = mPath.replace(/[^/]+$/,"");
+  manifest = await fetchJSON(mPath);
+  [inst, panels] = (await Promise.all([
+     fetchJSON(base+manifest.instances_file),
+     fetchJSON(base+manifest.panels_file)]));
+  inst = inst.fields;
+  $("expDesc").textContent = manifest.description +
+    ` — ${manifest.model} · ${manifest.n_instances} instances`;
+  const dv=manifest.default_view;
+  fill($("selLayer"), manifest.hs_indices.map(k=>
+    ({v:k, t:`hs${k} (block ${k-1})`})), dv.hs_idx);
+  fill($("selMode"), ["direct","cot"].map(v=>({v,t:v})), dv.prompt_mode);
+  fillPositions(dv.position);
+  $("selColor").value=dv.color_by==="retrieval_class"?"retrieval_class":dv.color_by;
+  chipSet($("classChips"),
+          Object.keys(manifest.class_colors), manifest.class_colors, "cls");
+  chipSet($("famChips"), FAMILIES, FAMILY_COLORS, "fam");
+  chipSet($("gbcChips"), GBC_BINS, GBC_COLORS, "gbc");
+  fillOptions($("selCat"), uniq(inst.category), "all categories");
+  fillOptions($("selSubj"), uniq(inst.subject_type), "all subj");
+  fillOptions($("selObj"), uniq(inst.object_type), "all obj");
+  const srcs=uniq(panels.trajectory_summary.map(r=>r.centroid_source));
+  fill($("selTrajSrc"), srcs.map(v=>({v,t:"centroids: "+v})), srcs[0]);
+  await loadPoints();
+  renderPanels(); renderLegend();
+}
+function uniq(a){ return [...new Set(a.filter(v=>v!==null))].sort(); }
+function fill(sel, opts, val){
+  sel.innerHTML="";
+  opts.forEach(o=>{ const e=document.createElement("option");
+    e.value=o.v; e.textContent=o.t; sel.appendChild(e); });
+  if(val!==undefined) sel.value=String(val);
+}
+function fillOptions(sel, vals, allLabel){
+  sel.innerHTML=`<option value="">${allLabel}</option>`+
+    vals.map(v=>`<option>${v}</option>`).join("");
+}
+function fillPositions(keep){
+  const mode=$("selMode").value;
+  const pos=manifest.positions[mode]||[];
+  const pref=["final_prompt_token","first_generated_token",
+    "token_before_final_answer","first_final_answer_token","final_answer_token"];
+  const ordered=pref.filter(p=>pos.includes(p))
+    .concat(pos.filter(p=>!pref.includes(p)));
+  fill($("selPos"), ordered.map(v=>({v,t:v})),
+       keep&&ordered.includes(keep)?keep:ordered[0]);
+}
+async function loadPoints(){
+  const k=+$("selLayer").value, mode=$("selMode").value, pos=$("selPos").value;
+  const name=(manifest.points_files[`hs${String(k).padStart(2,"0")}`]||{})[mode]?.[pos];
+  if(!name){ pts=null; draw(); return; }
+  if(!pointsCache[name]) pointsCache[name]=await fetchJSON(base+name);
+  pts=pointsCache[name];
+  view={k:1,tx:0,ty:0};
+  draw(); renderTraj();
+}
+
+// ---- scatter ---------------------------------------------------------------
+function resize(){
+  const w=canvas.clientWidth, h=canvas.clientHeight,
+        r=window.devicePixelRatio||1;
+  canvas.width=w*r; canvas.height=h*r; ctx.setTransform(r,0,0,r,0,0);
+}
+const PAD=30;
+function mkScale(){
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  const xs=pts.x, ys=pts.y;
+  let x0=Math.min(...xs), x1=Math.max(...xs),
+      y0=Math.min(...ys), y1=Math.max(...ys);
+  const dx=(x1-x0)||1, dy=(y1-y0)||1;
+  return {
+    px:i=>(PAD+(xs[i]-x0)/dx*(w-2*PAD))*view.k+view.tx,
+    py:i=>(h-PAD-(ys[i]-y0)/dy*(h-2*PAD))*view.k+view.ty,
+  };
+}
+function mark(x,y,shape,r){
+  ctx.beginPath();
+  if(shape==="circle") ctx.arc(x,y,r,0,7);
+  else if(shape==="square") ctx.rect(x-r,y-r,2*r,2*r);
+  else if(shape==="triangle_up"){ ctx.moveTo(x,y-r); ctx.lineTo(x+r,y+r);
+    ctx.lineTo(x-r,y+r); ctx.closePath(); }
+  else if(shape==="triangle_down"){ ctx.moveTo(x,y+r); ctx.lineTo(x+r,y-r);
+    ctx.lineTo(x-r,y-r); ctx.closePath(); }
+  else { ctx.moveTo(x,y-r*1.2); ctx.lineTo(x+r*1.2,y); ctx.lineTo(x,y+r*1.2);
+    ctx.lineTo(x-r*1.2,y); ctx.closePath(); }
+}
+let visible=[];
+function draw(){
+  resize();
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  if(!pts){ $("status").textContent="no points file for this view"; return; }
+  const S=mkScale();
+  visible=[];
+  let n=0;
+  for(let j=0;j<pts.i.length;j++){
+    const i=pts.i[j];
+    if(!passFilters(i)) continue;
+    const x=S.px(j), y=S.py(j);
+    if(x<-10||y<-10||x>w+10||y>h+10){ n++; continue; }
+    visible.push(j);
+    ctx.globalAlpha = inst.is_control[i] ? 0.45 : 0.85;
+    ctx.fillStyle=colorOf(i);
+    mark(x,y,shapeOf(i),3.2);
+    ctx.fill();
+    n++;
+  }
+  if(hoverIdx>=0){
+    const j=hoverIdx, i=pts.i[j];
+    ctx.globalAlpha=1;
+    ctx.fillStyle=colorOf(i); ctx.strokeStyle="#1a1a19"; ctx.lineWidth=2;
+    mark(S.px(j),S.py(j),shapeOf(i),5); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle="#e8e6e1"; ctx.lineWidth=1;
+    mark(S.px(j),S.py(j),shapeOf(i),5); ctx.stroke();
+  }
+  ctx.globalAlpha=1;
+  $("status").textContent=
+    `${n} pts · PCA evr ${(pts.evr[0]*100).toFixed(0)}%/${(pts.evr[1]*100).toFixed(0)}%`+
+    ` · hs${pts.hs_idx} (block ${pts.block_idx}) · ${pts.prompt_mode} · ${pts.position}`;
+}
+
+// ---- hover tooltip ---------------------------------------------------------
+canvas.addEventListener("mousemove", e=>{
+  if(!pts) return;
+  const rect=canvas.getBoundingClientRect(),
+        mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  const S=mkScale();
+  let best=-1, bd=120;
+  for(const j of visible){
+    const d=(S.px(j)-mx)**2+(S.py(j)-my)**2;
+    if(d<bd){ bd=d; best=j; }
+  }
+  if(best!==hoverIdx){ hoverIdx=best; draw(); }
+  if(best<0){ tip.style.display="none"; return; }
+  const i=pts.i[best];
+  const g=v=>v===null||v===undefined?"—":v;
+  tip.innerHTML=`
+    <div><span class="k">${inst.fact_id[i]} · ${inst.question_id[i].split("::")[1]}
+      · ${inst.category[i]} · gbc ${inst.gbc[i]} (${inst.gbc_bin[i]})</span></div>
+    <div class="q">${inst.question[i]}</div>
+    <div><span class="k">gold</span> ${g(inst.gold_answer[i])}</div>
+    <div><span class="k">direct</span> ${g(inst.direct_greedy_answer[i])}
+      ${inst.direct_greedy_correct[i]?"✓":"✗"}
+      <span class="k">(pass@4 ${inst.direct_pass_at_4[i]?"✓":"✗"}
+      · ${g(inst.direct_greedy_status[i])})</span></div>
+    <div><span class="k">cot</span> ${g(inst.cot_greedy_final_answer[i])}
+      ${inst.cot_greedy_correct[i]===null?"":inst.cot_greedy_correct[i]?"✓":"✗"}
+      <span class="k">(pass@4 ${inst.cot_pass_at_4[i]===null?"—":
+        inst.cot_pass_at_4[i]?"✓":"✗"} · marker ${g(inst.cot_marker_found[i])})</span></div>
+    <div><b style="color:${colorOf(i)}">${inst.retrieval_class[i]}</b>
+      <span class="k"> · ${inst.subject_type[i]}→${inst.object_type[i]}
+      · hs${pts.hs_idx}/blk${pts.block_idx} · ${pts.position}</span></div>`;
+  tip.style.display="block";
+  tip.style.left=Math.min(mx+16, canvas.clientWidth-390)+"px";
+  tip.style.top=(my+14)+"px";
+});
+canvas.addEventListener("mouseleave", ()=>{ hoverIdx=-1; tip.style.display="none"; draw(); });
+
+// ---- zoom / pan ------------------------------------------------------------
+canvas.addEventListener("wheel", e=>{
+  e.preventDefault();
+  const rect=canvas.getBoundingClientRect(),
+        mx=e.clientX-rect.left, my=e.clientY-rect.top;
+  const f=Math.exp(-e.deltaY*0.0015);
+  view.tx=mx-(mx-view.tx)*f; view.ty=my-(my-view.ty)*f; view.k*=f;
+  draw();
+},{passive:false});
+let dragging=null;
+canvas.addEventListener("mousedown", e=>{ dragging={x:e.clientX,y:e.clientY}; });
+window.addEventListener("mousemove", e=>{
+  if(!dragging) return;
+  view.tx+=e.clientX-dragging.x; view.ty+=e.clientY-dragging.y;
+  dragging={x:e.clientX,y:e.clientY}; draw();
+});
+window.addEventListener("mouseup", ()=>{ dragging=null; });
+canvas.addEventListener("dblclick", ()=>{ view={k:1,tx:0,ty:0}; draw(); });
+$("btnReset").onclick=()=>{ view={k:1,tx:0,ty:0}; draw(); };
+
+// ---- legend ----------------------------------------------------------------
+function renderLegend(){
+  const cc=classColors();
+  let h="<h3>retrieval class (color)</h3>";
+  for(const c of Object.keys(cc))
+    h+=`<div class="lrow"><span class="sw" style="background:${cc[c]};width:10px;
+        height:10px;border-radius:2px;display:inline-block"></span>${c}</div>`;
+  h+="<h3>question family (shape)</h3>";
+  const glyph={circle:"●",square:"■",triangle_up:"▲",triangle_down:"▼",diamond:"◆"};
+  for(const f of FAMILIES)
+    h+=`<div class="lrow"><span style="width:12px;display:inline-block;
+        text-align:center">${glyph[manifest.family_shapes[f]]}</span>${f}</div>`;
+  h+=`<h3>notes</h3><div class="lrow" style="font-size:11px">completion points
+      (◆, dimmed) are the direct-only control and are excluded from the
+      four-class stats.</div>`;
+  $("legend").innerHTML=h;
+}
+
+// ---- panels ----------------------------------------------------------------
+function renderPanels(){ renderCounts(); renderHeat(); renderTraj(); renderGbc(); }
+
+function renderCounts(){
+  const rows=panels.class_counts.filter(r=>r.group_by==="family");
+  const fams=uniq(rows.map(r=>r.group));
+  const classes=uniq(rows.map(r=>r.retrieval_class));
+  const get=(c,f)=>(rows.find(r=>r.retrieval_class===c&&r.group===f)||{}).n||0;
+  let h="<table><tr><th>class</th>"+fams.map(f=>`<th>${f}</th>`).join("")+
+        "<th>total</th></tr>";
+  for(const c of classes){
+    const tot=fams.reduce((s,f)=>s+get(c,f),0);
+    const col=classColors()[c]||"#888";
+    h+=`<tr><td><span class="sw" style="background:${col};display:inline-block;
+        width:8px;height:8px;border-radius:2px;margin-right:6px"></span>${c}</td>`+
+       fams.map(f=>`<td>${get(c,f)||""}</td>`).join("")+`<td><b>${tot}</b></td></tr>`;
+  }
+  h+="</table>";
+  $("pCounts").innerHTML=h;
+}
+
+function renderHeat(){
+  const bw=panels.between_within;
+  if(!bw.length){ $("pHeat").innerHTML=
+    "<span style='color:var(--ink3)'>no separation stats (needs ≥2 classes per cell)</span>"; return; }
+  const layers=uniq(bw.map(r=>r.hs_idx));
+  const cols=[];
+  for(const m of ["direct","cot"])
+    for(const p of uniq(bw.filter(r=>r.prompt_mode===m).map(r=>r.position)))
+      cols.push([m,p]);
+  const vmax=Math.max(...bw.map(r=>r.ch_between_within));
+  let h="<table><tr><th></th>"+cols.map(([m,p])=>
+    `<th title="${m} · ${p}">${m==="cot"?"cot:":""}${p.replace(/_token$/,"")
+      .replace("final_prompt","prompt").replace("first_generated","gen0")
+      .replace("token_before_final_answer","pre-ans")
+      .replace("first_final_answer","ans0").replace("final_answer","ansN")}</th>`)
+    .join("")+"</tr>";
+  for(const k of layers){
+    h+=`<tr><td>hs${k}</td>`;
+    for(const [m,p] of cols){
+      const r=bw.find(r=>r.hs_idx===k&&r.prompt_mode===m&&r.position===p);
+      if(!r){ h+="<td></td>"; continue; }
+      const t=Math.min(1,r.ch_between_within/vmax);
+      const ci=Math.min(SEQ.length-1,Math.floor(t*SEQ.length));
+      const star=r.shuffle_p<=0.001?"*":"";
+      h+=`<td class="hmcell" data-k="${k}" data-m="${m}" data-p="${p}"
+           title="CH ${r.ch_between_within.toFixed(2)} · shuffle p ${r.shuffle_p}
+· n ${r.n}" style="background:${SEQ[SEQ.length-1-ci]}22;
+           color:${t>0.6?"var(--ink)":"var(--ink2)"}">
+           ${r.ch_between_within.toFixed(1)}${star}</td>`;
+    }
+    h+="</tr>";
+  }
+  h+="</table>";
+  $("pHeat").innerHTML=h;
+  $("pHeat").querySelectorAll(".hmcell").forEach(el=>el.onclick=async()=>{
+    $("selLayer").value=el.dataset.k; $("selMode").value=el.dataset.m;
+    fillPositions(el.dataset.p); await loadPoints();
+    window.scrollTo({top:0,behavior:"smooth"});
+  });
+}
+
+function renderTraj(){
+  const box=$("pTraj");
+  const src=$("selTrajSrc").value, metric=$("selTrajMetric").value,
+        k=+$("selLayer").value;
+  const rows=panels.trajectory_summary.filter(
+    r=>r.centroid_source===src && r.hs_idx===k);
+  if(!rows.length){ box.innerHTML=
+    "<span style='color:var(--ink3)'>no trajectory data for this layer</span>"; return; }
+  const steps=TRAJ_STEPS.filter(s=>rows.some(r=>r.traj_step===s));
+  const W=560,H=230,L=46,B=26,T=10,R=8;
+  const vals=rows.map(r=>r[metric]).filter(v=>v!==null);
+  const sems=rows.map(r=>r[metric+"_sem"]||0);
+  let y0=Math.min(...vals)-Math.max(...sems), y1=Math.max(...vals)+Math.max(...sems);
+  if(y0===y1){ y0-=1; y1+=1; }
+  const X=i=>L+(W-L-R)*i/Math.max(1,steps.length-1);
+  const Y=v=>T+(H-T-B)*(1-(v-y0)/(y1-y0));
+  let s=`<svg width="${W}" height="${H}" style="max-width:100%">`;
+  for(const g of [y0,(y0+y1)/2,y1]){
+    s+=`<line x1="${L}" x2="${W-R}" y1="${Y(g)}" y2="${Y(g)}"
+         stroke="#3a3a37" stroke-width="1"/>
+        <text x="${L-6}" y="${Y(g)+3}" text-anchor="end">${g.toFixed(2)}</text>`;
+  }
+  steps.forEach((st,i)=>{ s+=`<text x="${X(i)}" y="${H-8}"
+    text-anchor="middle">${STEP_SHORT[st]||st}</text>`; });
+  for(const c of MAIN_CLASSES){
+    const col=classColors()[c];
+    const line=steps.map((st,i)=>{
+      const r=rows.find(r=>r.retrieval_class===c&&r.traj_step===st);
+      return r?{x:X(i),y:Y(r[metric]),sem:r[metric+"_sem"]||0,v:r[metric]}:null;
+    }).filter(Boolean);
+    if(line.length<2) continue;
+    s+=`<path d="${line.map((p,i)=>(i?"L":"M")+p.x+" "+
+        (Y(p.v-p.sem))).join(" ")} ${[...line].reverse().map(p=>"L"+p.x+" "+
+        (Y(p.v+p.sem))).join(" ")} Z" fill="${col}" opacity="0.13"/>`;
+    s+=`<path d="${line.map((p,i)=>(i?"L":"M")+p.x+" "+p.y).join(" ")}"
+         fill="none" stroke="${col}" stroke-width="2"/>`;
+    line.forEach(p=>{ s+=`<circle cx="${p.x}" cy="${p.y}" r="2.6"
+      fill="${col}" stroke="#1a1a19" stroke-width="1.5"/>`; });
+    const last=line[line.length-1];
+    s+=`<text x="${last.x+4}" y="${last.y-5}" style="fill:${col}">${
+        c.replace("_retrieval","").replace("_retrieved","")}</text>`;
+  }
+  s+="</svg>";
+  box.innerHTML=s;
+}
+$("selTrajSrc").onchange=renderTraj;
+$("selTrajMetric").onchange=renderTraj;
+
+function renderGbc(){
+  const rows=panels.class_counts.filter(
+    r=>r.group_by==="gbc_bin" && MAIN_CLASSES.includes(r.retrieval_class));
+  if(!rows.length){ $("pGbc").innerHTML=""; return; }
+  let h="<table><tr><th>gbc bin</th><th style='text-align:left'>class share (QA instances)</th><th>n</th></tr>";
+  for(const b of GBC_BINS){
+    const br=rows.filter(r=>r.group===b);
+    const tot=br.reduce((s,r)=>s+r.n,0);
+    if(!tot) continue;
+    let bar="<div style='display:flex;width:280px;height:14px;gap:2px'>";
+    for(const c of MAIN_CLASSES){
+      const n=(br.find(r=>r.retrieval_class===c)||{}).n||0;
+      if(n) bar+=`<div title="${c}: ${n}" style="width:${(n/tot*280)|0}px;
+        background:${classColors()[c]};border-radius:3px"></div>`;
+    }
+    bar+="</div>";
+    h+=`<tr><td>${b}</td><td style="text-align:left">${bar}</td><td>${tot}</td></tr>`;
+  }
+  h+="</table>";
+  $("pGbc").innerHTML=h;
+}
+
+// ---- wiring ----------------------------------------------------------------
+["selLayer","selMode","selPos"].forEach(id=>$(id).onchange=async()=>{
+  if(id==="selMode") fillPositions($("selPos").value);
+  await loadPoints();
+});
+["selColor","selCat","selSubj","selObj","selDOK","selCOK"]
+  .forEach(id=>$(id).onchange=()=>draw());
+window.addEventListener("resize", draw);
+
+(async function init(){
+  const sel=$("selExp");
+  EXPERIMENTS.forEach(e=>{ const o=document.createElement("option");
+    o.value=e.id; o.textContent=e.title; sel.appendChild(o); });
+  const want=new URLSearchParams(location.search).get("exp");
+  const entry=EXPERIMENTS.find(e=>e.id===want)||EXPERIMENTS[0];
+  sel.value=entry.id;
+  sel.onchange=()=>{
+    const e=EXPERIMENTS.find(x=>x.id===sel.value);
+    if(e.href) location.href=e.href;
+    else location.search="?exp="+e.id;
+  };
+  if(entry.href){ location.href=entry.href; return; }
+  try { await loadExperiment(entry); }
+  catch(err){
+    $("err").style.display="block";
+    $("err").textContent="Failed to load payload ("+err.message+"). "+
+      "Serve from the repo root (python -m http.server) and make sure the "+
+      "run's explorer_payload/ exists.";
+  }
+})();
+</script>
+</body>
+</html>

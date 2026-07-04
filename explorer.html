@@ -254,7 +254,10 @@ async function loadExperiment(entry){
   await loadPoints();
   renderPanels(); renderLegend();
 }
-function uniq(a){ return [...new Set(a.filter(v=>v!==null))].sort(); }
+function uniq(a){
+  const u=[...new Set(a.filter(v=>v!==null))];
+  return u.every(v=>typeof v==="number") ? u.sort((x,y)=>x-y) : u.sort();
+}
 function fill(sel, opts, val){
   sel.innerHTML="";
   opts.forEach(o=>{ const e=document.createElement("option");

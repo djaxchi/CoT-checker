@@ -4,24 +4,25 @@
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12
-#SBATCH --mem=64G
-#SBATCH --gpus=h100:1
-#SBATCH --array=0-3
-#SBATCH --output=results/logs/%x-%A_%a.out
-#SBATCH --error=results/logs/%x-%A_%a.err
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=160G
+#SBATCH --gpus-per-node=h100:4
+#SBATCH --output=results/logs/%x-%j.out
+#SBATCH --error=results/logs/%x-%j.err
 
 # ---------------------------------------------------------------------------
 # parametric_retrieval_geometry_v0 stage 1: generation + hidden-state
-# extraction, one WikiProfile shard per array task (facts stay whole within a
-# shard). Requires runs/parametric_retrieval_geometry_v0/metadata.parquet
-# (materialized locally by prg_sample_facts.py and synced) and
-# Qwen/Qwen2.5-7B-Instruct in the HF cache (download on a login node first:
-#   HF_HOME=$HF_CACHE_ROOT huggingface-cli download Qwen/Qwen2.5-7B-Instruct )
+# extraction. TamIA allocates H100s by whole node, so this is ONE node job
+# that runs the 4 WikiProfile shards in parallel, one per GPU
+# (CUDA_VISIBLE_DEVICES), and fails if any shard fails.
 #
-# --time is a smoke-based estimate (~1k instances/shard, ~2.6k generations +
-# ~2k teacher-forced forwards); override on submit if the smoke run says
-# otherwise:  sbatch --time=... scripts/tamia/jobs/prg/01_generate.sbatch
+# Requires runs/parametric_retrieval_geometry_v0/metadata.parquet (committed)
+# and Qwen/Qwen2.5-7B-Instruct in $HF_CACHE_ROOT (download on a login node).
+#
+# Smoke (whole node, ~10 min):
+#   sbatch --time=00:30:00 --export=ALL,LIMIT=40 \
+#       scripts/tamia/jobs/prg/01_generate.sbatch
+# --time above is a smoke-based estimate; override on submit if needed.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -48,16 +49,38 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 
+EXTRA=()
+[[ -n "${LIMIT:-}" ]] && EXTRA+=(--limit "$LIMIT")
+[[ -n "${FORCE:-}" ]] && EXTRA+=(--force)  # overwrite smoke shard outputs
+
 echo "======================================================="
-echo "  PRG stage 01: generate + extract, shard $SLURM_ARRAY_TASK_ID/$NUM_SHARDS"
+echo "  PRG stage 01: generate + extract, $NUM_SHARDS shards on one node"
 echo "  run dir : $RUN_DIR"
 echo "  model   : $MODEL"
+echo "  limit   : ${LIMIT:-none}"
 echo "======================================================="
 
-python scripts/parametric_retrieval/prg_generate.py \
-    --out_dir "$RUN_DIR" \
-    --model_name_or_path "$MODEL" \
-    --local_files_only \
-    --model_dtype bfloat16 \
-    --shard_idx "$SLURM_ARRAY_TASK_ID" \
-    --num_shards "$NUM_SHARDS"
+pids=()
+for s in $(seq 0 $((NUM_SHARDS - 1))); do
+    CUDA_VISIBLE_DEVICES=$s python scripts/parametric_retrieval/prg_generate.py \
+        --out_dir "$RUN_DIR" \
+        --model_name_or_path "$MODEL" \
+        --local_files_only \
+        --model_dtype bfloat16 \
+        --shard_idx "$s" \
+        --num_shards "$NUM_SHARDS" \
+        "${EXTRA[@]}" \
+        > "results/logs/prg-01-gen-${SLURM_JOB_ID}_shard${s}.out" 2>&1 &
+    pids+=($!)
+done
+
+rc=0
+for s in $(seq 0 $((NUM_SHARDS - 1))); do
+    if ! wait "${pids[$s]}"; then
+        echo "shard $s FAILED (see results/logs/prg-01-gen-${SLURM_JOB_ID}_shard${s}.out)"
+        rc=1
+    else
+        echo "shard $s done"
+    fi
+done
+exit $rc

@@ -4,9 +4,90 @@ One row per sprint: what we hypothesized, what we tested, what we got. Keep it t
 
 | Sprint | Dates | Hypothesis | Verdict |
 |---|---|---|---|
+| S5 | 2026-07-03 → 07-10 | **Knowledge boundary.** Does Qwen2.5-7B-Instruct internally represent, before it answers, whether it knows a fact, and is that signal causal? New dataset (WikiProfile), 4 behavioral retrieval classes (direct_retrieval / reasoning_unlocked / unstable / non_retrieved). | retrieved-vs-non is linearly readable pre-answer (~0.79 AUROC, 0.85 answer-side, vs 0.70 confound baseline) and carried by ~10 sparse SAE "answer-commitment" features (one at 0.76 alone, not popularity/topic). But the 4-way split does not separate and reasoning_unlocked is geometrically invisible (bal-acc ≤0.41). Causally: single-feature steering is NULL (gauge = matched random control, both necessity and sufficiency); the recall signal is absent at the prompt and builds through reasoning (within-instance 0.49→0.64); activation patching finds a small, deep-layer, fact-specific transplantable core (matched 17-19% vs mismatched 7-9%, verified real knowledge flips) but far below in-context CoT (84%). **Net: recall is mostly dynamic; the prompt-time signal is a gauge, not a lever.** |
+| S4 | 2026-06-27 → 07-02 | Step-representation geometry in PRM800K CoT: does the per-step *contribution* vector (h_i − h_{i-1}) cluster into interpretable reasoning-move types, and do correct/incorrect steps diverge along the trajectory? | descriptive / infrastructure: built 3 step reprs (state / question-residual / contribution), tag-enrichment clustering, and an interactive explorer (fork pairs, click-to-trace trajectories, dynamics + identity). No clean discrete step-type taxonomy (consistent with the S3 stage-1 null); the geometry + explorer tooling was reused in S5. |
 | S3 | 2026-06-16 → (open) | **Pivot:** stop optimizing the ProcessBench score; explain it. The ~41% hidden-state signal is a *mixture of failure-mode-specific signals*, not one unified correctness concept. Decompose via failure-type annotation, controlled contrasts, layer-wise probing, geometry, transfer, and causal intervention. | in progress |
 | S2 | 2026-06-05 → 06-09 | Fork-based preference supervision (ranking / triplet) shapes a better latent than reconstruction-only; + DenseLinear model-size scaling (1.5B–32B) | ~ partial: forks improve transfer not oracle; scale raises oracle ceiling (0.476 @ 32B) but not deployable calibration (closed) |
 | S1 | 2026-05-21 → 05-26 | SAE/SSAE latents localize the first wrong CoT step better than raw dense hidden states | ✗ not supported |
+
+---
+
+## S5 — Knowledge boundary: does the model know that it knows, and is it causal? (2026-07-03 → 07-10)
+
+**Question.** A new line, distinct from the S1-S4 ProcessBench/CoT-correctness thread. Following
+"Empty Shelves or Lost Keys? Recall Is the Bottleneck for Parametric Factuality," split factual
+failure into *missing knowledge* vs *knowledge present but not accessed*, and ask (1) whether these
+regimes correspond to distinguishable internal states before the model answers, and (2) whether any
+internal "I know this" signal is a *cause* of retrieval or merely a *readout*.
+
+**Setup.** WikiProfile (subject-object facts grounded in Wikipedia), 800 facts × 4 closed-book
+question forms = 3,200 instances. Model Qwen2.5-7B-Instruct on 4× H100. Four behavioral classes
+assigned from the model's own graded behavior (direct greedy, 4 sampled direct, CoT greedy, 4
+sampled CoT): non_retrieved 1,647 (51%), direct_retrieval 893 (28%), unstable 409 (13%),
+reasoning_unlocked 251 (8%). Hidden states read at layers 20/24, mainly the final prompt token.
+
+**Findings.**
+1. **Static geometry.** Retrieved-vs-non is linearly readable *before generation*: ~0.79 AUROC at
+   the final prompt token (0.85 answer-side), vs a confound baseline (popularity, length, family) of
+   0.70. The cot-minus-direct prompt-state delta reaches 0.81. But the 4-way split is not separable
+   (bal-acc ≤ 0.41, chance 0.25); classes lie on one graded confidence axis and reasoning_unlocked is
+   geometrically invisible, sitting in the overlap.
+2. **Interpretable feature (public SAE, ~131k latents).** The signal survives sparsification: full
+   latents 0.82 (L24 prompt) / 0.86 (L20 answer); an L1 probe with ~10 features reaches 0.78-0.81; a
+   single feature (58264) reaches 0.76 alone. Not popularity/topic (within-bin 0.749, within-category
+   0.730, ρ_gbc 0.13). Token-wise it peaks at the *answer-commitment* position (the "Answer:" token in
+   2,913/3,200), not the subject entity: an "am I ready to answer" gauge.
+3. **Causal test 1 — single-feature steering (necessity + sufficiency vs matched random).** Clamp the
+   feature down on known facts: breaks 2.0% (58264) / 8.7% (88965) of correct answers, but a
+   matched-norm random edit breaks 3.3% / 6.7% — never more than random. Boost it on
+   reasoning_unlocked (fact accessible): rescues ≤ 4.0%, never beats random. **Gauge, not lever.**
+4. **Causal test 2 — within-instance rollout dynamics.** On 524 mixed-outcome questions (~4,200
+   rollouts, 44% success), predict which rollout succeeds from the *instance-demeaned* state (fact
+   erased, only path remains): AUROC rises from 0.495 at the prompt and 0.489 at gen-0 (chance),
+   through 0.531 / 0.587 mid-reasoning, to 0.606 pre-answer and 0.640 at answer onset. **The recall
+   signal is absent at the prompt and built during reasoning**, not set by lucky early sampling.
+5. **Causal test 3 — activation patching (strong test).** Transplant each reasoning_unlocked
+   question's own post-CoT answer-onset residual into its direct (no-reasoning) decision point. Direct
+   baseline 0.7% → matched 16.7-19.3% (~25×), but a mismatched-donor control also lifts to 7.3-8.7%
+   with near-zero answer-copying (0.7-4.0%), so ~half is a non-specific "commit to answering" effect.
+   The fact-specific component (matched − mismatched) is +9 to +11 pts at block 23 (z≈2.5, p≈0.01),
+   ~0 at block 19 α=0.5. Hand-verified as real knowledge flips (Vigenère cipher "de Vigenère" →
+   correct "Bellaso"; Cynthia Cooper "Enron" → "WorldCom"; Siskel&Ebert "Ebert" → "Siskel"). But
+   ≪ in-context CoT ceiling (84%).
+
+**Net.** The model carries a real, distributed pre-answer retrieval-access signal, concentrated at
+the answer-commitment token and captured by a few SAE features, but it is a *gauge, not a lever*.
+The reasoning_unlocked regime is not a property of the prompt state at all; recall is computed
+*through* reasoning (dynamic), with only a small, deep-layer, fact-specific fraction that is
+transplantable after the fact.
+
+**Caveats.** One model, 1-2 layers, single patch position; transplant recovers a minority; labels are
+budget-dependent (4 samples / 256 CoT tokens); grading is deterministic string-match (a few percent of
+transplant "successes" are containment-rule fragments).
+
+**Artifacts.** `runs/parametric_retrieval_geometry_v0/` (geometry, sae/, rollouts/, explorer_payload/,
+figures under sae/plots/); ~15 scripts in `scripts/parametric_retrieval/`; 7 TamIA jobs in
+`scripts/tamia/jobs/prg/`; manifest-driven `explorer.html`.
+
+---
+
+## S4 — Step-representation geometry (contribution clusters) in PRM800K CoT (2026-06-27 → 07-02)
+
+**Question.** Extends S3's geometry lens to the *trajectory*: represent each reasoning step by its
+*contribution* vector (h_i − h_{i-1}, the closed form of the corrected residual-stream recursion;
+distinct from a naive diff), alongside state and question-residual reprs, and ask whether steps
+cluster into interpretable reasoning-move types and whether correct vs incorrect steps diverge as the
+chain unfolds.
+
+**What was built / found.** Three step reprs (state / qres / contribution) at L20/L28; tag-enrichment
+clustering; an interactive explorer with joint UMAP, correct-vs-incorrect fork pairs, click-to-trace
+trajectory paths, and cross-chain displacement/identity metrics. Result is descriptive: no clean
+discrete step-type taxonomy emerges (consistent with the S3 stage-1 null on failure-mode
+clustering); the value was the reusable geometry + explorer tooling, which S5 adopted for its own
+retrieval-regime explorer.
+
+**Artifacts.** `runs/contrib_cluster/` (reprs, clusters, tags, trajectories, `explorer.html`);
+`scripts/s4_contrib_*.py`, `scripts/analysis/s4_*.py`.
 
 ---
 

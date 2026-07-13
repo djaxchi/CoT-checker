@@ -1,0 +1,49 @@
+{
+  "created": "2026-07-11T01:12:20.503496+00:00",
+  "git_commit": "250875b",
+  "dataset": "google/WikiProfile",
+  "seed": 42,
+  "n_facts": 2150,
+  "n_instances": 55510,
+  "n_direct_paraphrases": 51240,
+  "n_cot_instances": 4270,
+  "n_leak_dropped": 390,
+  "wrappers": {
+    "w0": "Answer the question with a short answer only.\nQuestion: {q}\nAnswer:",
+    "w1": "Question: {q}\nAnswer:",
+    "w2": "Give just the answer, with no explanation.\nQuestion: {q}\nAnswer:",
+    "w3": "This is a factual quiz. Reply with only the answer.\nQuestion: {q}\nAnswer:",
+    "w4": "Please answer the following question as briefly as possible.\nQuestion: {q}\nAnswer:",
+    "w5": "Answer concisely.\nQuestion: {q}\nAnswer:"
+  },
+  "seed_variants": {
+    "direct": [
+      "direct",
+      "direct_natural"
+    ],
+    "reverse": [
+      "reverse",
+      "reverse_natural"
+    ]
+  },
+  "split_counts_facts": {
+    "train": 1291,
+    "val": 438,
+    "test": 421
+  },
+  "split_counts_instances": {
+    "train": 33359,
+    "val": 11342,
+    "test": 10809
+  },
+  "paraphrases_per_group": {
+    "count": 4272.0,
+    "mean": 11.99,
+    "std": 0.18,
+    "min": 6.0,
+    "25%": 12.0,
+    "50%": 12.0,
+    "75%": 12.0,
+    "max": 12.0
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "submitted": "2026-07-11T05:34:27.714693+00:00",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model_snapshot_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+  "job_01_generate": "366552",
+  "job_02_extract": "366553",
+  "dependency": "afterok:366552"
+}

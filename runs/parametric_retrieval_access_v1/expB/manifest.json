@@ -1,0 +1,30 @@
+{
+  "best_cell": {
+    "hs_idx": 25,
+    "position": "question_last",
+    "auc": 0.583901513891554
+  },
+  "confound_only_auc": 0.5890629393289971,
+  "residualized_auc": 0.5038317295667483,
+  "probe_hs": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    20,
+    22,
+    24,
+    25,
+    26,
+    27,
+    28
+  ],
+  "probe_positions": [
+    "entity_last",
+    "question_last",
+    "answer_prefix",
+    "final_prompt_token"
+  ],
+  "seed": 42
+}

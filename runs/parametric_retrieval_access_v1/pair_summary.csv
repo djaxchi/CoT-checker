@@ -1,0 +1,19 @@
+group_by,group,n_mixed_groups
+split,test,217
+split,train,713
+split,val,233
+direction,direct,651
+direction,reverse,512
+gbc_bin,high,326
+gbc_bin,low,211
+gbc_bin,mid,276
+gbc_bin,very_high,350
+category,Arts,156
+category,Everyday Life,99
+category,Geography,87
+category,History,130
+category,People,124
+category,Philosophy & Religion,108
+category,Science,172
+category,Society,131
+category,Technology,156

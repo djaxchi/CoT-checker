@@ -1,0 +1,6 @@
+{
+  "hs_idx": 26,
+  "alpha": 1.0,
+  "criterion": "max fact-bootstrap mean d_margin, matched condition",
+  "val_d_margin": 1.7960200696840734
+}

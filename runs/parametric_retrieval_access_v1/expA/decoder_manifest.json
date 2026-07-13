@@ -1,0 +1,37 @@
+{
+  "cells": [
+    [
+      20,
+      "final_prompt_token"
+    ],
+    [
+      24,
+      "final_prompt_token"
+    ],
+    [
+      26,
+      "final_prompt_token"
+    ],
+    [
+      27,
+      "final_prompt_token"
+    ],
+    [
+      28,
+      "final_prompt_token"
+    ],
+    [
+      27,
+      "answer_prefix"
+    ],
+    [
+      28,
+      "answer_prefix"
+    ]
+  ],
+  "epochs": 6,
+  "lr": 0.0001,
+  "weight_decay": 0.001,
+  "seed": 42,
+  "n_answers": 14948
+}

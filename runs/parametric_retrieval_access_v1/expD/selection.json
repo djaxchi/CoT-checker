@@ -1,0 +1,12 @@
+{
+  "hs_idx": 28,
+  "direction_name": "lda",
+  "alpha": 4.0,
+  "val_d_logp_gold": 5.295358349651052,
+  "val_ci": [
+    4.202174681805404,
+    6.411832349314186
+  ],
+  "beats_random_on_val": false,
+  "best_random_val": 4.976933733532124
+}

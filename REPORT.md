@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-05-13*
+*Last updated: 2026-07-11*
 
 ---
 
@@ -1267,7 +1267,42 @@ outputs under `runs/s1_model_size_dense/qwen2_5_7b_multilayer/` (gitignored).
 
 ---
 
-## 17. Limitations
+## 17. Side Study: Parametric Retrieval Access (WikiProfile, Qwen2.5-7B-Instruct)
+*Updated: 2026-07-11*
+
+### Context
+
+This side study asks whether, when Qwen2.5-7B-Instruct fails a direct factual question, the correct answer is already represented in its pre-generation hidden state, and whether the difference between successful and failed retrieval is causal and fact-independent. It replaces the earlier parametric_retrieval_geometry_v0 framing (four behavioral retrieval classes, a retrieved-vs-non-retrieved probe at AUROC 0.79, SAE steering that tracked random controls): that probe predicted a behavioral outcome, not answer identity, and its CoT-state transplant used a donor that had already retrieved the answer.
+
+### What Was Done
+
+The experimental unit is the same-fact mixed-outcome paraphrase pair. Stage 0 (`scripts/parametric_retrieval/prga_build_prompts.py`) exploded all 2,150 WikiProfile facts into 12 direct paraphrases per fact and direction (2 seed questions x 6 instruction wrappers, all ending "Question: ...\nAnswer:") plus one canonical CoT prompt, 55,510 instances total, 390 answer-leaking prompts dropped, fact-disjoint 60/20/20 splits frozen before any GPU job. Stage 1 ran greedy-only generation (TamIA job 366552, 5m32s). Stage 2 (`prga_pairs.py`) graded outputs and selected groups with at least 2 successful and 2 failed paraphrases. Stage 3 (`prga_extract.py`, job 366553) stored the residual stream at all 29 hidden_states indices and 7 token positions for 20,170 instances (136,177 rows, 53 GB on $SCRATCH). Stage 4 scored every row with a first-token logit lens against 32-candidate sets (gold + WikiProfile MC distractors + type/category/popularity-matched answers from other facts). Experiments A-D (job 366559, 13m20s) then ran a candidate-ranking decoder, a success-vs-fail accessibility probe, same-fact activation patching with six control conditions, and access-subspace steering. Layer and alpha selection used the validation split only; test facts were evaluated once.
+
+### Results
+
+The dataset yielded 1,163 mixed-outcome groups (27.2% of 4,272 fact x direction groups) and 9,304 matched pairs. Direct greedy accuracy is 0.247; CoT accuracy 0.308.
+
+**Answer identity is present before generation, including in failures.** On test mixed groups at hs_idx 27, final prompt token, the gold answer ranks first among 32 matched candidates in 37.5% of failed paraphrases (chance 3.1%) and in the top 5 in 79%. Successful paraphrases reach 62.7% hits@1. Reasoning-unlocked groups (0 of 12 direct paraphrases correct, CoT correct; 146 groups) show hits@1 0.469 pre-generation, so Experiment E (dynamic emergence during CoT) was not triggered: the spec conditioned it on the prompt-state signal being weak or absent.
+
+**Which paraphrase succeeds is not linearly readable.** The best success-vs-fail probe over 48 layer x position cells (fact-grouped 5-fold CV) reaches AUC 0.584 and does not beat a probe on surface confounds alone (template, seed question, direction, popularity, category, prompt length: AUC 0.589). Residualizing the states drops the probe to 0.504.
+
+**Same-fact patching is causal and fact-specific.** Transplanting the donor paraphrase's stored residual state at hs_idx 26, final prompt token (h <- h + alpha(h_donor - h), alpha=1, selected on validation) into the failed paraphrase raises the gold-minus-distractor margin by +1.34 (fact-bootstrap 95% CI [0.48, 2.21]) on test and flips 44.9% of failures to exact match, with donor-answer copying at 0.0. Successful donor states from other facts destroy the margin (-3.89 same answer type and category, -4.05 popularity-matched), norm-matched random noise gives -0.59, the self-patch control gives +0.02, and patching failed states into successful prompts breaks 48.5% of successes.
+
+**No fact-independent access direction exists.** Directions estimated on train facts from confound-residualized paired differences (mean difference, SVD subspaces, regularized LDA, relation-conditioned means) were applied to failed test instances at the best validated configuration (LDA, hs_idx 28, alpha 4 x mean edit norm). The learned direction raises logP(gold) by +5.42 versus +5.27 for a norm-matched random direction, exact-match rates are 8.7% versus 9.0%, and the gold-minus-distractor margin is negative for every direction. The candidate-ranking decoder with frozen mean input-embedding answer targets underperforms the first-token lens (hits@1 0.05 versus 0.34-0.63), so the answer-identity claim currently rests on the lens readout.
+
+Figure: `results/parametric_retrieval_access_v1/prga_v1_results.png`. Tables: `runs/parametric_retrieval_access_v1/exp{A,B,C,D}/`.
+
+### Interpretation
+
+The results match outcome C2 of the experiment specification. The model often holds the correct answer in its decision-point state when it answers wrongly, and that state causally rescues the failure, but only when it carries the same fact: the transferable object is retrieved content, not a generic access mechanism. Steering reproduces the v0 gauge result on a fair paired design: any large edit inflates gold probability without preferentially favoring the gold over distractors. "Knowing that it knows" is not encoded as one controllable direction in this model. This supports the S4 knowledge-boundary reading of the CoT-verification signal: step incorrectness detection keys on whether fact-specific content was retrieved, and no shortcut direction can substitute for the content itself.
+
+### Next Step
+
+Close the decoder gap: replace the frozen mean input-embedding answer targets with unembedding-based or learned answer representations so the pre-generation answer-identity claim no longer depends on the first-token lens; then test component-level patching (attention versus MLP output) at hs_idx 24-26 to localize what carries the fact-specific content.
+
+---
+
+## 18. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -1276,7 +1311,7 @@ outputs under `runs/s1_model_size_dense/qwen2_5_7b_multilayer/` (gitignored).
 
 ---
 
-## 18. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 19. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
 ### 17.1 Overview
 
@@ -1600,7 +1635,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 19. Next Steps
+## 20. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

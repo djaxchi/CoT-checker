@@ -96,6 +96,7 @@ cot-checker-results/
 
 # Claude Code agent instructions (local only)
 CLAUDE.md
+.claude/
 
 # Personal runner scripts (Telegram notifications, local paths)
 scripts/run_pipeline.sh

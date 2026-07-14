@@ -30,6 +30,18 @@ SEP_TOKEN_ID = 198  # "\n" in the Qwen2.5 tokenizer
 ANSWER_TYPES = ("integer", "decimal", "fraction", "latex_expr", "has_letters", "other")
 
 
+def sep_join_ids(tok, pieces: list[str]) -> list[int]:
+    """Tokenize each piece separately, join with the separator id, and append a
+    trailing separator (the boundary / readout token). See the plan's tokenization
+    rule: string-level joining would let BPE merge newlines and break the
+    identical-readout-token and strict-prefix properties."""
+    ids: list[int] = []
+    for p in pieces:
+        ids.extend(tok(p, add_special_tokens=False)["input_ids"])
+        ids.append(SEP_TOKEN_ID)
+    return ids
+
+
 def answer_type(ans: str) -> str:
     a = ans.strip()
     if re.fullmatch(r"-?\d+", a):

@@ -14,6 +14,26 @@ naturalness audits and a norm-remedy so the result cannot silently become an
 adversarial control code; (4) InfoNCE negatives are masked by measured-effect
 distance so near-identical effects are never forced apart.
 
+v0.3 revision (2026-07-14, after Stage 0 ran on 7B, job 368860). Stage 0 verdicts:
+gates 1/2/4 pass; gate 5 identity check exactly 0 (patch machinery proven correct);
+gate 5 recovery is ASYMMETRIC. Target A (boundary next-token) median recovery
+0.898/0.988/0.999 at L20/L24/L26, i.e. a single boundary edit almost fully controls
+the immediate next-token distribution. Target B (answer belief through the suffix)
+median recovery ~0 at every layer. The two targets are therefore split:
+  - Target A: boundary-mediated, causally decodable through D(z) at L20.
+  - Target B: predictable FROM the transition representation, but NOT recoverable
+    through one late patched boundary position.
+Interpretation discipline (correction to the first read): the null does NOT prove the
+belief effect "lives in the step tokens rather than the boundary summary". It proves
+only that a SINGLE patched boundary position does not carry it; the effect could be
+distributed across several step-token K/V states or other positions. Locating it needs
+a later multi-position patching experiment, out of scope for v0.
+Design consequences (this revision): L_B stops being a frozen-decode loss and becomes
+a small trained head h_B(z) -> d_belief (MSE); L_A stays the frozen-decoder KL; Stage 2
+runs a three-arm ablation (A-only, B-only, A+B); Stage 4 is causal for Target A ONLY.
+Order of work is unchanged from the original plan: Stage 1 kill gate is NOT skipped;
+it runs before any Stage 2 training.
+
 Research question: can a compact latent z_t, trained to predict a step's downstream
 computational effect, represent reasoning transitions more semantically (operation-like,
 reusable across problems) than raw boundary activations, deltas, or pooling?
@@ -105,22 +125,21 @@ measurement space), and the auxiliary S_t head with its loss weight.
                    in the layer-20 stream (z is literally a coordinate
                    system over boundary residual edits)
                                    ▼
-        ╔═══════════════════════════════════════════════════════════════════╗
-        ║  FROZEN Qwen2.5-7B AS DECODER (zero trained parameters):           ║
-        ║  blocks 21..28 + final RMSNorm + LM head, run at the patched       ║
-        ║  boundary position (and the suffix positions for Target B) over    ║
-        ║  the PRE context's cached K/V. CACHE SURGERY: the cache holds only ║
-        ║  positions STRICTLY BEFORE the boundary in blocks 21-28; the       ║
-        ║  boundary token's K/V there is recomputed fresh from ĥ, so suffix  ║
-        ║  tokens attend to the PATCHED boundary (blocks 1-20 keep the       ║
-        ║  original boundary K/V: the patch is defined at the layer-20       ║
-        ║  stream). The cache carries no gradients; grads flow through the   ║
-        ║  patched position's own path, incl. its recomputed K/V.            ║
-        ╚═══════════╤═══════════════════════════════════╤═══════════════════╝
-                    ▼                                   ▼
-        predicted next-token distribution    teacher-forced suffix + 8 candidates
-        at the boundary  (→ L_A)             → predicted answer belief ∈ R^8 (→ L_B)
+        ╔═══════════════════════════════════════════════╗   ┌────────────────────────┐
+        ║  FROZEN Qwen2.5-7B AS DECODER (0 trained      ║   │ h_B: trained head      │
+        ║  params): blocks 21..28 + RMSNorm + LM head   ║   │ MLP(d_z → 8)  ── L_B   │
+        ║  at the patched boundary over the PRE K/V.    ║   │ (Target B is NOT       │
+        ║  CACHE SURGERY: cache holds only positions    ║   │  boundary-causal, gate │
+        ║  STRICTLY BEFORE the boundary in blocks       ║   │  5 recovery ~0; it is  │
+        ║  21-28; the boundary token's K/V there is     ║   │  PREDICTED from z,     │
+        ║  recomputed fresh from ĥ (blocks 1-20 keep    ║   │  which sees H_t)       │
+        ║  the original boundary K/V). No cache grads.  ║   └───────────┬────────────┘
+        ╚═══════════════════════╤═══════════════════════╝               │
+                                ▼                                        ▼
+                predicted next-token distribution              predicted answer belief
+                at the boundary  (→ L_A, KL)                   d_belief ∈ R^8 (→ L_B, MSE)
 
+     Stage 2 three-arm ablation:  A-only (w_A=1,w_B=0) | B-only (w_A=0,w_B=1) | A+B
      side branch for the contrastive term:
         z_t ──Linear(d_z→64), L2-norm──┐
                                        ├── symmetric InfoNCE, τ = 0.07 (→ L_NCE)
@@ -141,19 +160,20 @@ measurement space), and the auxiliary S_t head with its loss weight.
     InfoNCE effect embedding live there. It is no longer a training target.
 
   TARGET B: answer-belief effect                                  [weight 1.0]
-    fixed elicitation suffix (Stage-0 selected from 3 frozen candidates,
-    gate: gold rank-1 ≥ 60% on complete golden trajectories), teacher-forced
-    after PRE and POST contexts; candidates = gold + 7 type-matched distractors
-    (sources: phase-2 pre_generated_answer > wrong-branch finals > corpus
-    same-type > integer perturbations); score = mean log-prob per token
-    (Qwen splits digits, first-token lens too lossy), KV-cache reused
+    fixed elicitation suffix (Stage-0 selected: "\nSo the final answer is",
+    gold rank-1 0.957), teacher-forced after PRE and POST contexts; candidates =
+    gold + 7 type-matched distractors (sources: phase-2 pre_generated_answer >
+    wrong-branch finals > corpus same-type > integer perturbations); score =
+    mean log-prob per token (Qwen splits digits, first-token lens too lossy),
+    KV-cache reused
     belief = softmax over the 8 candidates (canonical order: gold first,
     distractors by pre score);  d_belief = belief_post - belief_pre ∈ R^8
     headline scalar: d_margin = [logp_gold - max logp_distractor]_post - [same]_pre
-    loss: L_B = MSE( belief_post^predicted , belief_post^actual )
-          (pre is shared and measured, so this equals a d_belief loss;
-           predicted belief comes from the SAME patched frozen decoding,
-           suffix + candidates teacher-forced after the patched boundary)
+    loss (v0.3, NOT a frozen-decode loss): L_B = MSE( h_B(z_t), d_belief )
+          h_B: small trained head R^{d_z} -> R^8. Stage-0 gate 5 showed a single
+          patched boundary position recovers ~0 of d_belief, so B is treated as
+          PREDICTABLE-FROM-z, not boundary-causal. z sees the step tokens H_t, so
+          it can carry the belief effect even though the boundary state cannot.
 
   SIBLING CONTRAST: InfoNCE                                       [weight 0.5]
     z_t (L2-normed via Linear d_z→64) vs g([dL_64 ; d_belief]) (L2-normed),
@@ -167,7 +187,10 @@ measurement space), and the auxiliary S_t head with its loss weight.
   (v0's auxiliary Ŝ_t head is DROPPED: there is no trained forward model to
    host it. S_t stays extracted: it feeds the baselines and the oracle.)
 
-  TOTAL:  L = 1.0·L_A + 1.0·L_B + 0.5·L_NCE
+  TOTAL:  L = w_A·L_A + w_B·L_B + 0.5·L_NCE
+  THREE-ARM ABLATION (Stage 2): A-only (w_A=1, w_B=0), B-only (w_A=0, w_B=1),
+  A+B (w_A=w_B=1). InfoNCE on in all three. Tells us whether Target B improves
+  semantic organization or merely pushes z toward answer correctness.
 ════════════════════════════════════════════════════════════════════════════════════════
  (5) TRAINING: AdamW lr 3e-4 cosine, wd 0.01, batch 128 forks (256 transitions),
      ~30 epochs on 10k-20k transitions, early stop on val total loss, seeds {0,1,2}.
@@ -192,12 +215,14 @@ measurement space), and the auxiliary S_t head with its loss weight.
      f. surface controls            a-c repeated after residualizing surface
                                     features (fork-audit methodology)
 ════════════════════════════════════════════════════════════════════════════════════════
- (7) CAUSAL (Stage 4): NATIVE under v0.1. The training operation IS a patch:
-     swap z between siblings (ĥ = S_{t-1} + D(z_donor)) and decode with the same
-     frozen blocks; no surrogate translation step. Controls: mismatched donors,
+ (7) CAUSAL (Stage 4): TARGET A ONLY (v0.3). The Target-A training operation IS a
+     patch: swap z between siblings (ĥ = S_{t-1} + D(z_donor)) and decode with the
+     same frozen blocks; no surrogate translation step. Controls: mismatched donors,
      random z, magnitude-matched noise (prga battery). Scope stays honest: this
-     shows the decoded boundary edit carries the effect, not that the model
-     "uses z" as an internal variable.
+     shows the decoded boundary edit carries the IMMEDIATE next-token effect, not
+     that the model "uses z" internally. Target B stays PREDICTIVE: its causal
+     locus is unknown (a single boundary patch recovered ~0) and would need a
+     later multi-position patching study, out of scope for v0.
 ════════════════════════════════════════════════════════════════════════════════════════
 ```
 
@@ -405,10 +430,12 @@ Derived quantities per transition:
 - Measured vector effect: `d_belief = belief_post - belief_pre` (8-dim).
 - Headline scalar: `d_margin = [logp_gold - max distractor logp]_post - [same]_pre`.
 
-Training loss: `L_B = MSE(belief_post^predicted, belief_post^actual)`, where the
-predicted belief comes from teacher-forcing the suffix and candidates after the patched
-boundary through the frozen decoder. Since pre is shared and measured, this is
-equivalent to a d_belief loss.
+Training loss (v0.3): `L_B = MSE(h_B(z_t), d_belief)`, a small trained head
+`h_B: R^{d_z} -> R^8` predicting the measured belief delta from z. This is a
+prediction loss, NOT a frozen-decode loss: Stage 0 gate 5 showed a single patched
+boundary position recovers ~0 of d_belief, so Target B is treated as predictable from
+the transition representation, not as boundary-causal. d_belief remains fully measured
+at extraction (pre and post beliefs), and also feeds the InfoNCE effect embedding.
 
 Cross-problem comparability comes from the within-set softmax (scale-free) and from the
 fact that sibling contrasts share pre exactly. Never compare raw logprobs across
@@ -417,10 +444,15 @@ problems.
 ## 7. Losses and training protocol
 
 ```
-L = 1.0 * L_A   (KL, frozen-decoder boundary distribution vs actual post)
-  + 1.0 * L_B   (MSE, frozen-decoder predicted belief vs actual post belief)
+L = w_A * L_A   (KL, frozen-decoder boundary distribution vs actual post)
+  + w_B * L_B   (MSE, trained head h_B(z) vs measured d_belief)
   + 0.5 * L_NCE (symmetric InfoNCE, z vs measured-effect embedding,
                  in-batch negatives incl. guaranteed sibling, tau 0.07)
+
+Stage 2 three-arm ablation:  A-only (w_A=1, w_B=0) | B-only (w_A=0, w_B=1) |
+A+B (w_A=w_B=1).  InfoNCE stays on in all three. The comparison isolates whether
+Target B improves semantic organization of z or only pushes it toward answer
+correctness.
 ```
 
 Trained parameters: E (~10M) + D (d_z x 3584) + InfoNCE projections. ~11M total.
@@ -482,14 +514,16 @@ Run on a few hundred examples locally / single TamIA smoke before the main extra
   ~90% of the label-noise ceiling on BOTH operation decodability (problem-disjoint) and
   cross-problem retrieval, the learned operator needs a different justification or v0
   stops.
-- Stage 2: train E, D as specified in sections 4-7.
+- Stage 2: train E, D, h_B as specified in sections 4-7, as the THREE-ARM ablation
+  (A-only, B-only, A+B; InfoNCE on in all three), 3 seeds each.
 - Stage 3 semantics, all vs matched-dim baselines and all repeated after surface
   residualization (fork-audit code): operation decodability, cross-problem
   same-operation retrieval precision@k (the decisive test), sibling effect separation,
-  ARI across seeds, held-out-problem transfer.
-- Stage 4 causal: native sibling-swap, `ĥ = S_{t-1} + D(z_donor)` decoded by the same
-  frozen blocks, with the prga control battery (mismatched donors, random z,
-  magnitude-matched noise). Framing is fixed: this shows the decoded boundary edit
+  ARI across seeds, held-out-problem transfer. The three arms are compared here to
+  separate "Target B improves organization" from "Target B only adds a correctness axis".
+- Stage 4 causal (Target A only): native sibling-swap, `ĥ = S_{t-1} + D(z_donor)`
+  decoded by the same frozen blocks, with the prga control battery (mismatched donors,
+  random z, magnitude-matched noise). Framing is fixed: this shows the decoded edit
   carries the effect; it does not show the model internally uses z.
 
 ## 10. Interpretation guardrails
@@ -501,7 +535,11 @@ Run on a few hundred examples locally / single TamIA smoke before the main extra
 - Within-problem sibling separation is necessary but insufficient; only cross-problem
   retrieval distinguishes operation encoding from content encoding.
 - The frozen-decoder objective measures the boundary-mediated share of a step's effect;
-  its ceiling (gate 5) is a finding, not a nuisance.
+  its ceiling (gate 5) is a finding, not a nuisance. Stage 0 result: Target A is
+  boundary-mediated (recovery ~0.9-1.0), Target B is not (recovery ~0 through one
+  patched boundary). Do NOT overstate the B null as "belief lives in the step tokens";
+  it proves only that ONE late boundary position does not carry it. The mediation locus
+  of Target B is open, for a later multi-position patching study.
 - No Stage 3 claim without the D(z) naturalness audits (A1-A4): reproducing the targets
   through unnatural residual edits is a control code, not a representation of natural
   reasoning transitions.

@@ -44,19 +44,10 @@ from src.analysis.transition_operator import (  # noqa: E402
     forward_with_boundary_patch,
     gold_margin,
     recovery_from_logits,
+    sep_join_ids,
 )
 
 SUFFIXES = ["\nThe answer is", "\n# Answer\n\n", "\nSo the final answer is"]
-
-
-def sep_join_ids(tok, pieces: list[str]) -> list[int]:
-    """Tokenize pieces separately, join with the separator id, append a trailing
-    separator (the boundary/readout token)."""
-    ids: list[int] = []
-    for p in pieces:
-        ids.extend(tok(p, add_special_tokens=False)["input_ids"])
-        ids.append(SEP_TOKEN_ID)
-    return ids
 
 
 def cand_token_ids(tok, suffix: str, answers: list[str]) -> list[list[int]]:

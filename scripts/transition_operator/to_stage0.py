@@ -45,6 +45,7 @@ from src.analysis.transition_operator import (  # noqa: E402
     gold_margin,
     recovery_from_logits,
     sep_join_ids,
+    stable_seed,
 )
 
 SUFFIXES = ["\nThe answer is", "\n# Answer\n\n", "\nSo the final answer is"]
@@ -114,7 +115,7 @@ def main() -> None:
     def cands_for(gold: str, pre_gen=None, wrong_finals=(), seed_key: str = "") -> list[str]:
         return build_candidates(gold, pre_gen, wrong_finals, corpus_pool,
                                 k=args.k_candidates,
-                                seed=args.seed + (hash(seed_key) % 10_000))
+                                seed=stable_seed(seed_key, args.seed))
 
     def fits(ids: list[int]) -> bool:
         return len(ids) <= args.max_seq_len - 48  # headroom for suffix + candidate

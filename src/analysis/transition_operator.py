@@ -20,10 +20,16 @@ merge a trailing newline into the previous token.
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 
 import torch
+
+
+def stable_seed(key: str, base: int = 0) -> int:
+    """Deterministic per-key seed (python's hash() is process-salted)."""
+    return base + int(hashlib.sha1(key.encode("utf-8")).hexdigest()[:8], 16) % 10_000
 
 SEP_TOKEN_ID = 198  # "\n" in the Qwen2.5 tokenizer
 

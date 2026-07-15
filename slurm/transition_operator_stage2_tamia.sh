@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=05:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=%x-%j.out
 
 # transition_operator_v0 Stage 2 (v0.3): training-array extraction at L20 (4 GPU
@@ -30,6 +30,7 @@ source "$PROJECT_ROOT/slurm/s1_model_size/models.env"
 export HF_HOME="${HF_HOME:-$HF_CACHE_ROOT}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"
 
 cd "$PROJECT_ROOT"

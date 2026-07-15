@@ -198,6 +198,9 @@ def main() -> None:
     ap.add_argument("--d_z", type=int, default=64)
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--batch_forks", type=int, default=64)
+    ap.add_argument("--decode_micro_forks", type=int, default=8,
+                    help="A-arm: forks per frozen-decoder prefill/decode micro-batch "
+                         "(bounds GPU memory; encoder/InfoNCE still see the full batch)")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--tau", type=float, default=0.07)
@@ -278,25 +281,37 @@ def main() -> None:
             ids[i, :len(r)], am[i, :len(r)] = torch.tensor(r), 1
         return ids.to(device), am.to(device), lens
 
+    def micro_LA(fork_ids, s_prev, z, actual, micro):
+        """Mean KL(post || decoded ĥ) over both branches, prefilling+decoding the
+        frozen model in micro-batches of <= `micro` forks so a batch with very
+        long contexts cannot OOM. z is (2F, d_z) [correct rows | wrong rows],
+        s_prev is (F, hidden), actual is (2F, vocab). The encoder graph (via z)
+        stays alive across micro-batches; only the per-micro prefill/decode
+        activations are freed between iterations."""
+        F = len(fork_ids)
+        kl_sum = torch.zeros((), device=device)
+        for lo2 in range(0, F, micro):
+            mb = list(range(lo2, min(lo2 + micro, F)))
+            ids, am, lens = prefill_ids([fork_ids[i] for i in mb])
+            cache = ud.prefill(ids, am)
+            base_len = ud.cache_len(cache)
+            for off in (0, F):
+                rows = [off + i for i in mb]
+                pred = ud.decode_boundary(cache, s_prev[mb] + D(z[rows]), lens)
+                ud.crop(cache, base_len)
+                kl_sum = kl_sum + kl_to_actual(actual[rows], pred) * len(mb)
+        return kl_sum / (2 * F)
+
     def losses(fork_ids, train: bool):
         f_idx, t_idx, s_prev, s_prev2, H, mask = batch_tensors(data, fork_ids, device)
         z = enc(s_prev2, H, mask)
         out = {}
         total = 0.0
         if use_A:
-            ids, am, lens = prefill_ids(fork_ids)
-            cache = ud.prefill(ids, am)
-            base_len = ud.cache_len(cache)
-            F = len(fork_ids)
-            preds = []
-            for half in (slice(0, F), slice(F, 2 * F)):
-                h_hat = s_prev + D(z[half])
-                preds.append(ud.decode_boundary(cache, h_hat, lens))
-                ud.crop(cache, base_len)
-            pred = torch.cat(preds)
             actual = torch.tensor(np.asarray(
                 data.trans["post_logits"][t_idx], np.float32), device=device)
-            out["L_A"] = kl_to_actual(actual, pred)
+            out["L_A"] = micro_LA(fork_ids, s_prev, z, actual,
+                                  args.decode_micro_forks)
             total = total + out["L_A"]
         if use_B:
             db = torch.tensor(data.d_belief(t_idx, np.concatenate([f_idx, f_idx])),
@@ -404,7 +419,8 @@ def main() -> None:
     # ---- D(z) naturalness audits (A arms) -------------------------------------
     if use_A:
         with torch.no_grad():
-            vf = data.splits["val"]
+            # distributional audits: a capped val subset is plenty and bounds memory
+            vf = data.splits["val"][:128]
             f_idx, t_idx, s_prev, s_prev2, H, mask = batch_tensors(data, vf, device)
             z = enc(s_prev2, H, mask)
             dz = D(z)
@@ -439,22 +455,28 @@ def main() -> None:
                 "delta_true_median": float(delta_true.norm(dim=-1).median()),
                 "sibling_diff_median": float(
                     (s_post[:len(vf)] - s_post[len(vf):]).norm(dim=-1).median())}
-            # A4: norm-matched clipping stress on val L_A
-            ids, am, lens = prefill_ids(vf)
-            cache = ud.prefill(ids, am)
-            base_len = ud.cache_len(cache)
+            # A4: norm-matched clipping stress on val L_A (micro-batched decode)
             actual = torch.tensor(np.asarray(data.trans["post_logits"][t_idx],
                                              np.float32), device=device)
+            micro = args.decode_micro_forks
 
             def val_LA(scale_to: float | None):
-                preds = []
-                for half in (slice(0, len(vf)), slice(len(vf), 2 * len(vf))):
-                    d = D(z[half])
-                    if scale_to is not None:
-                        d = d * (scale_to / (d.norm(dim=-1, keepdim=True) + 1e-8))
-                    preds.append(ud.decode_boundary(cache, s_prev + d, lens))
-                    ud.crop(cache, base_len)
-                return float(kl_to_actual(actual, torch.cat(preds)))
+                F = len(vf)
+                kl_sum = torch.zeros((), device=device)
+                for lo2 in range(0, F, micro):
+                    mb = list(range(lo2, min(lo2 + micro, F)))
+                    ids, am, lens = prefill_ids([vf[i] for i in mb])
+                    cache = ud.prefill(ids, am)
+                    base_len = ud.cache_len(cache)
+                    for off in (0, F):
+                        rows = [off + i for i in mb]
+                        d = D(z[rows])
+                        if scale_to is not None:
+                            d = d * (scale_to / (d.norm(dim=-1, keepdim=True) + 1e-8))
+                        pred = ud.decode_boundary(cache, s_prev[mb] + d, lens)
+                        ud.crop(cache, base_len)
+                        kl_sum = kl_sum + kl_to_actual(actual[rows], pred) * len(mb)
+                return float(kl_sum / (2 * F))
 
             la = val_LA(None)
             med = float(delta_true.norm(dim=-1).median())

@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=03:30:00
+#SBATCH --time=05:00:00
 #SBATCH --output=%x-%j.out
 
 # transition_operator_v0 Stage 2 (v0.3): training-array extraction at L20 (4 GPU

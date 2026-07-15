@@ -89,6 +89,29 @@ def test_upper_decoder_batched_right_padded(tiny):
     assert torch.allclose(got[1:2], want_b, atol=1e-4)
 
 
+def test_upper_decoder_mask_value_matches_finfo_min(tiny):
+    # -1e4 padded-slot fill (gradient-safe) must give the same forward logits as
+    # the finfo.min fill: both drive attention weight on padded slots to ~0.
+    torch.manual_seed(5)
+    ids_a = torch.randint(0, 331, (1, 12))
+    ids_b = torch.randint(0, 331, (1, 8))
+    pre = torch.zeros(2, 11, dtype=torch.long)
+    mask = torch.zeros(2, 11, dtype=torch.long)
+    pre[0, :11], mask[0, :11] = ids_a[0, :11], 1
+    pre[1, :7], mask[1, :7] = ids_b[0, :7], 1
+    with torch.no_grad():
+        oa = tiny(input_ids=ids_a, output_hidden_states=True)
+        ob = tiny(input_ids=ids_b, output_hidden_states=True)
+    patch = torch.stack([oa.hidden_states[LAYER_LO][0, -1] + 0.3,
+                         ob.hidden_states[LAYER_LO][0, -1] - 0.2])
+    outs = {}
+    for mv in (None, -1e4):
+        ud = UpperDecoder(tiny, LAYER_LO, mask_value=mv)
+        cache = ud.prefill(pre, mask)
+        outs[mv] = ud.decode_boundary(cache, patch, torch.tensor([11, 7]))
+    assert torch.allclose(outs[None], outs[-1e4], atol=1e-4)
+
+
 def test_upper_decoder_gradients_flow_to_patch(tiny):
     torch.manual_seed(3)
     ids = torch.randint(0, 331, (1, 9))

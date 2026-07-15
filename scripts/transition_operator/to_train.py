@@ -188,40 +188,6 @@ def _bisect_nonfinite(losses_fn, fids: list[str], first_out: dict) -> None:
         f"minimal offending fork set ({len(cur)}): {cur}")
 
 
-def _bisect_nonfinite_grads(losses_fn, fids: list[str], params, opt,
-                            first_out: dict) -> None:
-    """Finite forward loss but non-finite gradients: bisect with per-subset
-    forward+backward to the minimal fork set producing backward NaN."""
-    comps = {k: float(v.detach() if torch.is_tensor(v) else v)
-             for k, v in first_out.items()}
-
-    def grads_bad(part):
-        opt.zero_grad()
-        out = losses_fn(part, train=True)
-        if not torch.isfinite(out["total"]):
-            return True
-        out["total"].backward()
-        bad = not all(p.grad is None or torch.isfinite(p.grad).all()
-                      for p in params)
-        opt.zero_grad()
-        return bad
-
-    cur = list(fids)
-    while len(cur) > 1:
-        half = len(cur) // 2
-        found = None
-        for part in (cur[:half], cur[half:]):
-            if grads_bad(part):
-                found = part
-                break
-        if found is None:
-            break
-        cur = found
-    raise RuntimeError(
-        f"BACKWARD-non-finite gradients (forward loss was finite: {comps}); "
-        f"minimal offending fork set ({len(cur)}): {cur}")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -240,8 +206,10 @@ def main() -> None:
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--local_files_only", action="store_true")
     ap.add_argument("--prep_only", action="store_true")
-    ap.add_argument("--mask_fill", type=str, default="min",
-                    help='decode-mask fill: "min" (finfo.min) or a float like -1e4')
+    ap.add_argument("--mask_fill", type=str, default="-1e4",
+                    help='decode-mask fill for padded cache slots: a float '
+                         '(default -1e4, gradient-safe) or "min" (finfo.min, '
+                         'which overflows bf16 sdpa BACKWARD on long contexts)')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -348,6 +316,7 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     log = open(run_dir / "log.jsonl", "w")
     best_val, best_state, bad = float("inf"), None, 0
+    skipped_batches: list[list[str]] = []
     rng = np.random.default_rng(args.seed)
     train_fids = list(data.splits["train"])
     modules = [m for m in (enc, proj, D, h_B) if isinstance(m, torch.nn.Module)]
@@ -366,7 +335,16 @@ def main() -> None:
             out["total"].backward()
             if not all(p.grad is None or torch.isfinite(p.grad).all()
                        for p in params):
-                _bisect_nonfinite_grads(losses, batch_fids, params, opt, out)
+                # rare content-specific bf16 backward overflow through the
+                # frozen blocks (see metrics skip rate); drop the step, keep
+                # the run alive, and log the batch for the record
+                opt.zero_grad()
+                sched.step()
+                skipped_batches.append(list(batch_fids))
+                print(f"[{args.arm} s{args.seed}] SKIP non-finite grads "
+                      f"ep{epoch} batch@{lo} ({len(skipped_batches)} total)",
+                      flush=True)
+                continue
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
             sched.step()
@@ -419,6 +397,8 @@ def main() -> None:
 
     metrics: dict = {"best_val_total": best_val, "arm": args.arm,
                      "seed": args.seed,
+                     "n_skipped_batches": len(skipped_batches),
+                     "skipped_batch_forks": skipped_batches[:20],
                      "created": datetime.now(timezone.utc).isoformat()}
 
     # ---- D(z) naturalness audits (A arms) -------------------------------------

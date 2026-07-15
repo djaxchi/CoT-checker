@@ -165,6 +165,29 @@ def batch_tensors(data: Data, fork_ids: list[str], device):
     return f_idx, t_idx, s_prev, s_prev2, H, mask
 
 
+def _bisect_nonfinite(losses_fn, fids: list[str], first_out: dict) -> None:
+    """First non-finite batch: forward-only bisection to the minimal offending
+    fork set, then raise with everything a debugger needs."""
+    comps = {k: float(v.detach() if torch.is_tensor(v) else v)
+             for k, v in first_out.items()}
+    cur = list(fids)
+    with torch.no_grad():
+        while len(cur) > 1:
+            half = len(cur) // 2
+            found = None
+            for part in (cur[:half], cur[half:]):
+                out = losses_fn(part, train=False)
+                if not torch.isfinite(out["total"]):
+                    found = part
+                    break
+            if found is None:
+                break  # only non-finite in combination (padding-dependent)
+            cur = found
+    raise RuntimeError(
+        f"non-finite training batch; components={comps}; "
+        f"minimal offending fork set ({len(cur)}): {cur}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -298,7 +321,10 @@ def main() -> None:
             m.train()
         tr = []
         for lo in range(0, steps_per_epoch * args.batch_forks, args.batch_forks):
-            out = losses(train_fids[lo:lo + args.batch_forks], train=True)
+            batch_fids = train_fids[lo:lo + args.batch_forks]
+            out = losses(batch_fids, train=True)
+            if not torch.isfinite(out["total"]):
+                _bisect_nonfinite(losses, batch_fids, out)
             opt.zero_grad()
             out["total"].backward()
             torch.nn.utils.clip_grad_norm_(params, 1.0)

@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=00:40:00
+#SBATCH --time=01:00:00
 #SBATCH --output=%x-%j.out
 
 # Debug the Stage 2 A-arm NaN: exact decode path on CUDA, bf16 vs fp16.
@@ -21,7 +21,12 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
 pip install --no-index torch transformers numpy scipy scikit-learn pandas pyarrow
+echo "===== RUN 1: mask_fill=min (expect backward bisection error) ====="
 CUDA_VISIBLE_DEVICES=0 python scripts/transition_operator/to_train.py \
   --run_dir runs/transition_operator --arm A --seed 0 --epochs 1 \
-  --local_files_only --device cuda
+  --local_files_only --device cuda --mask_fill min || true
+echo "===== RUN 2: mask_fill=-1e4 (expect clean epoch) ====="
+CUDA_VISIBLE_DEVICES=0 python scripts/transition_operator/to_train.py \
+  --run_dir runs/transition_operator --arm A --seed 0 --epochs 1 \
+  --local_files_only --device cuda --mask_fill -1e4
 echo "[debug done]"

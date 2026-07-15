@@ -188,6 +188,40 @@ def _bisect_nonfinite(losses_fn, fids: list[str], first_out: dict) -> None:
         f"minimal offending fork set ({len(cur)}): {cur}")
 
 
+def _bisect_nonfinite_grads(losses_fn, fids: list[str], params, opt,
+                            first_out: dict) -> None:
+    """Finite forward loss but non-finite gradients: bisect with per-subset
+    forward+backward to the minimal fork set producing backward NaN."""
+    comps = {k: float(v.detach() if torch.is_tensor(v) else v)
+             for k, v in first_out.items()}
+
+    def grads_bad(part):
+        opt.zero_grad()
+        out = losses_fn(part, train=True)
+        if not torch.isfinite(out["total"]):
+            return True
+        out["total"].backward()
+        bad = not all(p.grad is None or torch.isfinite(p.grad).all()
+                      for p in params)
+        opt.zero_grad()
+        return bad
+
+    cur = list(fids)
+    while len(cur) > 1:
+        half = len(cur) // 2
+        found = None
+        for part in (cur[:half], cur[half:]):
+            if grads_bad(part):
+                found = part
+                break
+        if found is None:
+            break
+        cur = found
+    raise RuntimeError(
+        f"BACKWARD-non-finite gradients (forward loss was finite: {comps}); "
+        f"minimal offending fork set ({len(cur)}): {cur}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -206,6 +240,8 @@ def main() -> None:
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--local_files_only", action="store_true")
     ap.add_argument("--prep_only", action="store_true")
+    ap.add_argument("--mask_fill", type=str, default="min",
+                    help='decode-mask fill: "min" (finfo.min) or a float like -1e4')
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -243,7 +279,8 @@ def main() -> None:
             local_files_only=args.local_files_only).to(device).eval()
         for p in model.parameters():
             p.requires_grad_(False)
-        ud = UpperDecoder(model, args.layer)
+        mask_fill = None if args.mask_fill == "min" else float(args.mask_fill)
+        ud = UpperDecoder(model, args.layer, mask_value=mask_fill)
         D = torch.nn.Linear(args.d_z, hidden).to(device)
         torch.nn.init.zeros_(D.bias)
         with torch.no_grad():
@@ -327,6 +364,9 @@ def main() -> None:
                 _bisect_nonfinite(losses, batch_fids, out)
             opt.zero_grad()
             out["total"].backward()
+            if not all(p.grad is None or torch.isfinite(p.grad).all()
+                       for p in params):
+                _bisect_nonfinite_grads(losses, batch_fids, params, opt, out)
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
             sched.step()

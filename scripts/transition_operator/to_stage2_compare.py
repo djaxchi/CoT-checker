@@ -82,13 +82,18 @@ def main() -> None:
         n_all = mmap_member(a / "trans_arrays.npz", "n_steps", tmp)
         S_prev = np.asarray(S_prev_all[f_of_trans], np.float32)
         S_post = np.asarray(S_post_all[test_idx], np.float32)
-        H = np.asarray(H_all[test_idx], np.float32)
-        n = np.asarray(n_all[test_idx])
-        mask = np.arange(H.shape[1])[None] < n[:, None]
-        Hm = np.where(mask[..., None], H, 0.0)
-        meanpool = Hm.sum(1) / np.maximum(n[:, None], 1)
-        Hn = np.where(mask[..., None], H, -np.inf)
-        maxpool = Hn.max(1)
+        # pool H_steps in small chunks so the full test H (~3 GB) is never resident
+        hidden = S_post.shape[1]
+        meanpool = np.zeros((len(test_idx), hidden), np.float32)
+        maxpool = np.zeros((len(test_idx), hidden), np.float32)
+        for lo in range(0, len(test_idx), 64):
+            rows = test_idx[lo:lo + 64]
+            Hc = np.asarray(H_all[rows], np.float32)
+            nc = np.asarray(n_all[rows])
+            mask = (np.arange(Hc.shape[1])[None] < nc[:, None])[..., None]
+            meanpool[lo:lo + len(rows)] = (np.where(mask, Hc, 0.0).sum(1)
+                                           / np.maximum(nc[:, None], 1))
+            maxpool[lo:lo + len(rows)] = np.where(mask, Hc, -np.inf).max(1)
         reps = {"S_t": S_post, "delta": S_post - S_prev,
                 "concat": np.concatenate([S_prev, S_post], 1),
                 "meanpool": meanpool, "maxpool": maxpool}

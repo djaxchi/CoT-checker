@@ -21,6 +21,6 @@ virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
 pip install --no-index torch transformers numpy
-CUDA_VISIBLE_DEVICES=0 python scripts/transition_operator/to_debug_decode.py \
+CUDA_VISIBLE_DEVICES=0 python scripts/transition_operator/to_debug_train.py \
   --run_dir runs/transition_operator --local_files_only
 echo "[debug done]"

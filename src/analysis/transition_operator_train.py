@@ -95,13 +95,18 @@ class UpperDecoder:
     semantics; the cache never holds an unpatched boundary in the upper blocks).
     """
 
-    def __init__(self, model, layer_lo: int):
+    def __init__(self, model, layer_lo: int, mask_value: float | None = None):
         self.model = model
         self.layer_lo = layer_lo
         self.layers = model.model.layers[layer_lo:]
         self.norm = model.model.norm
         self.lm_head = model.lm_head
         self.rotary = model.model.rotary_emb
+        # additive-mask fill for padded cache slots. finfo.min saturates to -inf
+        # in half precision, which is a known NaN source in sdpa BACKWARD; a
+        # large-but-finite value (-1e4) kills the softmax weight equally well
+        # and keeps gradients finite.
+        self.mask_value = mask_value
 
     @torch.no_grad()
     def prefill(self, input_ids: torch.Tensor, attn_mask: torch.Tensor):
@@ -129,10 +134,11 @@ class UpperDecoder:
         h = h_patch[:, None, :].to(self.norm.weight.dtype)
         pos_emb = self.rotary(h, pos)
         # additive mask over [cached slots 0..L-1, new slot L]
-        dtype_min = torch.finfo(h.dtype).min
+        fill = self.mask_value if self.mask_value is not None \
+            else torch.finfo(h.dtype).min
         slots = torch.arange(L + 1, device=device)[None, :]
         valid = (slots < ctx_lens.to(device)[:, None]) | (slots == L)
-        mask = torch.where(valid, 0.0, dtype_min).to(h.dtype)[:, None, None, :]
+        mask = torch.where(valid, 0.0, fill).to(h.dtype)[:, None, None, :]
         cache_position = torch.tensor([L], device=device)
         for layer in self.layers:
             h = layer(h, attention_mask=mask, past_key_values=cache,

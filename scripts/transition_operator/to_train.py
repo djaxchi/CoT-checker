@@ -320,6 +320,8 @@ def main() -> None:
                **{f"val_{k}": mean(va, k) for k in va[0]}}
         log.write(json.dumps(rec) + "\n")
         log.flush()
+        if not np.isfinite(rec["val_total"]):
+            raise RuntimeError(f"non-finite val loss at epoch {epoch}: {rec}")
         print(f"[{args.arm} s{args.seed}] ep{epoch} "
               f"train {rec['train_total']:.4f} val {rec['val_total']:.4f}", flush=True)
         if rec["val_total"] < best_val - 1e-5:

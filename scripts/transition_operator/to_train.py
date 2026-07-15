@@ -54,8 +54,13 @@ from src.analysis.transition_operator_train import (  # noqa: E402
 class Data:
     def __init__(self, run_dir: Path, layer: int):
         a = run_dir / "stage2" / "arrays"
-        self.fork = np.load(a / "fork_arrays.npz", mmap_mode="r")
-        self.trans = np.load(a / "trans_arrays.npz", mmap_mode="r")
+        # npz member access re-reads the WHOLE member every time (mmap_mode is
+        # ignored for npz), so load each array into RAM once; the training node
+        # has plenty (~17 GB total for 10k transitions)
+        with np.load(a / "fork_arrays.npz") as z:
+            self.fork = {k: np.asarray(z[k]) for k in z.files}
+        with np.load(a / "trans_arrays.npz") as z:
+            self.trans = {k: np.asarray(z[k]) for k in z.files}
         self.fork_rows = json.loads((a / "fork_rows.json").read_text())
         self.trans_rows = json.loads((a / "trans_rows.json").read_text())
         self.fork_idx = {r["fork_id"]: i for i, r in enumerate(self.fork_rows)}

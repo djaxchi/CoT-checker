@@ -4,11 +4,86 @@ One row per sprint: what we hypothesized, what we tested, what we got. Keep it t
 
 | Sprint | Dates | Hypothesis | Verdict |
 |---|---|---|---|
+| S6 | 2026-07-13 → 07-16 | **Latent transition operator.** Can a compact latent z_t = E(S_{t-1}, H_t) trained to predict a reasoning step's *downstream computational effect* (boundary next-token distribution + answer-belief shift), decoded through the frozen model's own upper blocks, represent transitions more semantically (operation type, reusable across problems) and more robustly than raw boundary activations / deltas / pooling? PRM800K matched forks. | ✗ falsified both ways. All arms learn their targets, but z organizes operations **at chance** cross-problem (0.28 vs 0.28) and *worse* than trivial pooling (decode F1 0.17-0.25 vs maxpool 0.375); on correctness z carries a real within-fork signal (pair acc 0.66, survives surface controls) but only **ties** S_t / pooling / the measured effect (0.67), never beats them. Answer-belief objective (Target B) adds nothing over the boundary objective (A). Key mechanistic Stage-0 result: a single boundary edit recovers the next-token distribution (median 0.90-1.0) but ~0 of the answer-belief shift → belief is not carried by one late boundary state. **Net: effect-prediction discards operation structure and merely preserves the correctness signal already in the boundary state.** |
 | S5 | 2026-07-03 → 07-10 | **Knowledge boundary.** Does Qwen2.5-7B-Instruct internally represent, before it answers, whether it knows a fact, and is that signal causal? New dataset (WikiProfile), 4 behavioral retrieval classes (direct_retrieval / reasoning_unlocked / unstable / non_retrieved). | retrieved-vs-non is linearly readable pre-answer (~0.79 AUROC, 0.85 answer-side, vs 0.70 confound baseline) and carried by ~10 sparse SAE "answer-commitment" features (one at 0.76 alone, not popularity/topic). But the 4-way split does not separate and reasoning_unlocked is geometrically invisible (bal-acc ≤0.41). Causally: single-feature steering is NULL (gauge = matched random control, both necessity and sufficiency); the recall signal is absent at the prompt and builds through reasoning (within-instance 0.49→0.64); activation patching finds a small, deep-layer, fact-specific transplantable core (matched 17-19% vs mismatched 7-9%, verified real knowledge flips) but far below in-context CoT (84%). **Net: recall is mostly dynamic; the prompt-time signal is a gauge, not a lever.** |
 | S4 | 2026-06-27 → 07-02 | Step-representation geometry in PRM800K CoT: does the per-step *contribution* vector (h_i − h_{i-1}) cluster into interpretable reasoning-move types, and do correct/incorrect steps diverge along the trajectory? | descriptive / infrastructure: built 3 step reprs (state / question-residual / contribution), tag-enrichment clustering, and an interactive explorer (fork pairs, click-to-trace trajectories, dynamics + identity). No clean discrete step-type taxonomy (consistent with the S3 stage-1 null); the geometry + explorer tooling was reused in S5. |
 | S3 | 2026-06-16 → (open) | **Pivot:** stop optimizing the ProcessBench score; explain it. The ~41% hidden-state signal is a *mixture of failure-mode-specific signals*, not one unified correctness concept. Decompose via failure-type annotation, controlled contrasts, layer-wise probing, geometry, transfer, and causal intervention. | in progress |
 | S2 | 2026-06-05 → 06-09 | Fork-based preference supervision (ranking / triplet) shapes a better latent than reconstruction-only; + DenseLinear model-size scaling (1.5B–32B) | ~ partial: forks improve transfer not oracle; scale raises oracle ceiling (0.476 @ 32B) but not deployable calibration (closed) |
 | S1 | 2026-05-21 → 05-26 | SAE/SSAE latents localize the first wrong CoT step better than raw dense hidden states | ✗ not supported |
+
+---
+
+## S6 — Latent transition operator: learning what a reasoning step *does* (2026-07-13 → 07-16)
+
+**Question.** Extends the S4 step-geometry thread from *description* to *function*: instead of asking
+what a step's representation looks like, ask what computational effect the step had, and whether a
+compact latent trained to predict that effect is a more semantic and more robust representation of the
+transition than raw boundary activations. z_t = E(S_{t-1}, H_t) is trained (encoder never sees the
+step's last token, S_t, or any label) to predict two effect targets, each a post-minus-pre delta with
+the measurement wording held fixed by an identical trailing separator: **Target A**, the boundary
+next-token distribution shift, and **Target B**, the shift in an 8-candidate answer-belief read through
+a fixed elicitation suffix.
+
+**Design choice (the interesting part).** No trained forward model: z → linear D → a residual-stream
+*edit* at the pre-step boundary, decoded through the frozen Qwen2.5-7B's own upper blocks (21-28 + LM
+head) over the pre-context KV cache, with the boundary token's upper-block K/V recomputed from the
+patched state so later tokens attend to the edit. This makes z operational (D(z) is directly a steering
+vector) and folds training, evaluation, and causal patching into one operation.
+
+**Setup.** PRM800K matched forks (same question + same golden prefix, one +1 and one −1 continuation),
+5,000 forks / 10,000 transitions, Qwen2.5-7B base, layer 20, problem-disjoint train/val/test.
+Three-arm ablation A (Target-A KL through the frozen decoder) / B (Target-B via a trained head h_B(z),
+see finding 1) / AB, × seeds {0,1,2}, InfoNCE with effect-distance-masked negatives always on.
+
+**Findings.**
+1. **Stage 0 gates + the boundary-sufficiency oracle (the design pivot).** Suffix selection and a
+   directional-sanity gate pass (correct vs wrong siblings separate on the answer margin,
+   Wilcoxon p = 5.8e-17, n = 500). The oracle patches the *true* post-step boundary state into the pre
+   context and measures how much of each effect returns: **Target A recovers 0.90 / 0.99 / 1.0 (median)
+   at L20 / L24 / L26 (a single boundary edit almost fully controls the immediate next-token
+   distribution), but Target B recovers ~0 at every layer.** The belief shift is not carried by one
+   late boundary position (it proves only that; the locus is left open). So A stays a frozen-decoder KL
+   loss and B becomes a trained predictive head, and Stage 4 causality is scoped to A only.
+2. **Stage 1 baseline kill-gate.** Raw pooling already retrieves same-operation steps across problems
+   above chance (max-pool op decodability macro-F1 0.45, cross-problem retrieval 0.42 vs 0.30 chance).
+   High-precision symbolic operation labels cover only 21% of steps (PRM800K MATH steps are mostly
+   prose / casework, not clean arithmetic), so both symbolic-op and broad keyword-tag labels are used.
+3. **Stage 2, operation structure: null, and worse than pooling.** All arms train their targets
+   (A boundary-KL val ~0.8, B belief-MSE ~0.16), but on the identical test split z sits **at chance**
+   for cross-problem operation retrieval (0.27-0.31 vs 0.28) and *below* trivial pooling on operation
+   decodability (z 0.17-0.25 vs mean/max-pool 0.35-0.375). The three arms are statistically
+   indistinguishable: Target B does not improve organization over Target A.
+4. **Stage 2, correctness: real but not amplified.** Correct/wrong is balanced by fork construction,
+   so this test is fully powered. Within-fork pair accuracy (siblings share the exact prefix; chance
+   0.50): z_A 0.658, z_B 0.670, z_AB 0.655 [95% CIs all exclude 0.50], and it **survives surface
+   residualization** (step length, equation presence, numeric-token count, final-char type), so it is
+   genuine correctness signal, not style or format. But it only *ties* the raw baselines: S_t 0.671,
+   mean-pool 0.660, the measured Target-A Δlogit 0.673. z's edge on global test AUC (0.65 vs 0.61-0.64)
+   is an artifact of the raw-activation probes overfitting (train AUC 0.96 → test 0.64) while z's 64-dim
+   probe generalizes (train 0.66 ≈ test 0.65). Target B again confers no advantage.
+
+**Net.** The effect-prediction operator **discards the operation structure** that raw pooled activations
+already contain and merely **preserves, without amplifying, the moderate correctness signal already
+present in the boundary state**. The v0 hypothesis, that z is *more semantic and more robust* than raw
+boundary activations, is falsified on both counts: not more semantic (operation null, below pooling),
+and it ties rather than beats on robustness (correctness). The one genuine positive is that z is a
+compact (64-dim) correctness encoding that generalizes where high-dim raw probes overfit. The cleanest
+single correctness readout throughout is the measured boundary Δlogit itself (0.673), echoing the
+Stage-0 directional gate.
+
+**Caveats.** Symbolic operation labels cover only 21% (but the raw baselines clear chance on the same N,
+so z's operation null is a real absence of structure, not underpowering). The A/AB arms dropped ~14% of
+training batches to a bf16 sdpa-backward overflow on long-context forks (mitigated with a gradient-safe
+−1e4 attention-mask fill + a skip-and-log net; the clean, zero-skip B arm shows the identical
+conclusions). One model, one layer (L20), one patch position for the oracle; tag decodability
+unavailable (rare-class CV). Engineering: the frozen-decoder path also required micro-batching the
+prefill/decode to bound GPU memory.
+
+**Artifacts.** `docs/transition_operator_v0_plan.md` (frozen spec + front-page schema);
+`src/analysis/transition_operator{,_ops,_train}.py`; `scripts/transition_operator/*.py`;
+`runs/transition_operator/` (stage0/stage1/stage2, `compare_baselines_vs_z.json`,
+`correctness_probes.json`); `slurm/transition_operator_*.sh`; TamIA jobs 368860 (S0), 368879 (S1),
+369679 (S2).
 
 ---
 

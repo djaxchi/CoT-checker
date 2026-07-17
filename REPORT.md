@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-07-11*
+*Last updated: 2026-07-16*
 
 ---
 
@@ -1302,7 +1302,44 @@ Close the decoder gap: replace the frozen mean input-embedding answer targets wi
 
 ---
 
-## 18. Limitations
+## 18. Latent Transition Operator: Predicting a Step's Downstream Effect (transition_operator_v0)
+*Updated: 2026-07-16*
+
+### Context
+
+This study asks whether a compact latent trained to predict a reasoning step's downstream computational effect represents the transition more semantically, by operation type reusable across problems, and more robustly, by correctness, than raw boundary activations, deltas, or pooling. It extends the S4 contribution-geometry thread from describing what a step's representation looks like to predicting what the step did.
+
+### What Was Done
+
+The experimental unit is the PRM800K matched fork: same question and same golden prefix, one +1 and one -1 continuation, so problem difficulty and prefix content are held constant across the two siblings. `scripts/transition_operator/to_build_forks.py` sampled 5,000 forks (10,000 transitions) from the raw PRM800K scan, carrying each fork's ground-truth answer and phase-2 pre-generated answer for distractors, and froze problem-disjoint train/val/test splits (3,952 / 522 / 526 forks) before extraction.
+
+An encoder E, a two-layer transformer over `[S_{t-1}; x_1..x_{m-1}]` (the pre-step boundary state plus the step tokens with the last step token excluded to block leakage of S_t), produces a 64-dimensional latent z_t. The encoder never sees S_t, the last step token, the elicitation suffix, or any label. Two effect targets, each a post-minus-pre delta measured with an identical trailing separator token so the readout position is fixed: Target A is the boundary next-token distribution shift, Target B is the shift in an 8-candidate answer belief read through a fixed elicitation suffix ("\nSo the final answer is", selected in Stage 0). Both are computed on Qwen2.5-7B base at layer 20.
+
+The design replaces a trained forward model with the frozen model itself as decoder (`src/analysis/transition_operator_train.py`). A trained linear map D turns z into a residual-stream edit `ĥ = S_{t-1} + D(z)` at the pre-step boundary, which is decoded through Qwen2.5-7B's own upper blocks 21-28 plus the LM head over the pre-context KV cache. The boundary token's upper-block K/V is recomputed from the patched state so later suffix tokens attend to the edit; equivalence of this fast cache-based decode with a hook-based patched forward is unit-tested (identity, propagation, and last-layer-dead-end invariants). The Stage 2 ablation trained three arms, A (Target-A KL through the frozen decoder), B (Target-B via a trained head h_B(z)), and AB, over seeds {0,1,2}, with an InfoNCE term over fork siblings (near-duplicate-effect negatives masked) on in every arm. TamIA jobs 368860 (Stage 0), 368879 (Stage 1), 369679 (Stage 2).
+
+### Results
+
+**Stage 0 fixed the target design.** A directional gate confirmed the answer-belief effect tracks reasoning progress: on 500 forks the gold-answer margin moves higher for correct siblings than wrong siblings, Wilcoxon p = 5.8e-17. A boundary-sufficiency oracle then patched the true post-step boundary state into the pre context and measured how much of each effect returns. Target A recovers a median 0.90 / 0.99 / 1.0 at layers 20 / 24 / 26: a single boundary edit almost fully controls the immediate next-token distribution. Target B recovers about 0 at every layer. The answer-belief shift is not carried by one late boundary position. Target A therefore stayed a frozen-decoder KL loss, and Target B became a trained predictive head h_B(z); Stage 4 causal scope is restricted to Target A.
+
+**Stage 1 baselines cleared the operation bar that z later missed.** Raw max-pooling of the step-token states gives operation decodability macro-F1 0.45 and cross-problem operation retrieval 0.42 against 0.30 chance. High-precision symbolic operation labels (ADD/SUB/MUL/DIV/POW from a parser) cover only 21% of steps, since PRM800K MATH steps are mostly prose and casework, so both symbolic-operation and broad keyword-tag labels were carried forward.
+
+**Stage 2 operation organization is null and below pooling.** All arms learn their targets (Target-A boundary-KL validation loss near 0.8, Target-B belief MSE near 0.16). On the identical test split (`compare_baselines_vs_z.json`), z sits at chance for cross-problem operation retrieval (0.27-0.31 versus 0.28) and below trivial pooling on operation decodability (z 0.17-0.25 versus mean/max-pool 0.35-0.375). The three arms are statistically indistinguishable, so Target B adds nothing over Target A.
+
+**Stage 2 correctness is real but not amplified.** Correct versus wrong is balanced by fork construction, so the correctness probe is fully powered (`correctness_probes.json`). Within-fork pair accuracy, where siblings share the exact prefix and chance is 0.50, is 0.658 (A), 0.670 (B), 0.655 (AB), all 95% bootstrap CIs excluding 0.50, and survives residualizing surface features (step length, equation presence, numeric-token count, final-character type). The signal only ties the raw baselines: S_t 0.671, mean-pool 0.660, and the measured Target-A boundary logit delta 0.673. z's edge on global test AUC (0.65 versus 0.61-0.64) reflects the raw-activation probes overfitting (train AUC 0.96, test 0.64) while z's 64-dimensional probe generalizes (train 0.66, test 0.65). Target B confers no correctness advantage.
+
+### Interpretation
+
+The v0 hypothesis is falsified on both counts. The effect-prediction operator discards the operation structure that raw pooled activations already contain, and it preserves without amplifying the moderate correctness signal already present in the boundary state. z is not more semantic (operation organization at chance, below pooling) and it ties rather than beats on robustness (correctness). The one genuine positive is that z is a compact 64-dimensional correctness encoding that generalizes where high-dimensional raw probes overfit. The cleanest single correctness readout throughout is the measured boundary logit delta itself, echoing the Stage 0 directional gate: what a step does to the next-token distribution carries its correctness, and compressing that through an effect-prediction bottleneck neither creates nor removes the signal.
+
+Caveats: symbolic operation labels cover only 21%, but the raw baselines clear chance on the same N, so z's operation null is a real absence of structure rather than underpowering. The A and AB arms dropped about 14% of training batches to a bf16 scaled-dot-product-attention backward overflow on long-context forks, mitigated with a gradient-safe -1e4 attention-mask fill plus a skip-and-log net; the clean, zero-skip B arm reaches the same conclusions. Results are for one model, one layer (L20), and one patch position for the oracle.
+
+### Next Step
+
+Two directions follow. Either accept the negative and stop v0, since the evidence points to effect-prediction being the wrong inductive bias for operation semantics rather than a tuning problem, or run the deferred Stage 3 characterization to identify what z does organize by, given it retrieves broad step-type above chance (about +0.09) while missing operation, and localize the Target-B belief effect with multi-position patching that the single-boundary oracle could not reach.
+
+---
+
+## 19. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -1311,7 +1348,7 @@ Close the decoder gap: replace the frozen mean input-embedding answer targets wi
 
 ---
 
-## 19. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 20. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
 ### 17.1 Overview
 
@@ -1635,7 +1672,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 20. Next Steps
+## 21. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

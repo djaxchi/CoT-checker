@@ -60,6 +60,32 @@ def extract_boundary_state(model, input_ids: torch.Tensor, layer: int,
     return out.hidden_states[layer][0, position, :].detach()
 
 
+def boundary_next_logits(model, input_ids: torch.Tensor, layer: int | None = None,
+                         patched_state: torch.Tensor | None = None) -> torch.Tensor:
+    """Next-token logits at the LAST position of a single sequence, optionally with
+    the residual at ``layer`` and the last position replaced during the forward.
+
+    Live-patch check (S6 Stage-0): patching the wrong branch's boundary with the
+    correct branch's boundary state should move this distribution toward the correct
+    branch's (S6 measured 0.90-1.0 next-token recovery). Reuses the same hook the
+    generation path uses, so a positive result proves the generate-path patch is
+    materially active, not a silent no-op."""
+    boundary_pos = input_ids.shape[1] - 1
+    handle = None
+    if patched_state is not None:
+        if layer is None:
+            raise ValueError("layer required with patched_state")
+        handle = model.model.layers[layer - 1].register_forward_hook(
+            make_boundary_patch_hook(boundary_pos, patched_state))
+    try:
+        with torch.no_grad():
+            out = model(input_ids=input_ids)
+    finally:
+        if handle is not None:
+            handle.remove()
+    return out.logits[0, -1, :].detach()
+
+
 def generate_with_patch(model, tok, device, prompt: str, k: int,
                         temperature: float, top_p: float, max_new_tokens: int,
                         layer: int | None = None,

@@ -41,10 +41,12 @@ sys.path.insert(0, str(ROOT))
 from scripts.encode_prm800k_hidden_states import git_commit, read_jsonl  # noqa: E402
 from src.analysis.causal_graph import wilson_ci  # noqa: E402
 from src.analysis.das_branch import (  # noqa: E402
+    boundary_next_logits,
     extract_boundary_state,
     fork_branch_prompts,
     generate_with_patch,
 )
+from src.analysis.transition_operator import kl_from_logits  # noqa: E402
 from src.analysis.transition_operator import stable_seed  # noqa: E402
 from src.eval.math_grade import grade  # noqa: E402
 
@@ -149,6 +151,44 @@ def merge(args) -> None:
     print(json.dumps(out, indent=2))
 
 
+def sanity(args, model, tok, device) -> None:
+    """Live-patch check: does patching the wrong branch with the correct boundary
+    state move the NEXT-TOKEN distribution toward the correct branch (S6 asymmetry)?
+    Prints per-layer next-token recovery + top-1 agreement. No rollouts."""
+    import numpy as np
+
+    traces = read_jsonl(Path(args.run_dir) / "traces_forks.jsonl")[:args.sanity_n]
+    layers = [int(x) for x in args.layers.split(",") if x.strip()]
+    agg = {L: {"rec": [], "top1_patch_vs_cor": [], "top1_wrong_vs_cor": []}
+           for L in layers}
+    for tr in traces:
+        p = fork_branch_prompts(tr)
+        cor_ids = tok(p["correct"], return_tensors="pt").to(device)["input_ids"]
+        wr_ids = tok(p["wrong"], return_tensors="pt").to(device)["input_ids"]
+        lg_cor = boundary_next_logits(model, cor_ids)
+        lg_wr = boundary_next_logits(model, wr_ids)
+        top_cor = int(lg_cor.argmax())
+        denom = kl_from_logits(lg_cor[None], lg_wr[None])  # KL(cor || wrong)
+        for L in layers:
+            donor = extract_boundary_state(model, cor_ids, L, cor_ids.shape[1] - 1)
+            lg_pat = boundary_next_logits(model, wr_ids, layer=L, patched_state=donor)
+            num = kl_from_logits(lg_cor[None], lg_pat[None])  # KL(cor || patched)
+            agg[L]["rec"].append(1.0 - num / denom if denom > 0 else float("nan"))
+            agg[L]["top1_patch_vs_cor"].append(float(int(lg_pat.argmax()) == top_cor))
+            agg[L]["top1_wrong_vs_cor"].append(float(int(lg_wr.argmax()) == top_cor))
+    out = {"n": len(traces), "by_layer": {}}
+    for L in layers:
+        r = np.array(agg[L]["rec"], float)
+        out["by_layer"][f"L{L}"] = {
+            "next_token_recovery_median": float(np.nanmedian(r)),
+            "next_token_recovery_mean": float(np.nanmean(r)),
+            "top1_patched_matches_correct": float(np.mean(agg[L]["top1_patch_vs_cor"])),
+            "top1_wrong_matches_correct": float(np.mean(agg[L]["top1_wrong_vs_cor"]))}
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    (Path(args.out_dir) / "sanity_next_token.json").write_text(json.dumps(out, indent=2))
+    print(json.dumps(out, indent=2))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -166,6 +206,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--local_files_only", action="store_true")
     ap.add_argument("--merge", action="store_true")
+    ap.add_argument("--mode", choices=["oracle", "sanity"], default="oracle")
+    ap.add_argument("--sanity_n", type=int, default=64)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +227,10 @@ def main() -> None:
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path, torch_dtype=torch.bfloat16,
         local_files_only=args.local_files_only).to(device).eval()
+
+    if args.mode == "sanity":
+        sanity(args, model, tok, device)
+        return
 
     rows: list = []
     run(args, model, tok, device, rows)

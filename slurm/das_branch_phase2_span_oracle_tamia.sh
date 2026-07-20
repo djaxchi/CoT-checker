@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=03:00:00
 #SBATCH --output=%x-%j.out
 
 # DAS branch-subspace, Phase 2 whole-step-span ORACLE (teacher-forced gold margin).
@@ -52,23 +52,27 @@ layers  : $LAYERS   k(lastk) $K   out $OUT_DIR
 ================================================================
 BANNER
 
-run_align () {  # $1=align  $2=num_shards
-  local align="$1" nshards="$2" pids=()
+run_block () {  # $1=align $2=mode $3=num_shards $4=layers $5=max_traces
+  local align="$1" mode="$2" nshards="$3" lay="$4" maxt="$5" pids=()
   for ((g=0; g<nshards; g++)); do
     CUDA_VISIBLE_DEVICES=$g python scripts/das_branch/das_span_oracle.py \
       --run_dir "$RUN_DIR" --out_dir "$OUT_DIR" \
       --model_name_or_path "$MODEL_NAME_OR_PATH" --align "$align" --k "$K" \
-      --layers "$LAYERS" --mode tf_margin --local_files_only \
+      --layers "$lay" --mode "$mode" --max_traces "$maxt" --local_files_only \
       --shard_id $g --num_shards $nshards \
-      > "das_span_${align}_shard$g-${SLURM_JOB_ID:-manual}.log" 2>&1 &
+      > "das_span_${align}_${mode}_shard$g-${SLURM_JOB_ID:-manual}.log" 2>&1 &
     pids+=($!)
   done
   for p in "${pids[@]}"; do wait "$p"; done
   python scripts/das_branch/das_span_oracle.py --out_dir "$OUT_DIR" \
-    --align "$align" --merge
+    --align "$align" --mode "$mode" --merge
 }
 
-run_align lastk 4
-run_align equal 1
+# 1) TF-margin with full controls (xspan every layer + identity check), all forks
+run_block lastk tf_margin 4 "$LAYERS" 0
+run_block equal tf_margin 1 "$LAYERS" 0
 
-echo "[das_span] done $(date -Iseconds); gates -> $OUT_DIR/gates_span_{lastk,equal}.json"
+# 2) free-generation confirmation at the positive layers, capped subset
+run_block lastk freegen 4 "12,20" "${FREEGEN_MAX:-300}"
+
+echo "[das_span] done $(date -Iseconds); gates -> $OUT_DIR/gates_span_*_*.json"

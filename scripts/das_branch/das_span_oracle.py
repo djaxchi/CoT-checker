@@ -111,9 +111,15 @@ def run(args, model, tok, device, rows: list) -> None:
                "m_wrong": margin(wids), "m_correct": margin(cids)}
         for L in layers:
             rec[f"m_oracle_L{L}"] = margin(wids, layer=L, states=donor[L])
-        if ctrl_layer in prev_donor and prev_donor[ctrl_layer].shape[0] == (ihi - ilo):
-            rec[f"m_xspan_L{ctrl_layer}"] = margin(
-                wids, layer=ctrl_layer, states=prev_donor[ctrl_layer])
+        # off-topic control at EVERY layer: a different fork's donor span
+        for L in layers:
+            if L in prev_donor and prev_donor[L].shape[0] == (ihi - ilo):
+                rec[f"m_xspan_L{L}"] = margin(wids, layer=L, states=prev_donor[L])
+        # identity check: patching the wrong span with its OWN states must reproduce
+        # m_wrong (neutral machinery, no artifact)
+        wself = extract_span_states(model, torch.tensor([wids], device=device),
+                                    ctrl_layer, ilo, ihi)
+        rec[f"m_self_L{ctrl_layer}"] = margin(wids, layer=ctrl_layer, states=wself)
         prev_donor = {L: donor[L] for L in layers}
 
         if args.mode == "freegen":
@@ -148,9 +154,9 @@ def merge(args) -> None:
     from scipy import stats
 
     d = Path(args.out_dir)
-    shards = sorted(d.glob(f"span_{args.align}_shard*.parquet"))
+    shards = sorted(d.glob(f"span_{args.align}_{args.mode}_shard*.parquet"))
     df = pd.concat([pd.read_parquet(p) for p in shards], ignore_index=True)
-    df.to_parquet(d / f"span_{args.align}.parquet")
+    df.to_parquet(d / f"span_{args.align}_{args.mode}.parquet")
     layers = sorted(int(c.split("_L")[1]) for c in df.columns
                     if c.startswith("m_oracle_L"))
 
@@ -180,6 +186,12 @@ def merge(args) -> None:
         if xs in df.columns:
             out["margin_by_layer"][f"L{L}"]["xspan_mean_minus_wrong"] = float(
                 (df[xs] - df.m_wrong).dropna().mean())
+            out["margin_by_layer"][f"L{L}"]["oracle_vs_xspan"] = paired(col, xs, "greater")
+    self_cols = [c for c in df.columns if c.startswith("m_self_L")]
+    if self_cols:
+        sc = self_cols[0]
+        out["identity_check_self_minus_wrong_mean"] = float(
+            (df[sc] - df.m_wrong).dropna().abs().mean())  # should be ~0
 
     if any(c.startswith("solve_oracle_L") for c in df.columns):
         sg = (df.solve_correct - df.solve_wrong)
@@ -196,7 +208,7 @@ def merge(args) -> None:
                     "recovery_fraction": float(delta.mean() / denom)
                     if denom != 0 else float("nan"),
                     **paired(col, "solve_wrong", "greater")}
-    (d / f"gates_span_{args.align}.json").write_text(json.dumps(out, indent=2))
+    (d / f"gates_span_{args.align}_{args.mode}.json").write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
 
 
@@ -243,8 +255,8 @@ def main() -> None:
     rows: list = []
     run(args, model, tok, device, rows)
     pd.DataFrame(rows).to_parquet(
-        args.out_dir / f"span_{args.align}_shard{args.shard_id}.parquet")
-    (args.out_dir / f"manifest_{args.align}_shard{args.shard_id}.json").write_text(
+        args.out_dir / f"span_{args.align}_{args.mode}_shard{args.shard_id}.parquet")
+    (args.out_dir / f"manifest_{args.align}_{args.mode}_shard{args.shard_id}.json").write_text(
         json.dumps({"created": datetime.now(timezone.utc).isoformat(),
                     "git_commit": git_commit(),
                     "args": {k: str(v) for k, v in vars(args).items()},

@@ -34,10 +34,10 @@ def test_merge_margin_recovery(tmp_path: Path):
     })
     d = tmp_path / "das_span"
     d.mkdir()
-    rows.to_parquet(d / "span_lastk_shard0.parquet")
+    rows.to_parquet(d / "span_lastk_tf_margin_shard0.parquet")
 
-    merge(argparse.Namespace(out_dir=d, align="lastk"))
-    g = json.loads((d / "gates_span_lastk.json").read_text())
+    merge(argparse.Namespace(out_dir=d, align="lastk", mode="tf_margin"))
+    g = json.loads((d / "gates_span_lastk_tf_margin.json").read_text())
 
     assert g["n"] == n
     assert g["belief_gap_correct_minus_wrong"]["mean"] > 0.7

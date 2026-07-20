@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -143,12 +142,18 @@ def build_prompt_prefix(problem: str, prefix: str) -> str:
 def build_candidates(
     samples: list[dict],
     counters: dict,
+    keep_neutral: bool = False,
 ) -> tuple[list[dict], dict[str, list[dict]]]:
     """
     Extract all valid candidate-step examples and populate the fork map.
 
     Returns (all_examples, fork_map).
     fork_map maps "{problem_id}::{solution_id}::{step_idx}" -> list of example dicts.
+
+    keep_neutral: when False (default) rating-0 completions are dropped, preserving
+        the correctness dataset behavior exactly. When True, rating-0 completions
+        are RETAINED (with label=0, "not incorrect"); downstream consumers that need
+        the progress-vs-neutral (+1 vs 0) slice must key off ``rating``, not ``label``.
     """
     all_examples: list[dict] = []
     fork_map: dict[str, list[dict]] = defaultdict(list)
@@ -218,7 +223,8 @@ def build_candidates(
                         continue
                     if rating == 0:
                         counters["candidate_rating_0"] += 1
-                        continue
+                        if not keep_neutral:
+                            continue
                     if flagged:
                         counters["candidate_flagged"] += 1
                         continue
@@ -226,9 +232,11 @@ def build_candidates(
                     if rating == 1:
                         counters["candidate_rating_1"] += 1
                         label = 0
-                    else:
+                    elif rating == -1:
                         counters["candidate_rating_minus_1"] += 1
                         label = 1
+                    else:  # rating == 0, retained only when keep_neutral=True
+                        label = 0  # "not incorrect"; pairing keys off `rating`
 
                     uid = (
                         f"prm800k::{problem_id}::{solution_id}"

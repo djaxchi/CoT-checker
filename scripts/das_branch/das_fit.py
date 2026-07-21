@@ -130,6 +130,14 @@ def do_fit(args, model, tok, device) -> None:
     from scipy import stats
 
     items = torch.load(cache_path(args.out_dir, args.layer), weights_only=False)
+    # drop pathologically long contexts: the grad graph + full-seq logits scale with
+    # length, and a handful of very long forks can OOM an 80GB card.
+    before = len(items)
+    items = [it for it in items
+             if len(it["ctx_ids"]) + max(len(c) for c in it["cand_ids"]) <= args.max_ctx]
+    if before != len(items):
+        print(f"[fit] kept {len(items)}/{before} within max_ctx={args.max_ctx}",
+              flush=True)
     train = [it for it in items if it["split"] == "train"]
     val = [it for it in items if it["split"] != "train"]
     if not train:  # splits.json may label val/test only; fall back to a deterministic cut
@@ -230,6 +238,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-2)
+    ap.add_argument("--max_ctx", type=int, default=1024)
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()
 

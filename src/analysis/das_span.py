@@ -110,12 +110,11 @@ def span_candidate_logprobs(model, context_ids: list[int],
     finally:
         if handle is not None:
             handle.remove()
-    logprobs = torch.log_softmax(logits.float(), dim=-1)
-    out = []
+    out = []  # slice per candidate before the float cast (avoid a full-vocab blowup)
     for i, (clo, chi) in enumerate(spans):
         tok_ids = input_ids[i, clo:chi].to(device)
-        lp = logprobs[i, clo - 1:chi - 1, :].gather(-1, tok_ids[:, None]).squeeze(-1)
-        out.append(float(lp.mean()))
+        sl = torch.log_softmax(logits[i, clo - 1:chi - 1, :].float(), dim=-1)
+        out.append(float(sl.gather(-1, tok_ids[:, None]).squeeze(-1).mean()))
     return out
 
 

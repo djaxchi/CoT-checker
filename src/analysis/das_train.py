@@ -72,12 +72,13 @@ def span_candidate_logprobs_grad(model, context_ids: list[int],
                        attention_mask=mask.to(device)).logits
     finally:
         handle.remove()
-    logprobs = torch.log_softmax(logits.float(), dim=-1)
+    # slice to candidate positions BEFORE float/log_softmax: a full-vocab float cast
+    # over all positions is 9+ GiB on long contexts and blows up the grad graph.
     outs = []
     for i, (clo, chi) in enumerate(spans):
         tok_ids = input_ids[i, clo:chi].to(device)
-        lp = logprobs[i, clo - 1:chi - 1, :].gather(-1, tok_ids[:, None]).squeeze(-1)
-        outs.append(lp.mean())
+        sl = torch.log_softmax(logits[i, clo - 1:chi - 1, :].float(), dim=-1)
+        outs.append(sl.gather(-1, tok_ids[:, None]).squeeze(-1).mean())
     return torch.stack(outs)
 
 

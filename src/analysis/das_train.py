@@ -88,9 +88,23 @@ def span_candidate_logprobs_grad(model, context_ids: list[int],
 
 def margin_ce_loss(cand_logprobs: torch.Tensor, gold_idx: int = 0) -> torch.Tensor:
     """Cross-entropy pushing the candidate distribution onto the gold answer, i.e.
-    maximise the gold margin. Softmax over the candidate mean-logprobs."""
+    maximise the gold margin. NOTE: unbounded target (U can inflate the gold margin
+    far past the donor's level, giving recovery >> 1 that grows with k). Kept for
+    reference; the faithful objective is dist_match_loss."""
     return torch.nn.functional.cross_entropy(
         cand_logprobs[None, :], torch.tensor([gold_idx], device=cand_logprobs.device))
+
+
+def dist_match_loss(cand_logprobs: torch.Tensor,
+                    target_logprobs: torch.Tensor) -> torch.Tensor:
+    """Cross-entropy from the donor (correct-branch) candidate distribution to the
+    patched one: the interchange must REPRODUCE the donor's answer belief, not
+    maximise the gold label. This is the DAS-faithful objective and it bounds the
+    achievable recovery at the donor's own level (~1), so a learned subspace can no
+    longer manufacture margin from capacity."""
+    q = torch.softmax(target_logprobs.detach(), dim=-1)
+    logp = torch.log_softmax(cand_logprobs, dim=-1)
+    return -(q * logp).sum()
 
 
 def subspace_overlap(Q1: torch.Tensor, Q2: torch.Tensor) -> float:

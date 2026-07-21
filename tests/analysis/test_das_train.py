@@ -6,6 +6,7 @@ import torch
 
 from src.analysis.das_train import (
     SubspaceU,
+    dist_match_loss,
     interchange_states,
     margin_ce_loss,
     subspace_overlap,
@@ -59,6 +60,28 @@ def test_margin_ce_lower_when_gold_higher():
     high_gold = torch.tensor([2.0, -1.0, -1.0])
     low_gold = torch.tensor([-1.0, 2.0, 0.0])
     assert margin_ce_loss(high_gold, 0) < margin_ce_loss(low_gold, 0)
+
+
+def test_dist_match_loss_minimal_at_target():
+    target = torch.tensor([1.5, -0.5, 0.2, -1.0])
+    # loss is minimised when the patched logprobs match the donor distribution
+    at_target = dist_match_loss(target.clone(), target)
+    far = dist_match_loss(torch.tensor([-2.0, 2.0, 0.0, 0.0]), target)
+    assert at_target < far
+    # matching target equals the donor entropy (CE at the minimum)
+    q = torch.softmax(target, 0)
+    assert torch.allclose(at_target, -(q * torch.log(q)).sum(), atol=1e-5)
+
+
+def test_dist_match_loss_grad_flows():
+    u = SubspaceU(10, 3, seed=0)
+    base, donor = torch.randn(4, 10), torch.randn(4, 10)
+    target = torch.tensor([0.5, -0.5, 1.0])
+    # a toy readout: candidate logprobs = projections of the mean patched state
+    states = interchange_states(base, donor, u())
+    cand = states.mean(0)[:3]
+    dist_match_loss(cand, target).backward()
+    assert u.weight.grad is not None and u.weight.grad.abs().sum() > 0
 
 
 def test_subspace_overlap_bounds():

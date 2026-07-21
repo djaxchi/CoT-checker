@@ -42,8 +42,8 @@ from src.analysis.das_span import (  # noqa: E402
 )
 from src.analysis.das_train import (  # noqa: E402
     SubspaceU,
+    dist_match_loss,
     interchange_states,
-    margin_ce_loss,
     span_candidate_logprobs_grad,
     subspace_overlap,
 )
@@ -84,14 +84,14 @@ def do_extract(args, model, tok, device) -> None:
             base = hw[0, ilo:ihi, :].to(torch.float16).cpu()
         cand_ids = [tok(c, add_special_tokens=False)["input_ids"]
                     for c in tr["candidates"]]
-        m_wrong = gold_margin(span_candidate_logprobs(model, wids + sfx, cand_ids,
-                                                      pad, device))
-        m_correct = gold_margin(span_candidate_logprobs(model, cids + sfx, cand_ids,
-                                                        pad, device))
+        lp_wrong = span_candidate_logprobs(model, wids + sfx, cand_ids, pad, device)
+        lp_correct = span_candidate_logprobs(model, cids + sfx, cand_ids, pad, device)
         items.append({"trace_id": tr["trace_id"], "split": tr.get("split", "test"),
                       "base": base, "donor": donor, "ctx_ids": wids + sfx,
                       "cand_ids": cand_ids, "inject": (ilo, ihi),
-                      "m_wrong": m_wrong, "m_correct": m_correct})
+                      "m_wrong": gold_margin(lp_wrong),
+                      "m_correct": gold_margin(lp_correct),
+                      "cand_lp_correct": lp_correct})  # donor belief = training target
         if (n + 1) % 100 == 0:
             print(f"[extract L{args.layer}] {n + 1}/{len(traces)} kept {len(items)} "
                   f"({(time.perf_counter() - t0) / (n + 1):.2f}s/trace)", flush=True)
@@ -164,7 +164,8 @@ def do_fit(args, model, tok, device) -> None:
             states = interchange_states(base, donor, u())
             lp = span_candidate_logprobs_grad(model, it["ctx_ids"], it["cand_ids"],
                                               pad, device, args.layer, ilo, ihi, states)
-            loss = margin_ce_loss(lp, 0)
+            target = torch.tensor(it["cand_lp_correct"], device=device)
+            loss = dist_match_loss(lp, target)
             if not torch.isfinite(loss):    # skip a bad step rather than poison U
                 opt.zero_grad()
                 continue

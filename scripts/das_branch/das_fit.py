@@ -169,10 +169,13 @@ def do_fit(args, model, tok, device) -> None:
                 opt.zero_grad()
                 continue
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(u.parameters(), 1.0)
-            opt.step()
+            gnorm = torch.nn.utils.clip_grad_norm_(u.parameters(), 1.0)
+            # a NaN from the QR backward would otherwise write NaN into U (and every
+            # later forward); only step when the gradient is finite.
+            if torch.isfinite(gnorm):
+                opt.step()
+                running += float(loss.detach())
             opt.zero_grad()
-            running += float(loss.detach())
         print(f"[fit L{args.layer} k{args.k_sub} s{args.seed}] epoch {epoch} "
               f"loss {running / len(train):.4f} "
               f"({(time.perf_counter() - t0):.0f}s)", flush=True)

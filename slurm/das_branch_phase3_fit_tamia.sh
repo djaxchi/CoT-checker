@@ -26,7 +26,7 @@ OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/runs/das_train}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen2.5-7B}"
 FIT_LAYER="${FIT_LAYER:-12}"
 KTOK="${KTOK:-8}"
-EPOCHS="${EPOCHS:-2}"
+EPOCHS="${EPOCHS:-12}"
 
 source "$PROJECT_ROOT/slurm/s1_model_size/models.env"
 export HF_HOME="${HF_HOME:-$HF_CACHE_ROOT}"

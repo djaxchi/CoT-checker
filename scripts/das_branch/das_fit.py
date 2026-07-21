@@ -185,6 +185,11 @@ def do_fit(args, model, tok, device) -> None:
     rand = _val_recovery(model, val, pad, device, args.layer,
                          SubspaceU(d, args.k_sub, seed=args.seed + 1000).to(device))
     oracle = _val_recovery(model, val, pad, device, args.layer, None)
+    train_rec = _val_recovery(model, train[:200], pad, device, args.layer, u)
+    # donor-belief loss floor (the CE minimum = donor entropy) to read the loss vs
+    floor = float(np.mean([float(-(torch.softmax(torch.tensor(it["cand_lp_correct"]), 0)
+                                   * torch.log_softmax(torch.tensor(it["cand_lp_correct"]), 0)).sum())
+                           for it in val]))
     dd, rd = np.array(das["deltas"]), np.array(rand["deltas"])
     p = float(stats.wilcoxon(dd, rd, alternative="greater").pvalue) \
         if len(dd) >= 10 and (dd - rd).any() else float("nan")
@@ -192,8 +197,9 @@ def do_fit(args, model, tok, device) -> None:
     metrics = {"layer": args.layer, "k_sub": args.k_sub, "seed": args.seed,
                "n_train": len(train), "n_val": len(val),
                "das_recovery": das["recovery"], "random_recovery": rand["recovery"],
-               "oracle_recovery": oracle["recovery"],
+               "oracle_recovery": oracle["recovery"], "train_recovery": train_rec["recovery"],
                "das_mean_delta": das["mean_delta"], "random_mean_delta": rand["mean_delta"],
+               "donor_entropy_floor": floor, "final_train_loss": running / max(1, len(train)),
                "p_das_gt_random": p}
     (args.out_dir / f"metrics_L{args.layer}_k{args.k_sub}_s{args.seed}.json").write_text(
         json.dumps(metrics, indent=2))
@@ -223,8 +229,14 @@ def do_report(args) -> None:
         out["configs"].append({
             "layer": L, "k_sub": k, "seeds": len(ms),
             "das_recovery_mean": float(np.mean([m["das_recovery"] for m in ms])),
+            "train_recovery_mean": float(np.mean([m.get("train_recovery", float("nan"))
+                                                  for m in ms])),
             "random_recovery_mean": float(np.mean([m["random_recovery"] for m in ms])),
             "oracle_recovery_mean": float(np.mean([m["oracle_recovery"] for m in ms])),
+            "final_train_loss_mean": float(np.mean([m.get("final_train_loss", float("nan"))
+                                                    for m in ms])),
+            "donor_entropy_floor_mean": float(np.mean([m.get("donor_entropy_floor", float("nan"))
+                                                       for m in ms])),
             "das_minus_random_mean": float(np.mean(
                 [m["das_recovery"] - m["random_recovery"] for m in ms])),
             "p_das_gt_random_max": max((m["p_das_gt_random"] for m in ms), default=float("nan")),
@@ -244,8 +256,8 @@ def main() -> None:
     ap.add_argument("--k_tokens", type=int, default=8)
     ap.add_argument("--k_sub", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--epochs", type=int, default=3)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--epochs", type=int, default=12)
+    ap.add_argument("--lr", type=float, default=1e-2)
     ap.add_argument("--max_ctx", type=int, default=1024)
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()

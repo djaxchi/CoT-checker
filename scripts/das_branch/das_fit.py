@@ -42,8 +42,8 @@ from src.analysis.das_span import (  # noqa: E402
 )
 from src.analysis.das_train import (  # noqa: E402
     SubspaceU,
-    dist_match_loss,
     interchange_states,
+    margin_match_loss,
     span_candidate_logprobs_grad,
     subspace_overlap,
 )
@@ -165,7 +165,7 @@ def do_fit(args, model, tok, device) -> None:
             lp = span_candidate_logprobs_grad(model, it["ctx_ids"], it["cand_ids"],
                                               pad, device, args.layer, ilo, ihi, states)
             target = torch.tensor(it["cand_lp_correct"], device=device)
-            loss = dist_match_loss(lp, target)
+            loss = margin_match_loss(lp, target)
             if not torch.isfinite(loss):    # skip a bad step rather than poison U
                 opt.zero_grad()
                 continue

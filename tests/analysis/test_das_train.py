@@ -9,6 +9,8 @@ from src.analysis.das_train import (
     dist_match_loss,
     interchange_states,
     margin_ce_loss,
+    margin_match_loss,
+    smooth_margin,
     subspace_overlap,
 )
 
@@ -81,6 +83,31 @@ def test_dist_match_loss_grad_flows():
     states = interchange_states(base, donor, u())
     cand = states.mean(0)[:3]
     dist_match_loss(cand, target).backward()
+    assert u.weight.grad is not None and u.weight.grad.abs().sum() > 0
+
+
+def test_smooth_margin_matches_gap():
+    import math
+    m = smooth_margin(torch.tensor([2.0, 0.0, 0.0]))
+    assert abs(float(m) - (2.0 - math.log(2.0))) < 1e-5
+    # a bigger gold-distractor gap gives a bigger margin
+    assert smooth_margin(torch.tensor([3.0, 0.0, 0.0])) > m
+
+
+def test_margin_match_loss_bounded_and_targets_donor():
+    donor = torch.tensor([1.0, -1.0, -1.0])          # moderate donor margin
+    at_target = margin_match_loss(donor.clone(), donor)
+    # overshooting the donor margin costs MORE than matching it (bounded objective)
+    overshoot = margin_match_loss(torch.tensor([9.0, -1.0, -1.0]), donor)
+    assert at_target < 1e-4 < overshoot
+
+
+def test_margin_match_loss_grad_flows():
+    u = SubspaceU(10, 3, seed=0)
+    base, donor = torch.randn(4, 10), torch.randn(4, 10)
+    target = torch.tensor([0.7, -0.3, -0.4])
+    cand = interchange_states(base, donor, u()).mean(0)[:3]
+    margin_match_loss(cand, target).backward()
     assert u.weight.grad is not None and u.weight.grad.abs().sum() > 0
 
 

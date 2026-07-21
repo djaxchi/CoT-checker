@@ -107,6 +107,24 @@ def dist_match_loss(cand_logprobs: torch.Tensor,
     return -(q * logp).sum()
 
 
+def smooth_margin(cand_logprobs: torch.Tensor) -> torch.Tensor:
+    """Differentiable gold margin: gold (index 0) minus the log-sum-exp of the
+    distractors (a soft max). Reduces to gold - best distractor as the gap grows."""
+    return cand_logprobs[0] - torch.logsumexp(cand_logprobs[1:], dim=0)
+
+
+def margin_match_loss(cand_logprobs: torch.Tensor,
+                      target_logprobs: torch.Tensor) -> torch.Tensor:
+    """Regress the patched gold margin onto the donor (correct-branch) margin. This
+    targets exactly the quantity where the branches differ (the margin), yet is
+    BOUNDED at the donor level -- the target is the donor's own margin, so the loss
+    rises if U overshoots it. Fixes both prior failure modes (unbounded CE-to-gold;
+    signal-free full-distribution matching)."""
+    m = smooth_margin(cand_logprobs)
+    mt = smooth_margin(target_logprobs.detach())
+    return torch.nn.functional.smooth_l1_loss(m, mt)
+
+
 def subspace_overlap(Q1: torch.Tensor, Q2: torch.Tensor) -> float:
     """Mean squared principal-angle cosine between two orthonormal d x k bases: the
     squared singular values of Q1^T Q2 averaged over k. 1 = identical span, 0 =

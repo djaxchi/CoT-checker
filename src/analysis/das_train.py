@@ -30,7 +30,11 @@ class SubspaceU(torch.nn.Module):
     def __init__(self, d: int, k: int, seed: int = 0):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
-        self.weight = torch.nn.Parameter(torch.randn(d, k, generator=g) / (d ** 0.5))
+        # init ORTHONORMAL (singular values 1) so the thin-QR reparam is well
+        # conditioned: a tiny-scale init gives near-zero singular values and the QR
+        # backward then explodes (NaN loss).
+        q0, _ = torch.linalg.qr(torch.randn(d, k, generator=g))
+        self.weight = torch.nn.Parameter(q0.contiguous())
 
     def forward(self) -> torch.Tensor:
         q, _ = torch.linalg.qr(self.weight)      # (d, k), orthonormal columns

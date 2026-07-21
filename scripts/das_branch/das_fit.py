@@ -165,10 +165,14 @@ def do_fit(args, model, tok, device) -> None:
             lp = span_candidate_logprobs_grad(model, it["ctx_ids"], it["cand_ids"],
                                               pad, device, args.layer, ilo, ihi, states)
             loss = margin_ce_loss(lp, 0)
+            if not torch.isfinite(loss):    # skip a bad step rather than poison U
+                opt.zero_grad()
+                continue
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(u.parameters(), 1.0)
             opt.step()
             opt.zero_grad()
-            running += float(loss)
+            running += float(loss.detach())
         print(f"[fit L{args.layer} k{args.k_sub} s{args.seed}] epoch {epoch} "
               f"loss {running / len(train):.4f} "
               f"({(time.perf_counter() - t0):.0f}s)", flush=True)
@@ -236,8 +240,8 @@ def main() -> None:
     ap.add_argument("--k_tokens", type=int, default=8)
     ap.add_argument("--k_sub", type=int, default=16)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--lr", type=float, default=1e-2)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--max_ctx", type=int, default=1024)
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()

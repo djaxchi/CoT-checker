@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 import torch
 
 from src.analysis.das_span import make_span_patch_hook
-from src.analysis.transition_operator import SEP_TOKEN_ID
+from src.analysis.transition_operator import SEP_TOKEN_ID, belief_from_scores
 
 
 # ---------------------------------------------------------------------------
@@ -200,3 +200,94 @@ def recovery(margin_latent: float, margin_no_cot: float, margin_full_cot: float)
     if abs(denom) < 1e-6:
         return float("nan")
     return (margin_latent - margin_no_cot) / denom
+
+
+# ---------------------------------------------------------------------------
+# Memory-swap (test B) + trace-probe (test A) helpers
+# ---------------------------------------------------------------------------
+
+def joint_candidate_texts(b_gold: str, a_gold: str, b_distractors: list[str],
+                          a_distractors: list[str], k: int = 8) -> tuple[list[str], int, int]:
+    """Candidate list for a swap pair: recipient gold, donor gold, then distractors from
+    both traces, deduped. Returns (texts, idx_b_gold, idx_a_gold). If the two golds
+    normalise to the same string the pair is unusable and idx_a == idx_b."""
+    from src.analysis.transition_operator import normalize_answer
+    gold_frac = "\\frac" in b_gold
+    b_n = normalize_answer(b_gold, gold_frac)
+    a_n = normalize_answer(a_gold, gold_frac)
+    out, seen = [b_n], {b_n}
+    idx_a = 0 if a_n == b_n else -1
+    if idx_a == -1:
+        out.append(a_n); seen.add(a_n); idx_a = 1
+    for raw in list(b_distractors) + list(a_distractors):
+        if len(out) >= k:
+            break
+        c = normalize_answer(raw, gold_frac)
+        if c and c not in seen:
+            seen.add(c); out.append(c)
+    return out, 0, idx_a
+
+
+def belief_masses(scores: list[float], idx_b: int, idx_a: int) -> tuple[float, float]:
+    """Softmax belief over the candidate set; return (mass on recipient gold b,
+    mass on donor gold a)."""
+    b = belief_from_scores(scores)
+    return float(b[idx_b]), float(b[idx_a])
+
+
+def random_like(state: torch.Tensor, seed: int = 0) -> torch.Tensor:
+    """Gaussian control matched to `state`'s per-vector norm: an injection of the same
+    magnitude but no learned content, to show any donor pull is content-specific."""
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    r = torch.randn(state.shape, generator=g).to(state.dtype).to(state.device)
+    scale = state.norm(dim=-1, keepdim=True) / r.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    return r * scale
+
+
+def donor_win(mass_a: float, mass_b: float) -> bool:
+    """The injected donor memory made the donor's answer outrank the recipient's own."""
+    return mass_a > mass_b
+
+
+# Trace-probe (test A): recall of an intermediate value, a question DIFFERENT from the
+# final answer, with a clean gold extracted straight from the reasoning text.
+PROBE_SUFFIX = "\nAn intermediate value computed in the solution is"
+
+import re as _re
+
+_INT_RE = _re.compile(r"-?\d+")
+
+
+def extract_ints(text: str) -> list[str]:
+    """Integer literals in `text`, in order (used for probe gold/distractor mining)."""
+    return _INT_RE.findall(text)
+
+
+def pick_probe_target(question: str, steps: list[str], gt_answer: str,
+                      min_abs: int = 3) -> tuple[str, int] | None:
+    """Pick an intermediate integer to probe: it must appear in a middle step, not in the
+    question, differ from the final answer, and have |value| >= min_abs (skip 0/1/2, too
+    guessable). Returns (gold_str, step_idx) or None if no clean target exists.
+
+    Middle steps only (exclude the first step and the last two, which usually state the
+    answer), so the target is genuinely intermediate reasoning, not the conclusion. Among
+    the qualifying integers the most distinctive (largest |value|) is chosen, so the gold
+    is less guessable from the question and the floor stays low."""
+    if len(steps) < 4:
+        return None
+    q_ints = set(extract_ints(question))
+    ans_ints = set(extract_ints(gt_answer))
+    best = None  # (abs_value, step_idx, tok_s)
+    for idx in range(1, len(steps) - 2):
+        for tok_s in extract_ints(steps[idx]):
+            if tok_s in q_ints or tok_s in ans_ints:
+                continue
+            try:
+                v = abs(int(tok_s))
+            except ValueError:
+                continue
+            if v < min_abs:
+                continue
+            if best is None or v > best[0]:
+                best = (v, idx, tok_s)
+    return (best[2], best[1]) if best else None

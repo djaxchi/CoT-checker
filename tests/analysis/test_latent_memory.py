@@ -6,13 +6,17 @@ import torch
 
 from src.analysis.latent_memory import (
     OracleResult,
+    belief_masses,
     candidate_scores_grad,
     chunk_pool_states,
+    donor_win,
     full_cot_context_ids,
     gold_margin_t,
+    joint_candidate_texts,
     latent_context_ids,
     no_cot_context_ids,
     optimize_latent,
+    random_like,
     recovery,
 )
 from src.analysis.transition_operator import SEP_TOKEN_ID
@@ -63,6 +67,51 @@ def test_recovery_formula_and_degenerate():
     assert abs(recovery(0.9, 0.1, 0.9) - 1.0) < 1e-9
     import math
     assert math.isnan(recovery(0.5, 0.5, 0.5))
+
+
+def test_joint_candidate_texts_layout():
+    texts, ib, ia = joint_candidate_texts("5", "7", ["9", "5"], ["11", "7"], k=6)
+    assert ib == 0 and ia == 1
+    assert texts[0] == "5" and texts[1] == "7"
+    assert "9" in texts and "11" in texts
+    assert len(texts) == len(set(texts))  # deduped
+
+
+def test_joint_candidate_texts_same_gold_flagged():
+    texts, ib, ia = joint_candidate_texts("5", "5", ["9"], ["8"], k=6)
+    assert ib == ia == 0  # unusable pair: golds collide
+
+
+def test_belief_masses_and_donor_win():
+    scores = [2.0, 0.0, -1.0]  # recipient gold strongly preferred
+    mb, ma = belief_masses(scores, idx_b=0, idx_a=1)
+    assert mb > ma
+    assert not donor_win(ma, mb)
+    assert donor_win(0.9, 0.1)
+
+
+def test_random_like_matches_norm():
+    s = torch.randn(3, 8) * 5.0
+    r = random_like(s, seed=1)
+    assert r.shape == s.shape
+    assert torch.allclose(r.norm(dim=-1), s.norm(dim=-1), atol=1e-4)
+
+
+def test_extract_ints_and_probe_target():
+    from src.analysis.latent_memory import extract_ints, pick_probe_target
+    assert extract_ints("we get 42 and -7 then 100") == ["42", "-7", "100"]
+    steps = ["start with x", "compute 5 times 7", "so we have 350 here",
+             "divide by 2 giving 175", "the answer is 88", "final: 88"]
+    # question mentions 5 and 7; answer 88 -> excluded. 350 is largest qualifying.
+    tgt = pick_probe_target("given 5 and 7", steps, "88")
+    assert tgt is not None
+    assert tgt[0] == "350"
+    assert 1 <= tgt[1] <= len(steps) - 3
+
+
+def test_probe_target_none_when_too_short():
+    from src.analysis.latent_memory import pick_probe_target
+    assert pick_probe_target("q", ["a", "b", "c"], "5") is None
 
 
 def test_gold_margin_t_differentiable():

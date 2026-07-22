@@ -134,6 +134,117 @@ class ResidualEdit:
         return False
 
 
+class ComponentEdit:
+    """Context-managed forward hook editing ONE sub-block's output (the
+    attention contribution or the MLP contribution added to the residual
+    stream) of one decoder layer, at one token position.
+
+    Qwen2DecoderLayer adds self_attn(...) then mlp(...) into the residual, so
+    hooking those submodules edits exactly the additive contribution of that
+    component. kind='attn' -> layers[layer].self_attn (tuple output, hidden is
+    element 0); kind='mlp' -> layers[layer].mlp (plain tensor output).
+
+    Same edit rule and interface as ResidualEdit (patch mode only, prefill
+    only) so it is a drop-in for generate_with_edit / score_with_edit:
+        out[b, idx[b]] += alpha * (vec[b] - out[b, idx[b]]).
+    idx < 0 leaves a sample untouched (lets a batch mix conditions)."""
+
+    def __init__(self, model, layer: int, kind: str):
+        if kind not in ("attn", "mlp"):
+            raise ValueError(kind)
+        blk = model.model.layers[layer]
+        self.block = blk.self_attn if kind == "attn" else blk.mlp
+        self.kind = kind
+        self.idx = None
+        self.vecs = None
+        self.alpha = 1.0
+        self._handle = None
+
+    def set(self, idx, vecs, alpha: float = 1.0):
+        self.idx = idx
+        self.vecs = vecs
+        self.alpha = alpha
+
+    def _hook(self, module, args, output):
+        h = output[0] if isinstance(output, tuple) else output
+        if self.idx is None:
+            return output
+        if h.shape[1] > 1:  # prefill only
+            for b, i in enumerate(self.idx):
+                if i is None or i < 0:
+                    continue
+                v = self.vecs[b].to(h.dtype)
+                h[b, i] = h[b, i] + self.alpha * (v - h[b, i])
+        if isinstance(output, tuple):
+            return (h,) + tuple(output[1:])
+        return h
+
+    def __enter__(self):
+        self._handle = self.block.register_forward_hook(self._hook)
+        return self
+
+    def __exit__(self, *exc):
+        self._handle.remove()
+        self.idx = None
+        return False
+
+
+class ComponentStore:
+    """Row lookup into the component extraction (component_states_v1):
+    instance_id -> stored attn / mlp contribution vector at the final prompt
+    token, per decoder layer. Loads whole layer arrays lazily (fp16)."""
+
+    def __init__(self, out_dir: Path):
+        self.hs_dir = out_dir / "component_states_v1"
+        self.meta = pd.read_parquet(self.hs_dir / "comp_meta.parquet")
+        self.row_of = {r.instance_id: i
+                       for i, r in enumerate(self.meta.itertuples())}
+        self._layers: dict[tuple, np.ndarray] = {}
+
+    def layer(self, kind: str, layer: int) -> np.ndarray:
+        key = (kind, layer)
+        if key not in self._layers:
+            from safetensors.numpy import load_file
+            self._layers[key] = load_file(
+                str(self.hs_dir / f"{kind}_L{layer:02d}.safetensors"))["h"]
+        return self._layers[key]
+
+    def vec(self, instance_id: str, kind: str, layer: int) -> np.ndarray | None:
+        i = self.row_of.get(instance_id)
+        return None if i is None else self.layer(kind, layer)[i]
+
+
+def capture_readout(model, tok, device, prompt_ids: list[list[int]],
+                    edit, edit_vecs, edit_alpha, readout_hs_idx: int):
+    """RIGHT-padded forward, optionally under an edit, returning the residual
+    hidden state at readout_hs_idx and the final prompt token for each sample
+    (n, hidden) as float32 numpy. Used to see where an intervention lands a
+    recipient in representation space downstream of the patched layer."""
+    import torch
+    pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    mx = max(len(x) for x in prompt_ids)
+    inp = torch.tensor([x + [pad] * (mx - len(x)) for x in prompt_ids],
+                       dtype=torch.long, device=device)
+    att = torch.tensor([[1] * len(x) + [0] * (mx - len(x))
+                        for x in prompt_ids], dtype=torch.long, device=device)
+    ctx = edit if edit is not None else _null_ctx()
+    with torch.no_grad(), ctx:
+        if edit is not None:
+            idx = [len(p) - 1 if v is not None else -1
+                   for p, v in zip(prompt_ids, edit_vecs)]
+            vecs = [torch.zeros(model.config.hidden_size, device=device)
+                    if v is None else torch.as_tensor(v, device=device)
+                    for v in edit_vecs]
+            edit.set(idx, vecs, edit_alpha)
+        hs = model(inp, attention_mask=att, output_hidden_states=True,
+                   use_cache=False).hidden_states[readout_hs_idx]
+    out = np.empty((len(prompt_ids), model.config.hidden_size),
+                   dtype=np.float32)
+    for b, p in enumerate(prompt_ids):
+        out[b] = hs[b, len(p) - 1].float().cpu().numpy()
+    return out
+
+
 def first_token_ids(tok, answers: list[str]) -> list[int]:
     out = []
     for a in answers:

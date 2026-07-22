@@ -81,6 +81,10 @@ class ResidualEdit:
 
     mode='patch': out[b, idx[b]] += alpha * (vec[b] - out[b, idx[b]])
                   applied only on prefill passes (seq_len > 1).
+    mode='add':   out[b, idx[b]] += alpha * vec[b] on prefill only. Use for
+                  partial / masked injections where vec is a precomputed delta
+                  (e.g. a subset of coordinates of h_donor - h_recip, or a
+                  neuron-subset reconstruction W_down[:, S] @ dg[S]).
     mode='steer': out[b, idx[b]:] += vec[b] on prefill AND out[b, -1] +=
                   vec[b] on every decode step (seq_len == 1).
     idx are indices into the current (padded) sequence. Samples with idx < 0
@@ -88,7 +92,7 @@ class ResidualEdit:
     """
 
     def __init__(self, model, hs_idx: int, mode: str):
-        if mode not in ("patch", "steer"):
+        if mode not in ("patch", "add", "steer"):
             raise ValueError(mode)
         self.block = model.model.layers[hs_idx - 1]
         self.mode = mode
@@ -115,6 +119,9 @@ class ResidualEdit:
             if self.mode == "patch":
                 if seq_len > 1:
                     h[b, i] = h[b, i] + self.alpha * (v - h[b, i])
+            elif self.mode == "add":
+                if seq_len > 1:
+                    h[b, i] = h[b, i] + self.alpha * v
             else:
                 if seq_len > 1:
                     h[b, i:] = h[b, i:] + v
@@ -212,6 +219,31 @@ class ComponentStore:
     def vec(self, instance_id: str, kind: str, layer: int) -> np.ndarray | None:
         i = self.row_of.get(instance_id)
         return None if i is None else self.layer(kind, layer)[i]
+
+
+class NeuronStore:
+    """Row lookup into the neuron extraction (neuron_states_v1): instance_id ->
+    stored MLP intermediate activation g = silu(gate(x)) * up(x) at the final
+    prompt token, per decoder layer. g is the (intermediate_size,) pre-down_proj
+    vector, so mlp_out = down_proj.weight @ g. Loads lazily (fp16)."""
+
+    def __init__(self, out_dir: Path):
+        self.hs_dir = out_dir / "neuron_states_v1"
+        self.meta = pd.read_parquet(self.hs_dir / "neuron_meta.parquet")
+        self.row_of = {r.instance_id: i
+                       for i, r in enumerate(self.meta.itertuples())}
+        self._layers: dict[int, np.ndarray] = {}
+
+    def layer(self, layer: int) -> np.ndarray:
+        if layer not in self._layers:
+            from safetensors.numpy import load_file
+            self._layers[layer] = load_file(
+                str(self.hs_dir / f"g_L{layer:02d}.safetensors"))["h"]
+        return self._layers[layer]
+
+    def vec(self, instance_id: str, layer: int) -> np.ndarray | None:
+        i = self.row_of.get(instance_id)
+        return None if i is None else self.layer(layer)[i]
 
 
 def capture_readout(model, tok, device, prompt_ids: list[list[int]],

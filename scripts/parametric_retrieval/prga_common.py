@@ -107,7 +107,6 @@ class ResidualEdit:
         self.alpha = alpha
 
     def _hook(self, module, args, output):
-        import torch
         h = output[0] if isinstance(output, tuple) else output
         if self.idx is None:
             return output
@@ -219,6 +218,61 @@ class ComponentStore:
     def vec(self, instance_id: str, kind: str, layer: int) -> np.ndarray | None:
         i = self.row_of.get(instance_id)
         return None if i is None else self.layer(kind, layer)[i]
+
+
+class ClampNeuron:
+    """Context-managed forward-pre-hook that clamps a set of MLP intermediate
+    neurons to fixed values on EVERY token and every forward pass (prefill and
+    each decode step), i.e. Golden-Gate-style persistent feature steering, not
+    a one-position patch. Hooks the layer's down_proj input g (mlp_out =
+    W_down @ g), so g[:, :, nid] := value for each (nid, value).
+
+    All samples in the batch get the same clamp; drive one neuron set per
+    batch. set(nids, vals) before the generate/forward call."""
+
+    def __init__(self, model, layer: int):
+        self.block = model.model.layers[layer].mlp.down_proj
+        self.nids: list[int] = []
+        self.vals: list[float] = []
+        self._handle = None
+
+    def set(self, nids, vals):
+        self.nids = list(nids)
+        self.vals = list(vals)
+
+    def _hook(self, module, args):
+        g = args[0]
+        if self.nids:
+            for nid, val in zip(self.nids, self.vals):
+                g[:, :, nid] = val
+        return (g,) + tuple(args[1:])
+
+    def __enter__(self):
+        self._handle = self.block.register_forward_pre_hook(self._hook)
+        return self
+
+    def __exit__(self, *exc):
+        self._handle.remove()
+        return False
+
+
+def greedy_generate(model, tok, device, prompt_ids: list[list[int]],
+                    max_new_tokens: int = 40, clamp=None) -> list[str]:
+    """LEFT-padded greedy generation, optionally under a persistent clamp
+    context (ClampNeuron). Returns decoded continuations."""
+    import torch
+    pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    mx = max(len(x) for x in prompt_ids)
+    inp = torch.tensor([[pad] * (mx - len(x)) + x for x in prompt_ids],
+                       dtype=torch.long, device=device)
+    att = torch.tensor([[0] * (mx - len(x)) + [1] * len(x)
+                        for x in prompt_ids], dtype=torch.long, device=device)
+    ctx = clamp if clamp is not None else _null_ctx()
+    with torch.no_grad(), ctx:
+        seqs = model.generate(inp, attention_mask=att, do_sample=False,
+                              max_new_tokens=max_new_tokens, pad_token_id=pad)
+    return [tok.decode(seqs[b, mx:].tolist(), skip_special_tokens=True)
+            for b in range(len(prompt_ids))]
 
 
 class NeuronStore:

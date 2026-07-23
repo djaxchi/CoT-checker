@@ -36,9 +36,15 @@ if [[ ! -f "$ae_pt" ]]; then
     echo "== downloading L28 SAE (resid_post_layer_27/trainer_${TRAINER}) =="
     module load StdEnv/2023 python/3.11 2>/dev/null || true
     source "$HOME/venvs/cot/bin/activate" 2>/dev/null || true
-    huggingface-cli download andyrdt/saes-qwen2.5-7b-instruct \
-        --include "resid_post_layer_27/trainer_${TRAINER}/*" \
-        --local-dir "$SAE_ROOT"
+    if command -v hf >/dev/null 2>&1; then
+        hf download andyrdt/saes-qwen2.5-7b-instruct \
+            --include "resid_post_layer_27/trainer_${TRAINER}/*" \
+            --local-dir "$SAE_ROOT"
+    else
+        huggingface-cli download andyrdt/saes-qwen2.5-7b-instruct \
+            --include "resid_post_layer_27/trainer_${TRAINER}/*" \
+            --local-dir "$SAE_ROOT"
+    fi
 fi
 [[ -f "$ae_pt" ]] || { echo "SAE download failed: $ae_pt missing"; exit 1; }
 echo "SAE present: $ae_pt"

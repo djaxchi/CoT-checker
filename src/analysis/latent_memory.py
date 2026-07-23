@@ -291,3 +291,78 @@ def pick_probe_target(question: str, steps: list[str], gt_answer: str,
             if best is None or v > best[0]:
                 best = (v, idx, tok_s)
     return (best[2], best[1]) if best else None
+
+
+def pick_probe_targets(question: str, steps: list[str], gt_answer: str,
+                       n_targets: int = 3, min_abs: int = 3,
+                       cue_words: int = 8) -> list[dict]:
+    """Up to n_targets distinguishable intermediate-value probes, one per distinct middle
+    step, spread across the trace. Each probe is anchored to the phrase immediately before
+    the number in its step (its "cue"), so different probes are distinct queries: the model
+    must complete "<cue>" with the value that followed it in the reasoning. Returns dicts
+    {gold, step_idx, cue}. Skips numbers in the question/answer, |value| < min_abs, and any
+    number with no textual cue before it (start of step)."""
+    if len(steps) < 4:
+        return []
+    q_ints = set(extract_ints(question))
+    ans_ints = set(extract_ints(gt_answer))
+    out: list[dict] = []
+    used_steps: set[int] = set()
+    used_golds: set[str] = set()
+    for idx in range(1, len(steps) - 2):
+        if idx in used_steps:
+            continue
+        step = steps[idx]
+        for m in _INT_RE.finditer(step):
+            tok_s = m.group()
+            if tok_s in q_ints or tok_s in ans_ints or tok_s in used_golds:
+                continue
+            try:
+                if abs(int(tok_s)) < min_abs:
+                    continue
+            except ValueError:
+                continue
+            cue = " ".join(step[: m.start()].split()[-cue_words:]).strip()
+            if len(cue) < 3 or not any(c.isalpha() for c in cue):
+                continue
+            out.append({"gold": tok_s, "step_idx": idx, "cue": cue})
+            used_steps.add(idx); used_golds.add(tok_s)
+            break
+        if len(out) >= n_targets:
+            break
+    return out
+
+
+def optimize_latent_multi(model, context_ids: list[int], lo: int, hi: int, layer: int,
+                          targets: list[dict], init_states: torch.Tensor, pad_id: int,
+                          device, epochs: int = 60, lr: float = 5e-2) -> dict:
+    """Optimise ONE latent to satisfy several queries at once. Each target is a dict
+    {cand_ids, suffix_ids, teacher_belief}; the loss sums KL(teacher || student) across
+    targets, so the single latent must answer every query. Returns {z, margins, scores,
+    loss_history} with per-target final margins (gold index 0)."""
+    import torch as _t
+    z = _t.nn.Parameter(init_states.detach().to(device).float().clone())
+    prepped = [(list(context_ids) + list(t["suffix_ids"]), t["cand_ids"],
+                t["teacher_belief"].detach().to(device).float()) for t in targets]
+    opt = _t.optim.Adam([z], lr=lr)
+    history: list[float] = []
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = z.new_zeros(())
+        for ctx, cand_ids, tb in prepped:
+            scores = candidate_scores_grad(model, ctx, cand_ids, pad_id, device,
+                                           layer, lo, hi, z)
+            logbelief = _t.log_softmax(scores, dim=-1)
+            loss = loss + _t.sum(tb * (tb.clamp_min(1e-9).log() - logbelief))
+        loss.backward()
+        opt.step()
+        history.append(float(loss.detach()))
+    margins, all_scores = [], []
+    with _t.no_grad():
+        for ctx, cand_ids, _tb in prepped:
+            s = [float(x) for x in candidate_scores_grad(
+                model, ctx, cand_ids, pad_id, device, layer, lo, hi, z)]
+            all_scores.append(s)
+            margins.append(s[0] - max(s[1:]))
+    return {"z": z.detach(), "margins": margins, "scores": all_scores,
+            "loss_history": history}

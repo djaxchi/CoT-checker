@@ -114,6 +114,50 @@ def test_probe_target_none_when_too_short():
     assert pick_probe_target("q", ["a", "b", "c"], "5") is None
 
 
+def test_pick_probe_targets_multi_distinguishable():
+    from src.analysis.latent_memory import pick_probe_targets
+    steps = ["intro line", "the discriminant is 49 here", "next we halve it",
+             "the midpoint value is 175 exactly", "so the answer is 88", "final 88"]
+    tgts = pick_probe_targets("no numbers here", steps, "88", n_targets=3)
+    golds = {t["gold"] for t in tgts}
+    assert "49" in golds and "175" in golds       # both intermediates found
+    assert len({t["step_idx"] for t in tgts}) == len(tgts)   # distinct steps
+    for t in tgts:
+        assert t["cue"] and any(c.isalpha() for c in t["cue"])  # non-empty textual cue
+    # cue anchors to text before the number
+    d = next(t for t in tgts if t["gold"] == "49")
+    assert d["cue"].endswith("discriminant is")
+
+
+def test_optimize_latent_multi_serves_two_targets():
+    model = _fixture()
+    q = [3, 4, 5, 6]
+    lat_ctx, lo, hi = latent_context_ids(q, m=4, placeholder_id=0)
+
+    def teacher_for(steps, suffix, cands):
+        ctx = full_cot_context_ids(q, steps) + suffix
+        with torch.no_grad():
+            s = candidate_scores_grad(model, ctx, cands, pad_id=0, device="cpu",
+                                      layer=2, lo=0, hi=0, states=torch.zeros(0, 8))
+        return torch.softmax(s, dim=-1)
+
+    t1 = {"suffix_ids": [7], "cand_ids": [[10, 11], [12], [13, 14]]}
+    t2 = {"suffix_ids": [9], "cand_ids": [[15], [16, 17], [18]]}
+    t1["teacher_belief"] = teacher_for([[20, 21], [22]], t1["suffix_ids"], t1["cand_ids"])
+    t2["teacher_belief"] = teacher_for([[23, 24], [25]], t2["suffix_ids"], t2["cand_ids"])
+
+    from src.analysis.latent_memory import optimize_latent_multi
+    res = optimize_latent_multi(model, lat_ctx, lo, hi, layer=2,
+                                targets=[t1, t2], init_states=torch.zeros(4, 8),
+                                pad_id=0, device="cpu", epochs=120, lr=1e-1)
+    assert res["loss_history"][-1] < res["loss_history"][0]
+    assert len(res["margins"]) == 2
+    # both targets' student beliefs approach their teachers
+    for tgt, scores in zip([t1, t2], res["scores"]):
+        sb = torch.softmax(torch.tensor(scores), dim=-1)
+        assert float((sb - tgt["teacher_belief"]).abs().max()) < 0.2
+
+
 def test_gold_margin_t_differentiable():
     s = torch.tensor([2.0, 1.0, 0.5], requires_grad=True)
     m = gold_margin_t(s)

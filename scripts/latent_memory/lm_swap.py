@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from statistics import mean
+import math
 
 import sys
 
@@ -172,6 +172,11 @@ def main():
     out = args.run_dir / "swap_rows.jsonl"
     out.write_text("\n".join(json.dumps(r) for r in rows))
 
+    def nanmean(xs):
+        xs = [x for x in xs if isinstance(x, (int, float, bool)) and not (
+            isinstance(x, float) and math.isnan(x))]
+        return sum(xs) / len(xs) if xs else float("nan")
+
     print(f"pairs={len(rows)}")
     for layer in layers:
         L = [r for r in rows if r["layer"] == layer]
@@ -179,15 +184,15 @@ def main():
             continue
         agg = {
             "n": len(L),
-            "self_win_rate": mean(r["self_win"] for r in L),
-            "donor_win_rate_swap": mean(r["donor_win_swap"] for r in L),
-            "donor_win_rate_rand": mean(r["donor_win_rand"] for r in L),
-            "ma_floor": mean(r["ma_floor"] for r in L),
-            "ma_swap": mean(r["ma_swap"] for r in L),
-            "ma_rand": mean(r["ma_rand"] for r in L),
-            "mb_floor": mean(r["mb_floor"] for r in L),
-            "mb_swap": mean(r["mb_swap"] for r in L),
-            "mb_self": mean(r["mb_self"] for r in L),
+            "self_win_rate": nanmean(r["self_win"] for r in L),
+            "donor_win_rate_swap": nanmean(r["donor_win_swap"] for r in L),
+            "donor_win_rate_rand": nanmean(r["donor_win_rand"] for r in L),
+            "ma_floor": nanmean(r["ma_floor"] for r in L),
+            "ma_swap": nanmean(r["ma_swap"] for r in L),
+            "ma_rand": nanmean(r["ma_rand"] for r in L),
+            "mb_floor": nanmean(r["mb_floor"] for r in L),
+            "mb_swap": nanmean(r["mb_swap"] for r in L),
+            "mb_self": nanmean(r["mb_self"] for r in L),
         }
         print(f"\n-- layer {layer} (n={agg['n']}) --")
         print(f"  self-win rate (B keeps own answer w/ zB): {agg['self_win_rate']:.3f}")

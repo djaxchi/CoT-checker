@@ -98,6 +98,8 @@ def main():
             s = candidate_mean_logprobs(model, ctx_ids, cand_ids, pad_id, device)
         return s, s[0] - max(s[1:])
 
+    args.run_dir.mkdir(parents=True, exist_ok=True)
+    out = args.run_dir / f"multitarget_shard{args.shard_id}.jsonl"
     rows = []
     for ti, tr in enumerate(mine):
         inters = pick_probe_targets(tr["question"], tr["steps"], tr["gt_answer"],
@@ -152,11 +154,11 @@ def main():
                     "inter_recs": inter,
                     "loss0": res["loss_history"][0], "lossT": res["loss_history"][-1],
                 })
-        if (ti + 1) % 10 == 0:
-            print(f"[mt shard {args.shard_id}] {ti + 1}/{len(mine)} traces, {len(rows)} rows")
+        if (ti + 1) % 5 == 0:  # incremental flush so a wall-clock timeout keeps partials
+            out.write_text("\n".join(json.dumps(r) for r in rows))
+            print(f"[mt shard {args.shard_id}] {ti + 1}/{len(mine)} traces, {len(rows)} rows",
+                  flush=True)
 
-    args.run_dir.mkdir(parents=True, exist_ok=True)
-    out = args.run_dir / f"multitarget_shard{args.shard_id}.jsonl"
     out.write_text("\n".join(json.dumps(r) for r in rows))
     print(f"[mt shard {args.shard_id}] wrote {len(rows)} rows -> {out}")
 

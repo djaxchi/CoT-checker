@@ -129,6 +129,20 @@ def test_pick_probe_targets_multi_distinguishable():
     assert d["cue"].endswith("discriminant is")
 
 
+def test_multi_target_scores_matches_per_query():
+    from src.analysis.latent_memory import multi_target_scores
+    model = _fixture()
+    q = [3, 4, 5, 6]
+    lat_ctx, lo, hi = latent_context_ids(q, m=3, placeholder_id=0)
+    z = torch.randn(hi - lo, 8) * 0.3
+    prepped = [(lat_ctx + [7], [[10, 11], [12], [13, 14]]),
+               (lat_ctx + [9], [[15], [16, 17]])]
+    batched = multi_target_scores(model, prepped, 0, "cpu", 2, lo, hi, z)
+    for (ctx, cands), bs in zip(prepped, batched):
+        ref = candidate_scores_grad(model, ctx, cands, 0, "cpu", 2, lo, hi, z)
+        assert torch.allclose(bs, ref, atol=1e-5)
+
+
 def test_optimize_latent_multi_serves_two_targets():
     model = _fixture()
     q = [3, 4, 5, 6]

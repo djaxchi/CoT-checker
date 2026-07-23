@@ -333,36 +333,67 @@ def pick_probe_targets(question: str, steps: list[str], gt_answer: str,
     return out
 
 
+def multi_target_scores(model, prepped: list[tuple[list[int], list[list[int]]]],
+                        pad_id: int, device, layer: int, lo: int, hi: int,
+                        states: torch.Tensor) -> list[torch.Tensor]:
+    """Mean per-token log-probs for several queries in ONE batched forward. `prepped` is a
+    list of (context_ids, cand_ids_list); every context shares the SAME latent span [lo,hi)
+    (same absolute positions, since the query suffix comes after it), so a single patch hook
+    covers all rows. Returns one (num_cand,) grad tensor per query. This is the batched twin
+    of candidate_scores_grad across queries, the hot path for the joint optimiser."""
+    rows, meta = [], []  # meta[i] = (query_idx, clo, chi)
+    for qj, (ctx, cand_ids) in enumerate(prepped):
+        for cand in cand_ids:
+            rows.append(ctx + cand)
+            meta.append((qj, len(ctx), len(ctx) + len(cand)))
+    width = max(len(r) for r in rows)
+    input_ids = torch.full((len(rows), width), pad_id, dtype=torch.long)
+    mask = torch.zeros((len(rows), width), dtype=torch.long)
+    for i, r in enumerate(rows):
+        input_ids[i, :len(r)] = torch.tensor(r, dtype=torch.long)
+        mask[i, :len(r)] = 1
+    handle = _patch_module(model, layer).register_forward_hook(
+        make_span_patch_hook(lo, hi, states))
+    try:
+        logits = model(input_ids=input_ids.to(device),
+                       attention_mask=mask.to(device)).logits
+    finally:
+        handle.remove()
+    logprobs = torch.log_softmax(logits.float(), dim=-1)
+    per_query: list[list[torch.Tensor]] = [[] for _ in prepped]
+    for i, (qj, clo, chi) in enumerate(meta):
+        tok_ids = input_ids[i, clo:chi].to(device)
+        lp = logprobs[i, clo - 1:chi - 1, :].gather(-1, tok_ids[:, None]).squeeze(-1)
+        per_query[qj].append(lp.mean())
+    return [torch.stack(x) for x in per_query]
+
+
 def optimize_latent_multi(model, context_ids: list[int], lo: int, hi: int, layer: int,
                           targets: list[dict], init_states: torch.Tensor, pad_id: int,
                           device, epochs: int = 60, lr: float = 5e-2) -> dict:
     """Optimise ONE latent to satisfy several queries at once. Each target is a dict
     {cand_ids, suffix_ids, teacher_belief}; the loss sums KL(teacher || student) across
     targets, so the single latent must answer every query. Returns {z, margins, scores,
-    loss_history} with per-target final margins (gold index 0)."""
-    import torch as _t
-    z = _t.nn.Parameter(init_states.detach().to(device).float().clone())
-    prepped = [(list(context_ids) + list(t["suffix_ids"]), t["cand_ids"],
-                t["teacher_belief"].detach().to(device).float()) for t in targets]
-    opt = _t.optim.Adam([z], lr=lr)
+    loss_history} with per-target final margins (gold index 0). One batched forward per
+    epoch (multi_target_scores), so cost is ~independent of the number of queries."""
+    z = torch.nn.Parameter(init_states.detach().to(device).float().clone())
+    prepped = [(list(context_ids) + list(t["suffix_ids"]), t["cand_ids"]) for t in targets]
+    beliefs = [t["teacher_belief"].detach().to(device).float() for t in targets]
+    opt = torch.optim.Adam([z], lr=lr)
     history: list[float] = []
     for _ in range(epochs):
         opt.zero_grad()
+        scores = multi_target_scores(model, prepped, pad_id, device, layer, lo, hi, z)
         loss = z.new_zeros(())
-        for ctx, cand_ids, tb in prepped:
-            scores = candidate_scores_grad(model, ctx, cand_ids, pad_id, device,
-                                           layer, lo, hi, z)
-            logbelief = _t.log_softmax(scores, dim=-1)
-            loss = loss + _t.sum(tb * (tb.clamp_min(1e-9).log() - logbelief))
+        for s, tb in zip(scores, beliefs):
+            logbelief = torch.log_softmax(s, dim=-1)
+            loss = loss + torch.sum(tb * (tb.clamp_min(1e-9).log() - logbelief))
         loss.backward()
         opt.step()
         history.append(float(loss.detach()))
-    margins, all_scores = [], []
-    with _t.no_grad():
-        for ctx, cand_ids, _tb in prepped:
-            s = [float(x) for x in candidate_scores_grad(
-                model, ctx, cand_ids, pad_id, device, layer, lo, hi, z)]
-            all_scores.append(s)
-            margins.append(s[0] - max(s[1:]))
+    with torch.no_grad():
+        final = multi_target_scores(model, prepped, pad_id, device, layer, lo, hi, z)
+    all_scores = [[float(x) for x in s] for s in final]
+    margins = [s[0] - max(s[1:]) for s in all_scores]
     return {"z": z.detach(), "margins": margins, "scores": all_scores,
             "loss_history": history}

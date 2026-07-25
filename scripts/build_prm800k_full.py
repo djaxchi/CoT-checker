@@ -130,6 +130,12 @@ def main() -> None:
              "'prm800k_probe_train_full' containing all balanced "
              "(pos, neg) pairs after filtering.",
     )
+    p.add_argument(
+        "--full_safety_margin", type=int, default=1000,
+        help="In --full mode, reserve this many fewer pairs per class than the "
+             "theoretical max so the strict problem-disjoint val (and test) "
+             "assignment has slack. Negligible loss at ~260k/class.",
+    )
     p.add_argument("--val_pos", type=int, default=2500,
                    help="Positive count for validation split.")
     p.add_argument("--val_neg", type=int, default=2500,
@@ -224,6 +230,11 @@ def main() -> None:
     full_neg = len(neg_examples) - args.val_neg
     if args.full:
         balanced_full = min(full_pos, full_neg)
+        # Strict problem-disjoint val assignment overshoots its exact quota by up
+        # to one problem's worth of candidates, so reserving the full theoretical
+        # balance leaves no slack and the reservation fails by a few examples.
+        # Back off a small safety margin; the loss is negligible at ~260k/class.
+        balanced_full = max(0, balanced_full - args.full_safety_margin)
         # The full split will consume all balanced pairs available beyond val.
         largest_pos = max(largest_pos, balanced_full)
         largest_neg = max(largest_neg, balanced_full)

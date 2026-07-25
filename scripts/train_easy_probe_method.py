@@ -640,6 +640,58 @@ def select_threshold(
 
 
 # ---------------------------------------------------------------------------
+# In-domain step metrics (numpy-only; the slurm env has no sklearn)
+# ---------------------------------------------------------------------------
+
+def auroc_numpy(y: np.ndarray, scores: np.ndarray) -> float:
+    """Rank-based AUROC (Mann-Whitney U), positive class = 1 (incorrect step).
+
+    Ties in score receive averaged ranks. Returns NaN if either class is empty.
+    """
+    y = y.astype(np.int64)
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    order = np.argsort(scores, kind="mergesort")
+    ranks = np.empty(len(scores), dtype=np.float64)
+    ranks[order] = np.arange(1, len(scores) + 1, dtype=np.float64)
+    s_sorted = scores[order]
+    i, n = 0, len(scores)
+    while i < n:
+        j = i + 1
+        while j < n and s_sorted[j] == s_sorted[i]:
+            j += 1
+        if j - i > 1:
+            ranks[order[i:j]] = (i + 1 + j) / 2.0  # average of 1-indexed ranks
+        i = j
+    sum_pos = float(ranks[y == 1].sum())
+    return (sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+
+
+def step_binary_metrics(y: np.ndarray, scores: np.ndarray, t: float) -> dict:
+    """Per-step binary metrics at threshold t (score > t => predicted incorrect)."""
+    y = y.astype(np.int64)
+    pred = (scores > t).astype(np.int64)
+    f1: dict[str, float] = {}
+    for cls, name in [(1, "incorrect"), (0, "correct")]:
+        tp = int(((pred == cls) & (y == cls)).sum())
+        fp = int(((pred == cls) & (y != cls)).sum())
+        fn = int(((pred != cls) & (y == cls)).sum())
+        prec = tp / max(tp + fp, 1)
+        rec = tp / max(tp + fn, 1)
+        f1[name] = 2 * prec * rec / max(prec + rec, 1e-12)
+    return {
+        "threshold": float(t),
+        "accuracy": float((pred == y).mean()),
+        "macro_f1": 0.5 * (f1["incorrect"] + f1["correct"]),
+        "f1_incorrect": f1["incorrect"],
+        "f1_correct": f1["correct"],
+        "pos_pred_rate": float(pred.mean()),
+    }
+
+
+# ---------------------------------------------------------------------------
 # ProcessBench evaluation
 # ---------------------------------------------------------------------------
 
@@ -759,6 +811,10 @@ def parse_args() -> argparse.Namespace:
                    help="Stem under --cache_dir loaded as probe training data.")
     p.add_argument("--val_stem", type=str, default="val_1k",
                    help="Stem under --cache_dir loaded as validation data.")
+    p.add_argument("--test_stem", type=str, default=None,
+                   help="Optional held-out in-domain PRM800K test stem under "
+                        "--cache_dir. When set, reports step-level AUROC + F1 "
+                        "(fixed/val-selected/oracle) on it before ProcessBench.")
     # ---- Single explicit PB target ------------------------------------
     p.add_argument("--pb_h", type=Path, default=None,
                    help="Explicit path to ProcessBench hidden states .npy.")
@@ -1059,6 +1115,58 @@ def main() -> None:
             indent=2,
         )
     )
+
+    # ---- In-domain PRM800K test eval (optional) ---------------------------
+    # The deployable readout of the frozen spine: train on PRM800K, select the
+    # threshold on val, then report in-domain generalization on a held-out,
+    # problem-disjoint test split BEFORE moving OOD to ProcessBench.
+    if args.test_stem:
+        test_h, test_y = load_npy_pair(args.cache_dir, args.test_stem)
+        assert test_h.shape[1] == hidden_dim, (
+            f"test[{args.test_stem}] hidden_dim ({test_h.shape[1]}) != "
+            f"PRM800K train ({hidden_dim})"
+        )
+        z_test = encode_with_sae(sae, test_h, args.batch_size, device) if sae is not None else test_h
+        if method == "random":
+            test_scores = np.random.default_rng(args.seed + 2).uniform(
+                0.0, 1.0, size=test_h.shape[0]
+            ).astype(np.float32)
+        else:
+            test_scores = probe_scores(probe, z_test, args.batch_size, device)
+        np.save(args.out_dir / "test_scores.npy", test_scores)
+
+        id_auroc = auroc_numpy(test_y, test_scores)
+        id_oracle_t, id_oracle_f1 = threshold_grid[0], -1.0
+        for t in threshold_grid:
+            m = step_binary_metrics(test_y, test_scores, t)
+            if m["macro_f1"] > id_oracle_f1:
+                id_oracle_f1, id_oracle_t = m["macro_f1"], t
+        in_domain_metrics = {
+            "method": method,
+            "test_stem": args.test_stem,
+            "n_steps": int(test_h.shape[0]),
+            "n_incorrect": int((test_y == 1).sum()),
+            "n_correct": int((test_y == 0).sum()),
+            "auroc": id_auroc,
+            "fixed_t0.5": step_binary_metrics(test_y, test_scores, 0.5),
+            "val_selected": {
+                "threshold_selection_source": "val_balanced_accuracy",
+                **step_binary_metrics(test_y, test_scores, val_selected_threshold),
+            },
+            "oracle": {
+                "threshold_selection_source": "oracle_grid_max_macro_f1_on_prm800k_test (NOT DEPLOYABLE)",
+                **step_binary_metrics(test_y, test_scores, id_oracle_t),
+            },
+        }
+        (args.out_dir / "in_domain_metrics.json").write_text(
+            json.dumps(in_domain_metrics, indent=2)
+        )
+        print(
+            f"[{method}|in_domain:{args.test_stem}] AUROC={id_auroc:.4f}  "
+            f"macroF1 t0.5={in_domain_metrics['fixed_t0.5']['macro_f1']:.4f}  "
+            f"val(t={val_selected_threshold})={in_domain_metrics['val_selected']['macro_f1']:.4f}  "
+            f"oracle(t={id_oracle_t})={in_domain_metrics['oracle']['macro_f1']:.4f}"
+        )
 
     # ---- ProcessBench eval (loop over targets, emit per-name files) -------
     all_eval_summaries: list[dict] = []

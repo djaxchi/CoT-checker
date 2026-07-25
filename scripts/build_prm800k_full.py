@@ -46,6 +46,67 @@ def fmt_count(n: int) -> str:
     return str(n)
 
 
+def carve_disjoint_test(
+    pos_train: list[dict],
+    neg_train: list[dict],
+    n_pos_test: int,
+    n_neg_test: int,
+    rng: random.Random,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Carve a problem-disjoint balanced test split out of the train pools.
+
+    Returns (pos_train_remaining, neg_train_remaining, pos_test, neg_test). The
+    test problem_ids are held out of the returned train pools, so the test split
+    is disjoint from train and (transitively, since the inputs already are) from
+    val. Never mutates the input lists. Mirrors the greedy per-problem_id
+    assignment used by sample_disjoint_train_val.
+    """
+    if n_pos_test <= 0 and n_neg_test <= 0:
+        return list(pos_train), list(neg_train), [], []
+
+    pos_by_pid: dict[str, list[dict]] = defaultdict(list)
+    neg_by_pid: dict[str, list[dict]] = defaultdict(list)
+    for ex in pos_train:
+        pos_by_pid[ex["problem_id"]].append(ex)
+    for ex in neg_train:
+        neg_by_pid[ex["problem_id"]].append(ex)
+
+    all_pids = list(set(pos_by_pid) | set(neg_by_pid))
+    rng.shuffle(all_pids)
+
+    test_pids: set[str] = set()
+    tp = tn = 0
+    for pid in all_pids:
+        if tp >= n_pos_test and tn >= n_neg_test:
+            break
+        test_pids.add(pid)
+        tp += len(pos_by_pid.get(pid, []))
+        tn += len(neg_by_pid.get(pid, []))
+
+    pos_test_pool = [e for pid in test_pids for e in pos_by_pid.get(pid, [])]
+    neg_test_pool = [e for pid in test_pids for e in neg_by_pid.get(pid, [])]
+    if len(pos_test_pool) < n_pos_test or len(neg_test_pool) < n_neg_test:
+        sys.exit(
+            f"Cannot carve disjoint test split (pos pool={len(pos_test_pool)} "
+            f"need {n_pos_test}, neg pool={len(neg_test_pool)} need {n_neg_test})."
+        )
+    rng.shuffle(pos_test_pool)
+    rng.shuffle(neg_test_pool)
+
+    pos_train_rem = [
+        e for pid, exs in pos_by_pid.items() if pid not in test_pids for e in exs
+    ]
+    neg_train_rem = [
+        e for pid, exs in neg_by_pid.items() if pid not in test_pids for e in exs
+    ]
+    return (
+        pos_train_rem,
+        neg_train_rem,
+        pos_test_pool[:n_pos_test],
+        neg_test_pool[:n_neg_test],
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Build full-scale PRM800K probe-train/val JSONL splits.")
     grp = p.add_mutually_exclusive_group()
@@ -76,6 +137,14 @@ def main() -> None:
     p.add_argument("--val_name", type=str, default=None,
                    help="Override val filename stem (e.g., 'val_10k'). "
                         "Default is derived from --val_pos+--val_neg.")
+    p.add_argument("--test_pos", type=int, default=0,
+                   help="Positive count for a small held-out in-domain test split "
+                        "(0 disables). Carved problem-disjoint from train and val.")
+    p.add_argument("--test_neg", type=int, default=0,
+                   help="Negative count for the in-domain test split.")
+    p.add_argument("--test_name", type=str, default=None,
+                   help="Override test filename stem (e.g., 'test_2k'). "
+                        "Default is derived from --test_pos+--test_neg.")
     p.add_argument("--allow_problem_overlap", action="store_true")
     p.add_argument("--force", action="store_true",
                    help="Overwrite existing output JSONLs. Default refuses.")
@@ -171,6 +240,22 @@ def main() -> None:
         rng, args.allow_problem_overlap,
     )
 
+    # Carve a small balanced in-domain test split out of the train pool, kept
+    # problem-disjoint from both train and val. Done before emitting train so the
+    # size-based and --full train splits exclude the test problems.
+    pos_test: list[dict] = []
+    neg_test: list[dict] = []
+    if args.test_pos > 0 or args.test_neg > 0:
+        pos_train_all, neg_train_all, pos_test, neg_test = carve_disjoint_test(
+            pos_train_all, neg_train_all, args.test_pos, args.test_neg, rng
+        )
+        print(
+            f"[build_full] Carved in-domain test (pos={len(pos_test)}, "
+            f"neg={len(neg_test)}); train pool now pos={len(pos_train_all)}, "
+            f"neg={len(neg_train_all)}",
+            flush=True,
+        )
+
     combined_val = pos_val + neg_val
     rng.shuffle(combined_val)
 
@@ -196,6 +281,14 @@ def main() -> None:
         print(f"[build_full] wrote {name}: {len(rows)} rows", flush=True)
 
     emit(val_jsonl_name, combined_val)
+
+    test_stem = None
+    if pos_test or neg_test:
+        combined_test = pos_test + neg_test
+        rng.shuffle(combined_test)
+        test_total = args.test_pos + args.test_neg
+        test_stem = args.test_name or f"test_{fmt_count(test_total)}"
+        emit(f"prm800k_{test_stem}.jsonl", combined_test)
 
     train_sizes_to_emit = list(args.train_sizes)
     for total in train_sizes_to_emit:
@@ -230,6 +323,22 @@ def main() -> None:
         sys.exit(f"BUG: train/val UID overlap = {overlap['train_val_uid_overlap']}")
     if not args.allow_problem_overlap and overlap["train_val_problem_id_overlap"] != 0:
         sys.exit(f"BUG: train/val problem_id overlap = {overlap['train_val_problem_id_overlap']}")
+
+    if pos_test or neg_test:
+        combined_test = pos_test + neg_test
+        test_uids = {r["uid"] for r in combined_test}
+        test_pids = {r["problem_id"] for r in combined_test}
+        overlap["test_train_uid_overlap"] = len(test_uids & train_uids)
+        overlap["test_val_uid_overlap"] = len(test_uids & val_uids)
+        overlap["test_train_problem_id_overlap"] = len(test_pids & train_pids)
+        overlap["test_val_problem_id_overlap"] = len(test_pids & val_pids)
+        if overlap["test_train_uid_overlap"] or overlap["test_val_uid_overlap"]:
+            sys.exit(f"BUG: test UID overlaps train/val: {overlap}")
+        if not args.allow_problem_overlap and (
+            overlap["test_train_problem_id_overlap"]
+            or overlap["test_val_problem_id_overlap"]
+        ):
+            sys.exit(f"BUG: test problem_id overlaps train/val: {overlap}")
 
     manifest = {
         "run_name": args.run_name,

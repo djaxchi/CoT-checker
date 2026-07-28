@@ -24,9 +24,34 @@ subset, stratified), not on the balanced PRM800K val. `fixed` (t=0.5) and
 | dense_last | linear | math | 0.228 | 0.228 | **0.414 ± 0.060** | 0.472 |
 | dense_last | linear | combined | 0.287 | 0.287 | **0.407 ± 0.056** | 0.466 |
 
-Reference PRMs (ProcessBench paper, gsm8k F1): Math-Shepherd-PRM-7B 47.9,
-Qwen2.5-Math-7B-PRM800K 68.2. The dense linear probe at calib-20 (45.9) is in the
-neighborhood of Math-Shepherd-PRM-7B, from a frozen hidden state, no fine-tuning.
+## External reference systems (ProcessBench, reported elsewhere)
+
+Same benchmark, same first-error F1 as our F1_PB, on the same human-labeled
+ProcessBench solutions — directly comparable metric and task. These are fully
+fine-tuned 7B+ PRMs (vs our frozen-state probe) and use their own threshold, so
+they are a reference ceiling, not an apples-to-apples training comparison. See
+`related_work.md` for sourcing.
+
+| system | GSM8K F1 | MATH F1 | avg (4 subsets) |
+|---|---|---|---|
+| **dense_last (ours, frozen linear, calib-20)** | **45.9** | **41.4** | n/a (2 subsets) |
+| Math-Shepherd-PRM-7B | 47.9 | 29.5 | 31.5 |
+| Skywork-PRM-7B | 70.8 | 53.6 | 42.1 |
+| Qwen2.5-Math-7B-PRM800K | 68.2 | 62.6 | 56.5 |
+| ThinkPRM-14B | — | — | Olympiad 87.3 / Omni 85.7 |
+
+Reading: on GSM8K our frozen linear probe (45.9) is on par with
+Math-Shepherd-PRM-7B (47.9); on MATH it (41.4) **exceeds** Math-Shepherd-PRM-7B
+(29.5), from a hidden state with no fine-tuning. It trails the PRM800K-fine-tuned
+PRM (68.2 / 62.6) and the generative SOTA. We cover GSM8K + MATH only, so the
+4-subset average is not yet comparable.
+
+## Systems reproducible within this framework
+
+Each is one representation x learner under the same protocol (see
+`related_work.md`): ReProbe = `token_store` x transformer; CLUE = `delta` x
+nearest-centroid; SSAE = `sparse` x linear; Hidden-States-as-Early-Signals =
+`dense_last` x MLP.
 
 ## Notes
 

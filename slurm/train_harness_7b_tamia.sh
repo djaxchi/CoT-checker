@@ -18,10 +18,13 @@ module load StdEnv/2023 python/3.12 gcc arrow/24.0.0
 
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/dense_full_7b_v1}"
-CACHE_DIR="$RUN_ROOT/cache/qwen2_5_7b"
-PB_ROOT="$RUN_ROOT/cache/qwen2_5_7b_processbench"
+# REP_TAG selects the representation cache; empty = the original dense_last cache.
+REP_TAG="${REP_TAG:-}"
+CACHE_DIR="${CACHE_DIR:-$RUN_ROOT/cache/qwen2_5_7b${REP_TAG:+_$REP_TAG}}"
+PB_ROOT="${PB_ROOT:-$RUN_ROOT/cache/qwen2_5_7b_processbench}"
 METHOD="${METHOD:-dense_linear}"
-OUT_ROOT="$RUN_ROOT/runs/$METHOD"
+RUN_TAG="${RUN_TAG:-${REP_TAG:-dense_last}}"
+OUT_ROOT="$RUN_ROOT/runs/${RUN_TAG}_${METHOD}"
 LOG_DIR="$RUN_ROOT/logs"
 
 TRAIN_STEM="${TRAIN_STEM:-probe_train_full}"

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-from derive_delta_from_token_store import derive_delta_split  # noqa: E402
+from derive_delta_from_token_store import derive_delta_split, derive_split  # noqa: E402
 
 from src.repstore import TOKEN_SEQ, RepSpec, write_split
 
@@ -39,3 +39,32 @@ def test_delta_values_and_global_order(tmp_path):
     np.testing.assert_allclose(delta[1], [5, 5])   # global order 0,1,2
     np.testing.assert_allclose(delta[2], [7, 7])
     assert [m["global_index"] for m in meta] == [0, 1, 2]
+
+
+def test_last_readout_reproduces_last_row(tmp_path):
+    # global 0 last=[5,5]; global 1 last=[8,8]; global 2 last=[9,9]
+    _write_item(
+        tmp_path / "shard_00",
+        [np.array([[1, 1], [5, 5]], np.float32), np.array([[0, 0], [2, 2], [9, 9]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 0},
+         {"pre_step_boundary_idx": 1, "global_index": 2}],
+    )
+    _write_item(
+        tmp_path / "shard_01",
+        [np.array([[3, 3], [8, 8]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 1}],
+    )
+    v, _, _ = derive_split(tmp_path, "last")
+    np.testing.assert_allclose(v, [[5, 5], [8, 8], [9, 9]])
+
+
+def test_mean_max_over_step_span(tmp_path):
+    # item rows [[2,2],[4,4],[10,10]], pre=0 -> step span = rows[1:] = [[4,4],[10,10]]
+    _write_item(
+        tmp_path / "shard_00",
+        [np.array([[2, 2], [4, 4], [10, 10]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 0}],
+    )
+    np.testing.assert_allclose(derive_split(tmp_path, "mean")[0][0], [7, 7])
+    np.testing.assert_allclose(derive_split(tmp_path, "max")[0][0], [10, 10])
+    np.testing.assert_allclose(derive_split(tmp_path, "last")[0][0], [10, 10])

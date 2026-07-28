@@ -29,33 +29,66 @@ sys.path.insert(0, str(ROOT))
 from src.repstore.store import RepSplit  # noqa: E402
 
 
-def derive_delta_split(split_dir: Path) -> tuple[np.ndarray, np.ndarray, list[dict]]:
-    """Return (delta (N,d) float16, y (N,) int8, meta) in global_index order."""
+def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
+    """Compute one item's vector for the given readout. h is the shard mmap.
+    [off_a, off_b) is the item's row range; start_abs/last_abs are the step-token
+    span start and the last step token (absolute row indices)."""
+    if readout == "last":
+        return np.asarray(h[last_abs], dtype=np.float32)
+    span = np.asarray(h[start_abs:last_abs + 1], dtype=np.float32)  # step tokens only
+    if readout == "mean":
+        return span.mean(0)
+    if readout == "max":
+        return span.max(0)
+    raise ValueError(readout)
+
+
+def derive_split(split_dir: Path, readout: str = "delta") -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """Return (vectors (N,d) float16, y (N,) int8, meta) in global_index order.
+
+    readout: 'delta' = last step-token state - pre-step boundary state;
+             'last'  = last step-token state (reproduces dense_last);
+             'mean'/'max' = pooled over the step-token span.
+    """
     shard_dirs = sorted(glob.glob(str(split_dir / "shard_*")))
     if not shard_dirs:
         raise FileNotFoundError(f"no shard_* under {split_dir}")
-    parts_delta, parts_y, parts_gi, parts_meta = [], [], [], []
+    parts_v, parts_y, parts_gi, parts_meta = [], [], [], []
     for sd in shard_dirs:
         rs = RepSplit(sd)
         meta = rs.meta()
         pre = np.array([m["pre_step_boundary_idx"] for m in meta], dtype=np.int64)
         gi = np.array([m["global_index"] for m in meta], dtype=np.int64)
-        last_abs = rs.offsets[1:] - 1                 # last row of each item
-        pre_abs = rs.offsets[:-1] + pre               # pre-step boundary row
         if np.any(pre < 0):
             raise ValueError(f"{sd}: negative pre_step_boundary_idx (empty prefix?)")
-        h = rs.h  # mmap (total, d)
-        delta = np.asarray(h[last_abs], dtype=np.float32) - np.asarray(h[pre_abs], dtype=np.float32)
-        parts_delta.append(delta.astype(np.float16))
+        last_abs = rs.offsets[1:] - 1
+        pre_abs = rs.offsets[:-1] + pre
+        h = rs.h
+        if readout == "delta":
+            vecs = np.asarray(h[last_abs], np.float32) - np.asarray(h[pre_abs], np.float32)
+        elif readout == "last":
+            vecs = np.asarray(h[last_abs], np.float32)
+        else:  # mean/max: per-item span reduction (ragged)
+            start_abs = rs.offsets[:-1] + (pre + 1)   # step span starts after boundary
+            vecs = np.stack([
+                _reduce_item(h, int(rs.offsets[k]), int(rs.offsets[k + 1]),
+                             int(start_abs[k]), int(last_abs[k]), readout)
+                for k in range(len(meta))
+            ])
+        parts_v.append(vecs.astype(np.float16))
         parts_y.append(np.asarray(rs.y, dtype=np.int8))
         parts_gi.append(gi)
         parts_meta.extend(meta)
-    delta = np.concatenate(parts_delta, 0)
+    v = np.concatenate(parts_v, 0)
     y = np.concatenate(parts_y, 0)
     gi = np.concatenate(parts_gi, 0)
     order = np.argsort(gi, kind="mergesort")
-    meta_sorted = [parts_meta[i] for i in order]
-    return delta[order], y[order], meta_sorted
+    return v[order], y[order], [parts_meta[i] for i in order]
+
+
+# Back-compat alias
+def derive_delta_split(split_dir: Path):
+    return derive_split(split_dir, "delta")
 
 
 def main() -> None:
@@ -66,23 +99,24 @@ def main() -> None:
                    help="Split stems present under --store_root (e.g. probe_train_full val_5k test_2k)")
     p.add_argument("--out_dir", required=True, type=Path)
     p.add_argument("--mode", choices=["prm", "pb"], default="prm")
+    p.add_argument("--readout", choices=["delta", "last", "mean", "max"], default="delta")
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for stem in args.splits:
-        delta, y, meta = derive_delta_split(args.store_root / stem)
+        v, y, meta = derive_split(args.store_root / stem, args.readout)
         if args.mode == "prm":
-            np.save(args.out_dir / f"{stem}_h.npy", delta)
+            np.save(args.out_dir / f"{stem}_h.npy", v)
             np.save(args.out_dir / f"{stem}_y.npy", y)
-            print(f"[delta:{stem}] {delta.shape} -> {args.out_dir}/{stem}_h.npy", flush=True)
+            print(f"[{args.readout}:{stem}] {v.shape} -> {args.out_dir}/{stem}_h.npy", flush=True)
         else:  # pb: one subset per store split; emit pb_step contract
             sub = args.out_dir / stem
             sub.mkdir(parents=True, exist_ok=True)
-            np.save(sub / "pb_step_h.npy", delta)
+            np.save(sub / "pb_step_h.npy", v)
             with (sub / "pb_step_meta.jsonl").open("w") as f:
                 for m in meta:
                     f.write(json.dumps(m) + "\n")
-            print(f"[delta-pb:{stem}] {delta.shape} -> {sub}/pb_step_h.npy", flush=True)
+            print(f"[{args.readout}-pb:{stem}] {v.shape} -> {sub}/pb_step_h.npy", flush=True)
 
 
 if __name__ == "__main__":

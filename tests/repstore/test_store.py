@@ -7,9 +7,11 @@ import pytest
 
 from src.repstore import (
     STEP_SEQ,
+    TOKEN_SEQ,
     VECTOR,
     RepSpec,
     RepSplit,
+    ShardedRepSplit,
     write_split,
     write_vector_split,
 )
@@ -83,3 +85,27 @@ def test_dim_mismatch_rejected(tmp_path):
 def test_bad_kind_rejected():
     with pytest.raises(ValueError):
         RepSpec(name="s", kind="nope", dim=4, layer=-1, backbone="t", readout="r")
+
+
+def test_sharded_view_reconstructs_global_order(tmp_path):
+    d = 3
+    spec = RepSpec(name="tok", kind=TOKEN_SEQ, dim=d, layer=-1, backbone="t", readout="r")
+    # 4 items with global_index 0..3, striped across 2 shards by parity.
+    items = {
+        0: np.full((1, d), 0.0, np.float32),
+        1: np.full((2, d), 1.0, np.float32),
+        2: np.full((1, d), 2.0, np.float32),
+        3: np.full((3, d), 3.0, np.float32),
+    }
+    for shard, gidxs in {0: [0, 2], 1: [1, 3]}.items():
+        sd = tmp_path / f"shard_{shard:02d}"
+        write_split(
+            sd, [items[g] for g in gidxs], [g % 2 for g in gidxs],
+            [{"global_index": g} for g in gidxs], spec,
+        )
+    view = ShardedRepSplit(tmp_path)
+    assert len(view) == 4
+    for g in range(4):
+        np.testing.assert_array_equal(view.item(g), items[g])
+    np.testing.assert_array_equal(view.vectors("mean")[3], [3, 3, 3])
+    assert list(view.y) == [0, 1, 0, 1]

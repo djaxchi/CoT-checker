@@ -7,6 +7,7 @@ from .store import (
     VECTOR,
     RepSpec,
     RepSplit,
+    ShardedRepSplit,
     write_split,
     write_vector_split,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "STEP_SEQ",
     "RepSpec",
     "RepSplit",
+    "ShardedRepSplit",
     "write_split",
     "write_vector_split",
 ]

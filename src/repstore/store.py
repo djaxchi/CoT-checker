@@ -185,3 +185,60 @@ class RepSplit:
 
     def meta(self) -> list[dict]:
         return [json.loads(x) for x in self._meta_path.read_text().splitlines() if x.strip()]
+
+
+class ShardedRepSplit:
+    """Read a (representation, split) written as shard_NN/ subdirs, presenting a
+    single view in global_index order without a 1 TB merge-copy.
+
+    Each shard is a standalone RepSplit; every meta row carries ``global_index``
+    (deterministic order over the full pre-shard file). Items are indexed across
+    shards in that global order, so this is row-for-row identical to a merged
+    store while keeping each shard's h.npy memory-mapped in place.
+    """
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+        shard_dirs = sorted(
+            d for d in self.root.iterdir()
+            if d.is_dir() and d.name.startswith("shard_") and (d / "h.npy").exists()
+        )
+        if not shard_dirs:
+            raise FileNotFoundError(f"no shard_NN/ dirs under {self.root}")
+        self.shards = [RepSplit(d) for d in shard_dirs]
+        self.spec = self.shards[0].spec
+        entries: list[tuple[int, int, int]] = []
+        for si, sh in enumerate(self.shards):
+            for li, m in enumerate(sh.meta()):
+                entries.append((int(m["global_index"]), si, li))
+        entries.sort()
+        self._map = [(si, li) for _, si, li in entries]
+
+    def __len__(self) -> int:
+        return len(self._map)
+
+    @property
+    def is_vector(self) -> bool:
+        return all(sh.is_vector for sh in self.shards)
+
+    def item(self, k: int) -> np.ndarray:
+        si, li = self._map[k]
+        return self.shards[si].item(li)
+
+    @property
+    def y(self) -> np.ndarray:
+        out = np.empty(len(self), dtype=np.int8)
+        for k, (si, li) in enumerate(self._map):
+            out[k] = self.shards[si].y[li]
+        return out
+
+    def vectors(self, reduce: str = "mean") -> np.ndarray:
+        n, d = len(self), self.spec.dim
+        out = np.empty((n, d), dtype=np.float32)
+        # reduce per shard then reorder, to reuse RepSplit.vectors' vectorized paths
+        per_shard = {si: None for si in range(len(self.shards))}
+        for si, sh in enumerate(self.shards):
+            per_shard[si] = sh.vectors(reduce)
+        for k, (si, li) in enumerate(self._map):
+            out[k] = per_shard[si][li]
+        return out

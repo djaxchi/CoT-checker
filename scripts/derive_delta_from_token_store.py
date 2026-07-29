@@ -48,47 +48,68 @@ def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
     raise ValueError(readout)
 
 
-def derive_split(split_dir: Path, readout: str = "delta") -> tuple[np.ndarray, np.ndarray, list[dict]]:
-    """Return (vectors (N,d) float16, y (N,) int8, meta) in global_index order.
+def _out_dim(readout: str, d: int) -> int:
+    return 5 * d if readout == "multistat" else d
 
-    readout: 'delta' = last step-token state - pre-step boundary state;
-             'last'  = last step-token state (reproduces dense_last);
-             'mean'/'max' = pooled over the step-token span.
+
+def _shard_vecs(rs: "RepSplit", meta: list[dict], readout: str) -> np.ndarray:
+    """Compute a shard's (n, out_dim) float16 vectors, memory-leanly."""
+    n = len(meta)
+    od = _out_dim(readout, rs.spec.dim)
+    pre = np.array([m["pre_step_boundary_idx"] for m in meta], dtype=np.int64)
+    if np.any(pre < 0):
+        raise ValueError("negative pre_step_boundary_idx (empty prefix?)")
+    last_abs = rs.offsets[1:] - 1
+    h = rs.h
+    if readout == "delta":
+        pre_abs = rs.offsets[:-1] + pre
+        return (np.asarray(h[last_abs], np.float32) - np.asarray(h[pre_abs], np.float32)).astype(np.float16)
+    if readout == "last":
+        return np.asarray(h[last_abs], np.float32).astype(np.float16)
+    # pooled: fill a preallocated float16 array item by item (no big float32 stack)
+    start_abs = rs.offsets[:-1] + (pre + 1)
+    out = np.empty((n, od), dtype=np.float16)
+    for k in range(n):
+        out[k] = _reduce_item(h, int(rs.offsets[k]), int(rs.offsets[k + 1]),
+                              int(start_abs[k]), int(last_abs[k]), readout).astype(np.float16)
+    return out
+
+
+def derive_split(split_dir: Path, readout: str = "delta", sort: bool = True):
+    """Return (vectors (N, out_dim) float16, y (N,) int8, meta).
+
+    readout: 'delta'|'last'|'mean'|'max'|'multistat'. With sort=True the rows are
+    in global_index order (needed for ProcessBench first-error scan); with
+    sort=False they are in shard order (fine for an order-invariant probe on
+    PRM800K, and avoids a full-array copy on the ~1TB-derived train split).
     """
     shard_dirs = sorted(glob.glob(str(split_dir / "shard_*")))
     if not shard_dirs:
         raise FileNotFoundError(f"no shard_* under {split_dir}")
-    parts_v, parts_y, parts_gi, parts_meta = [], [], [], []
-    for sd in shard_dirs:
+    metas = [RepSplit(sd).meta() for sd in shard_dirs]
+    ns = [len(m) for m in metas]
+    N = sum(ns)
+    d = RepSplit(shard_dirs[0]).spec.dim
+    od = _out_dim(readout, d)
+    out = np.empty((N, od), dtype=np.float16)
+    y = np.empty(N, dtype=np.int8)
+    gi = np.empty(N, dtype=np.int64)
+    meta_all: list[dict] = []
+    cur = 0
+    for sd, meta in zip(shard_dirs, metas):
         rs = RepSplit(sd)
-        meta = rs.meta()
-        pre = np.array([m["pre_step_boundary_idx"] for m in meta], dtype=np.int64)
-        gi = np.array([m["global_index"] for m in meta], dtype=np.int64)
-        if np.any(pre < 0):
-            raise ValueError(f"{sd}: negative pre_step_boundary_idx (empty prefix?)")
-        last_abs = rs.offsets[1:] - 1
-        pre_abs = rs.offsets[:-1] + pre
-        h = rs.h
-        if readout == "delta":
-            vecs = np.asarray(h[last_abs], np.float32) - np.asarray(h[pre_abs], np.float32)
-        elif readout == "last":
-            vecs = np.asarray(h[last_abs], np.float32)
-        else:  # mean/max: per-item span reduction (ragged)
-            start_abs = rs.offsets[:-1] + (pre + 1)   # step span starts after boundary
-            vecs = np.stack([
-                _reduce_item(h, int(rs.offsets[k]), int(rs.offsets[k + 1]),
-                             int(start_abs[k]), int(last_abs[k]), readout)
-                for k in range(len(meta))
-            ])
-        parts_v.append(vecs.astype(np.float16))
-        parts_y.append(np.asarray(rs.y, dtype=np.int8))
-        parts_gi.append(gi)
-        parts_meta.extend(meta)
-    v = np.concatenate(parts_v, 0)
-    y = np.concatenate(parts_y, 0)
-    gi = np.concatenate(parts_gi, 0)
+        n = len(meta)
+        out[cur:cur + n] = _shard_vecs(rs, meta, readout)
+        y[cur:cur + n] = np.asarray(rs.y, dtype=np.int8)
+        gi[cur:cur + n] = [m["global_index"] for m in meta]
+        if sort:
+            meta_all.extend(meta)
+        cur += n
+        del rs
+    if not sort:
+        return out, y, []
     order = np.argsort(gi, kind="mergesort")
-    return v[order], y[order], [parts_meta[i] for i in order]
+    return out[order], y[order], [meta_all[i] for i in order]
 
 
 # Back-compat alias
@@ -110,7 +131,10 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for stem in args.splits:
-        v, y, meta = derive_split(args.store_root / stem, args.readout)
+        # PRM: order-invariant probe -> skip the sort/copy. PB: keep global order
+        # for the first-error scan (meta alignment).
+        v, y, meta = derive_split(args.store_root / stem, args.readout,
+                                  sort=(args.mode == "pb"))
         if args.mode == "prm":
             np.save(args.out_dir / f"{stem}_h.npy", v)
             np.save(args.out_dir / f"{stem}_y.npy", y)

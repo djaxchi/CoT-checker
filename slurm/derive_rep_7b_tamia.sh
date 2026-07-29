@@ -3,7 +3,7 @@
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=160G
 #SBATCH --time=05:00:00
 #SBATCH --output=%x-%j.out
 

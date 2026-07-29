@@ -242,3 +242,13 @@ class ShardedRepSplit:
         for k, (si, li) in enumerate(self._map):
             out[k] = per_shard[si][li]
         return out
+
+    def meta(self) -> list[dict]:
+        """Per-item meta in global_index order."""
+        cache = {si: sh.meta() for si, sh in enumerate(self.shards)}
+        return [cache[si][li] for (si, li) in self._map]
+
+    def item_handle(self, k: int) -> tuple["RepSplit", int]:
+        """(shard RepSplit, local index) for item k, for streaming token spans."""
+        si, li = self._map[k]
+        return self.shards[si], li

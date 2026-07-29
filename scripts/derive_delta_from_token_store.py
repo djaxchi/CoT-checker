@@ -40,6 +40,11 @@ def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
         return span.mean(0)
     if readout == "max":
         return span.max(0)
+    if readout == "multistat":
+        # A fixed, permutation-invariant summary of the whole token set for a
+        # linear probe: concat[mean, max, min, std, last] -> 5*d.
+        return np.concatenate([span.mean(0), span.max(0), span.min(0),
+                               span.std(0), span[-1]])
     raise ValueError(readout)
 
 
@@ -99,7 +104,8 @@ def main() -> None:
                    help="Split stems present under --store_root (e.g. probe_train_full val_5k test_2k)")
     p.add_argument("--out_dir", required=True, type=Path)
     p.add_argument("--mode", choices=["prm", "pb"], default="prm")
-    p.add_argument("--readout", choices=["delta", "last", "mean", "max"], default="delta")
+    p.add_argument("--readout", choices=["delta", "last", "mean", "max", "multistat"],
+                   default="delta")
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 

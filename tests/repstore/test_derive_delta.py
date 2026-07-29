@@ -68,3 +68,15 @@ def test_mean_max_over_step_span(tmp_path):
     np.testing.assert_allclose(derive_split(tmp_path, "mean")[0][0], [7, 7])
     np.testing.assert_allclose(derive_split(tmp_path, "max")[0][0], [10, 10])
     np.testing.assert_allclose(derive_split(tmp_path, "last")[0][0], [10, 10])
+
+
+def test_multistat_concat(tmp_path):
+    # span = rows[1:] = [[4,4],[10,10]] -> mean[7,7] max[10,10] min[4,4] std[3,3] last[10,10]
+    _write_item(
+        tmp_path / "shard_00",
+        [np.array([[2, 2], [4, 4], [10, 10]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 0}],
+    )
+    v = derive_split(tmp_path, "multistat")[0][0]
+    assert v.shape == (10,)  # 5 stats x d(=2)
+    np.testing.assert_allclose(v, [7, 7, 10, 10, 4, 4, 3, 3, 10, 10])

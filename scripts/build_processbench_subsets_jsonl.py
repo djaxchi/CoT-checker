@@ -28,7 +28,8 @@ def main() -> None:
     from datasets import load_dataset
 
     for subset in args.subsets:
-        ds = load_dataset(args.dataset, split=subset)
+        # ProcessBench exposes each subset as a config with a single "test" split.
+        ds = load_dataset(args.dataset, subset, split="test")
         out = args.out_dir / f"processbench_{subset}.jsonl"
         n = 0
         with out.open("w", encoding="utf-8") as f:

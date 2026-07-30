@@ -96,37 +96,38 @@ def build_trace_examples(store, W):
 
 
 def cv_eval(traces, rep_key, k_folds=5, seed=0):
-    """Out-of-fold AUROC + mean F1_PB for one representation key (0=cur,1=pc,2=pcf)."""
+    """Out-of-fold AUROC + mean F1_PB for one representation key (0=cur,1=pc,2=pcf).
+
+    Vectorized: flatten all steps once, score a whole split with a single matmul
+    per fold (no per-step Python matmuls)."""
+    # flatten steps in trace/step order; remember each trace's [start,end) + label
+    feats, labs, tr_of, spans = [], [], [], []
+    for ti, (lbl, steps) in enumerate(traces):
+        s0 = len(feats)
+        for st in steps:
+            feats.append(st[rep_key]); labs.append(st[3]); tr_of.append(ti)
+        spans.append((s0, len(feats), lbl))
+    X = np.asarray(feats, dtype=np.float32)
+    y = np.asarray(labs, dtype=np.float32)
+    tr_of = np.asarray(tr_of)
+
     rng = np.random.default_rng(seed)
-    idx = rng.permutation(len(traces))
-    folds = np.array_split(idx, k_folds)
-    oof_y, oof_s = [], []
-    f1s = []
+    folds = np.array_split(rng.permutation(len(traces)), k_folds)
+    grid = np.round(np.arange(0.05, 1.0, 0.02), 2)
+    oof = np.zeros(len(y)); f1s = []
     for f in range(k_folds):
         te = set(folds[f].tolist())
-        tr_i = [i for i in range(len(traces)) if i not in te]
-        te_i = list(folds[f])
-        Xtr = np.array([st[rep_key] for i in tr_i for st in traces[i][1]], dtype=np.float32)
-        ytr = np.array([st[3] for i in tr_i for st in traces[i][1]], dtype=np.float32)
-        mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6
-        Xtr = (Xtr - mu) / sd
-        w, b = fit_lr(Xtr, ytr)
-        # threshold on train traces (grid max F1_PB)
-        tr_traces = []
-        for i in tr_i:
-            sc = [1 / (1 + np.exp(-(((st[rep_key] - mu) / sd) @ w + b))) for st in traces[i][1]]
-            tr_traces.append((traces[i][0], sc))
-        grid = np.round(np.arange(0.05, 1.0, 0.02), 2)
+        test_mask = np.array([t in te for t in tr_of])
+        mu = X[~test_mask].mean(0); sd = X[~test_mask].std(0) + 1e-6
+        Xs = (X - mu) / sd
+        w, b = fit_lr(Xs[~test_mask], y[~test_mask])
+        S = 1.0 / (1.0 + np.exp(-(Xs @ w + b)))
+        oof[test_mask] = S[test_mask]
+        tr_traces = [(lbl, S[s0:e0]) for ti, (s0, e0, lbl) in enumerate(spans) if ti not in te]
+        te_traces = [(lbl, S[s0:e0]) for ti, (s0, e0, lbl) in enumerate(spans) if ti in te]
         t_star = max(grid, key=lambda t: f1_pb(tr_traces, float(t)))
-        # eval test traces
-        te_traces = []
-        for i in te_i:
-            sc = [float(1 / (1 + np.exp(-(((st[rep_key] - mu) / sd) @ w + b)))) for st in traces[i][1]]
-            te_traces.append((traces[i][0], sc))
-            for st, s in zip(traces[i][1], sc):
-                oof_y.append(st[3]); oof_s.append(s)
         f1s.append(f1_pb(te_traces, float(t_star)))
-    return auroc(oof_y, oof_s), float(np.mean(f1s))
+    return auroc(y, oof), float(np.mean(f1s))
 
 
 def main():

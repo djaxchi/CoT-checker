@@ -45,7 +45,7 @@ def auroc(y, s):
     return (ranks[y == 1].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0)
 
 
-def fit_lr(X, y, l2=1.0, iters=500, lr=0.5):
+def fit_lr(X, y, l2=1.0, iters=200, lr=0.7):
     n, d = X.shape
     w = np.zeros(d); b = 0.0
     for _ in range(iters):
@@ -144,12 +144,16 @@ def main():
           f"{'cur_F1':>7s} {'pc_F1':>7s} {'pcf_F1':>7s}", flush=True)
     for sub in args.subsets:
         store = ShardedRepSplit(args.store_root / sub)
+        # cur and pc are future-independent: compute once per subset.
+        base = build_trace_examples(store, W=1)
+        if args.limit:
+            base = base[:args.limit]
+        cur_auc, cur_f1 = cv_eval(base, 0)
+        pc_auc, pc_f1 = cv_eval(base, 1)
         for W in args.windows:
-            traces = build_trace_examples(store, W)
+            traces = base if W == 1 else build_trace_examples(store, W)
             if args.limit:
                 traces = traces[:args.limit]
-            cur_auc, cur_f1 = cv_eval(traces, 0)
-            pc_auc, pc_f1 = cv_eval(traces, 1)
             pcf_auc, pcf_f1 = cv_eval(traces, 2)
             tag = "all" if W == -1 else str(W)
             print(f"{sub:14s} {tag:>3s}  {cur_auc:8.3f} {pc_auc:8.3f} {pcf_auc:8.3f}  "

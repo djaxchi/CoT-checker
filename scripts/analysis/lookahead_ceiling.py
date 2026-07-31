@@ -117,11 +117,13 @@ def build_trace_examples(store, W):
     return out
 
 
-def cv_eval(traces, key, k_folds=5, seed=0):
+def cv_eval(traces, key, k_folds=5, seed=0, train_cap=6000):
     """Out-of-fold AUROC + mean F1_PB for one representation key (see build_...).
 
     Vectorized: flatten all steps once, score a whole split with a single matmul
-    per fold (no per-step Python matmuls)."""
+    per fold (no per-step Python matmuls). The probe is FIT on at most train_cap
+    randomly sampled training steps (scoring still covers every step), so fit cost
+    does not scale with subset size; standardization uses the same sample."""
     # flatten steps in trace/step order; remember each trace's [start,end) + label
     feats, labs, tr_of, spans = [], [], [], []
     for ti, (lbl, steps) in enumerate(traces):
@@ -140,9 +142,12 @@ def cv_eval(traces, key, k_folds=5, seed=0):
     for f in range(k_folds):
         te = set(folds[f].tolist())
         test_mask = np.array([t in te for t in tr_of])
-        mu = X[~test_mask].mean(0); sd = X[~test_mask].std(0) + 1e-6
+        tr_idx = np.flatnonzero(~test_mask)
+        if len(tr_idx) > train_cap:
+            tr_idx = rng.choice(tr_idx, train_cap, replace=False)
+        mu = X[tr_idx].mean(0); sd = X[tr_idx].std(0) + 1e-6
         Xs = (X - mu) / sd
-        w, b = fit_lr(Xs[~test_mask], y[~test_mask])
+        w, b = fit_lr(Xs[tr_idx], y[tr_idx])
         S = 1.0 / (1.0 + np.exp(-(Xs @ w + b)))
         oof[test_mask] = S[test_mask]
         tr_traces = [(lbl, S[s0:e0]) for ti, (s0, e0, lbl) in enumerate(spans) if ti not in te]

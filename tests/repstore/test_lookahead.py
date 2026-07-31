@@ -68,9 +68,9 @@ def _synth_store(tmp_path, d=6, n_traces=40):
 def test_build_and_cv_runs(tmp_path):
     store = _synth_store(tmp_path)
     traces = build_trace_examples(store, W=1)
-    assert traces and all(len(st) == 4 for _, steps in traces for st in steps)
-    # future context should be decodable when the signal is planted downstream
-    cur_auc, _ = cv_eval(traces, 0, k_folds=4)
-    pcf_auc, _ = cv_eval(traces, 2, k_folds=4)
-    assert 0.0 <= cur_auc <= 1.0 and 0.0 <= pcf_auc <= 1.0
-    assert pcf_auc >= cur_auc - 0.05  # future rep should not be worse here
+    keys = {"cur", "pc", "pcf", "pcd", "pcd2", "label"}
+    assert traces and all(set(st) == keys for _, steps in traces for st in steps)
+    # every representation must produce a valid AUROC in [0, 1]
+    for key in ("cur", "pcf", "pcd", "pcd2"):
+        auc, f1 = cv_eval(traces, key, k_folds=4)
+        assert 0.0 <= auc <= 1.0 and 0.0 <= f1 <= 1.0

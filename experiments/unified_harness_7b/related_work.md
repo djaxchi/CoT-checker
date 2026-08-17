@@ -45,7 +45,7 @@ final accuracy on AIME/HMMT/GPQA).
   paper reports **no step-classification metrics** (no F1/AUROC), only downstream
   pruning/latency. It is a trace-success predictor at checkpoints, not a step
   classifier.
-- In our framework it is `dense_last` x `mlp` learner. Trivial to include as an
+- In our framework it is `last_token` x `mlp` learner. Trivial to include as an
   MLP-learner row on our proper step labels.
 
 ### Hidden Error Awareness: Diagnostic, not Causal (Yuan et al., 2026) — arXiv:2605.09502, ICML 2026 MI workshop  **[CONCEPTUAL]**
@@ -108,7 +108,7 @@ Non-parametric: represents a whole trace by the **activation delta**
 `h(end) - h(start)` across all layers, then nearest-centroid (correct vs
 incorrect). No trainable parameters; strong reranking on AIME/GPQA.
 - Trace-level, not step-level, so not directly comparable. Very close to our
-  **delta / transition** representation: in our framework it is the `delta` rep x
+  **step_delta / transition** representation: in our framework it is the `step_delta` rep x
   a nearest-centroid learner, localized to steps. Reproduce to test whether the
   centroid geometry survives at step granularity.
 
@@ -175,14 +175,14 @@ state probe) and in threshold selection. See `leaderboard.md`.
 
 | paper | our realization | status |
 |---|---|---|
-| ReProbe | `token_store` x transformer learner (all last-layer tokens) | token store built; transformer learner next |
-| CLUE | `delta` rep x nearest-centroid learner (step-localized) | derive `delta` from store |
+| ReProbe | `step_tokens` x transformer learner (all last-layer step tokens) | DONE (top single row on the leaderboard) |
+| CLUE | `step_delta` rep x nearest-centroid learner (step-localized) | `step_delta` derived; centroid learner next |
 | SSAE | `sparse` rep x linear/MLP | in registry (reproduced) |
-| Hidden States as Early Signals | `dense_last` x MLP learner | trivial (MLP learner) |
+| Hidden States as Early Signals | `last_token` x MLP learner | trivial (MLP learner) |
 | OTV | LoRA verification token | out of frozen-store scope |
 
-**Caveats.** We currently encode ProcessBench GSM8K + MATH only, so we can compare
-per-subset but not the 4-subset average until OlympiadBench + OmniMath are added.
+**Caveats.** All four ProcessBench subsets are now encoded, so the 4-subset average
+in `leaderboard.md` is directly comparable to the reference column above.
 The reference PRMs are fully fine-tuned models; our rows are frozen-state probes.
 
 Sources: [ProcessBench (alphaXiv)](https://www.alphaxiv.org/overview/2412.06559v4),

@@ -22,7 +22,9 @@ numpy only (runs in the offline cluster venv).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -165,20 +167,31 @@ def main():
     p.add_argument("--windows", nargs="+", type=int, default=[1, 2, -1],
                    help="future horizons W (steps); -1 = to end")
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--out_json", type=Path, default=None,
+                   help="append each finished row here (rewritten after every row, so a "
+                        "walltime kill still leaves the rows that completed)")
     args = p.parse_args()
 
     hdr = (f"{'subset':14s} {'W':>3s}  {'cur':>6s} {'pc':>6s} {'pcf':>6s} {'pcd':>6s} "
            f"{'pcd2':>6s}   {'curF1':>6s} {'pcdF1':>6s} {'pcd2F1':>6s}")
     print("[AUROC for cur/pc/pcf/pcd/pcd2, then F1_PB for cur/pcd/pcd2]", flush=True)
     print(hdr, flush=True)
+    rows = []
+    t0 = time.time()
+
+    def elapsed():
+        return f"[{time.time() - t0:7.1f}s]"
+
     for sub in args.subsets:
         store = ShardedRepSplit(args.store_root / sub)
         # cur and pc are future-independent: compute once per subset.
         base = build_trace_examples(store, W=1)
         if args.limit:
             base = base[:args.limit]
+        print(f"{elapsed()} {sub}: built {len(base)} traces", flush=True)
         cur_auc, cur_f1 = cv_eval(base, "cur")
         pc_auc, _ = cv_eval(base, "pc")
+        print(f"{elapsed()} {sub}: cur/pc done", flush=True)
         for W in args.windows:
             traces = base if W == 1 else build_trace_examples(store, W)
             if args.limit:
@@ -188,8 +201,16 @@ def main():
             pcd2_auc, pcd2_f1 = cv_eval(traces, "pcd2")
             tag = "all" if W == -1 else str(W)
             print(f"{sub:14s} {tag:>3s}  {cur_auc:6.3f} {pc_auc:6.3f} {pcf_auc:6.3f} "
-                  f"{pcd_auc:6.3f} {pcd2_auc:6.3f}   {cur_f1:6.3f} {pcd_f1:6.3f} {pcd2_f1:6.3f}",
+                  f"{pcd_auc:6.3f} {pcd2_auc:6.3f}   {cur_f1:6.3f} {pcd_f1:6.3f} {pcd2_f1:6.3f}"
+                  f"   {elapsed()}",
                   flush=True)
+            rows.append({"subset": sub, "W": W, "n_traces": len(traces),
+                         "auroc": {"cur": cur_auc, "pc": pc_auc, "pcf": pcf_auc,
+                                   "pcd": pcd_auc, "pcd2": pcd2_auc},
+                         "f1_pb": {"cur": cur_f1, "pcd": pcd_f1, "pcd2": pcd2_f1}})
+            if args.out_json:
+                args.out_json.parent.mkdir(parents=True, exist_ok=True)
+                args.out_json.write_text(json.dumps(rows, indent=2))
 
 
 if __name__ == "__main__":

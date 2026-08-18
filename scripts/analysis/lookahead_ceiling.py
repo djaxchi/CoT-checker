@@ -9,6 +9,10 @@ states, differing only in how much context is included:
     past+current      = concat[ state at pre-step boundary, mean(step k tokens) ]
     past+cur+future_W = concat[ past, current, mean(steps k+1..k+W tokens) ]
 
+Note that pcf/pcd/pcd2 all carry the PAST as well as the future, so the honest
+"does the future help" comparison is against past+current, not against current
+alone: a gain over `cur` can be entirely past-context gain.
+
 Then a probe is trained with group cross-validation BY TRACE (no trace spans a
 fold boundary) and evaluated on held-out steps. This is a CEILING test, not the
 deployable protocol: it trains within ProcessBench purely to answer whether the
@@ -173,8 +177,8 @@ def main():
     args = p.parse_args()
 
     hdr = (f"{'subset':14s} {'W':>3s}  {'cur':>6s} {'pc':>6s} {'pcf':>6s} {'pcd':>6s} "
-           f"{'pcd2':>6s}   {'curF1':>6s} {'pcdF1':>6s} {'pcd2F1':>6s}")
-    print("[AUROC for cur/pc/pcf/pcd/pcd2, then F1_PB for cur/pcd/pcd2]", flush=True)
+           f"{'pcd2':>6s}   {'curF1':>6s} {'pcF1':>6s} {'pcdF1':>6s} {'pcd2F1':>6s}")
+    print("[AUROC for cur/pc/pcf/pcd/pcd2, then F1_PB for cur/pc/pcd/pcd2]", flush=True)
     print(hdr, flush=True)
     rows = []
     t0 = time.time()
@@ -190,7 +194,7 @@ def main():
             base = base[:args.limit]
         print(f"{elapsed()} {sub}: built {len(base)} traces", flush=True)
         cur_auc, cur_f1 = cv_eval(base, "cur")
-        pc_auc, _ = cv_eval(base, "pc")
+        pc_auc, pc_f1 = cv_eval(base, "pc")
         print(f"{elapsed()} {sub}: cur/pc done", flush=True)
         for W in args.windows:
             traces = base if W == 1 else build_trace_examples(store, W)
@@ -201,13 +205,14 @@ def main():
             pcd2_auc, pcd2_f1 = cv_eval(traces, "pcd2")
             tag = "all" if W == -1 else str(W)
             print(f"{sub:14s} {tag:>3s}  {cur_auc:6.3f} {pc_auc:6.3f} {pcf_auc:6.3f} "
-                  f"{pcd_auc:6.3f} {pcd2_auc:6.3f}   {cur_f1:6.3f} {pcd_f1:6.3f} {pcd2_f1:6.3f}"
-                  f"   {elapsed()}",
+                  f"{pcd_auc:6.3f} {pcd2_auc:6.3f}   {cur_f1:6.3f} {pc_f1:6.3f} {pcd_f1:6.3f} "
+                  f"{pcd2_f1:6.3f}   {elapsed()}",
                   flush=True)
             rows.append({"subset": sub, "W": W, "n_traces": len(traces),
                          "auroc": {"cur": cur_auc, "pc": pc_auc, "pcf": pcf_auc,
                                    "pcd": pcd_auc, "pcd2": pcd2_auc},
-                         "f1_pb": {"cur": cur_f1, "pcd": pcd_f1, "pcd2": pcd2_f1}})
+                         "f1_pb": {"cur": cur_f1, "pc": pc_f1, "pcd": pcd_f1,
+                                   "pcd2": pcd2_f1}})
             if args.out_json:
                 args.out_json.parent.mkdir(parents=True, exist_ok=True)
                 args.out_json.write_text(json.dumps(rows, indent=2))

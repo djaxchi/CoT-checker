@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-08-17*
+*Last updated: 2026-08-18*
 
 ---
 
@@ -1521,7 +1521,7 @@ all three read the same frozen last-layer token states, so the +1.0 is diversity
 in readout only; the ensemble's in-domain AUROC is not computed, because only
 aggregate in-domain metrics were retained per row.
 
-### 19.1 Does Future-Step Context Help? (lookahead ceiling, partial)
+### 19.1 Does Future-Step Context Help? (lookahead ceiling)
 
 A step-level probe is causal by construction: it sees the question, the prior
 steps, and the candidate step, and nothing after. But first-error localization on
@@ -1533,59 +1533,95 @@ first error better.
 This was set up as a ceiling test rather than a deployable protocol: encode
 full-solution ProcessBench (`scripts/encode_processbench_full_store.py`), then
 train within ProcessBench under group cross-validation by trace, so no trace spans
-a fold boundary, and compare representations that differ *only* in how much
-context enters (`scripts/analysis/lookahead_ceiling.py`). Five variants: current
-step only, past plus current, past plus current plus mean future *state*, past
-plus current plus mean future within-step *delta*, and past plus current plus mean
-consecutive step-end delta.
+a fold boundary, and compare representations built from the *identical* states
+that differ only in how much context enters
+(`scripts/analysis/lookahead_ceiling.py`). Five variants: current step only
+(`cur`), past plus current (`pc`), and three that add the future, either as a mean
+future *state* pool (`pcf`), a mean future within-step *delta* (`pcd`), or a mean
+consecutive step-end delta (`pcd2`). Horizons W=1 and W=all.
 
-The result on the two subsets that ran is a **null, and the naive version is
-actively harmful**:
+The result across all four subsets is a **clean null**, out-of-fold per-step
+AUROC:
 
-| subset | W | current | past+cur | +future state | +future delta | +onset delta |
+| subset | W | cur | past+cur | +future state | +future delta | +onset delta |
 |---|---|---|---|---|---|---|
 | gsm8k | 1 | **0.753** | 0.719 | 0.710 | 0.726 | 0.725 |
 | gsm8k | all | **0.753** | 0.719 | 0.743 | 0.743 | 0.727 |
 | math | 1 | 0.719 | **0.732** | 0.603 | 0.727 | 0.722 |
 | math | all | 0.719 | **0.732** | 0.540 | 0.723 | 0.712 |
+| olympiadbench | 1 | 0.756 | **0.770** | 0.731 | 0.727 | 0.735 |
+| olympiadbench | all | 0.756 | **0.770** | 0.610 | 0.691 | 0.739 |
+| omnimath | 1 | 0.600 | **0.761** | 0.733 | 0.745 | 0.747 |
+| omnimath | all | 0.600 | **0.761** | 0.727 | 0.747 | 0.719 |
 
-(out-of-fold per-step AUROC). Nothing with future context beats the best
-future-free variant on either subset. Pooling future *states* is destructive on
-math, dropping to 0.540 at W=all against 0.719 for the current step alone, which
-is consistent with an absolute-state pool washing out step localization. The
-future-*delta* variants avoid the damage and land back at par, 0.726 and 0.727,
-rather than above it. F1_PB shows a small gain for the future-delta variant
-(gsm8k 0.387 vs 0.366 for current, math 0.362 vs 0.324) but that sits inside the
-0.03 to 0.08 calib noise band, and one run also logged an overflow warning in the
-probe fit.
+In **all eight subset-by-horizon cells**, the best future-carrying representation
+is *below* the best future-free one, by 0.005 to 0.036 AUROC. There is no cell
+where looking ahead wins. Pooling future *states* is actively destructive on the
+two subsets with the longest solutions (math 0.540 and olympiadbench 0.610 at
+W=all, against 0.732 and 0.770 for past plus current), consistent with an
+absolute-state pool washing out *which* step is being scored. The delta variants,
+built to strip that persistent level and keep only what changed downstream, avoid
+the damage but only return to par.
 
-This is explicitly incomplete. Four consecutive runs (TamIA 389015, 389029,
-389107, 389186) were killed by walltime after 27, 55, 102 and 51 minutes, and
-olympiadbench and omnimath never printed a row, even though all four subsets are
-encoded in the full-solution store. The vectorization and BLAS work in those
-commits was an attempt to fit the job inside its allocation, and it did not
-succeed.
+**The past, not the future, is what the current-token readout was missing.**
+Decomposing the same numbers at W=1, `cur` to `pc` is a pure past-context change
+and `pc` to the best future variant is a pure future-context change:
 
-**Status.** Stage 1 of the training-side pipeline was built and launched anyway,
-on the strength of the small F1 gain: PRM800K has no materialized next step, so
-continuations must be generated (`scripts/generate_prm800k_next_step.py`, W=1,
-Qwen2.5-7B base). The val and test splits completed, but the 513,810-step train
-split timed out at 87% (TamIA 389609, four unmerged shards at about 111.5k of
-128.4k rows each). Stages 2 and 3 (`scripts/encode_prm800k_pcd.py`,
-`scripts/derive_pb_pcd_from_full_store.py`) are written and tested but have not
-run. The honest reading is that the go/no-go has not been decided: half the
-evidence is missing, and the half that exists points negative on AUROC and
-inconclusive on F1.
+| subset | past (cur to pc) | future (pc to best) |
+|---|---|---|
+| gsm8k | -0.034 | +0.024 |
+| math | +0.012 | -0.005 |
+| olympiadbench | +0.014 | -0.031 |
+| omnimath | **+0.162** | -0.014 |
+
+Future context is negative on three of four subsets, and on gsm8k it only claws
+back part of what adding the past cost. Meanwhile past context alone is worth
++0.162 AUROC on OmniMath, where current-alone sits near chance-ish 0.600 and
+past-plus-current reaches 0.761.
+
+That decomposition also explains the one piece of evidence that had looked
+positive. F1_PB appeared to favor the future-delta variant (`pcd` over `cur`:
+gsm8k +0.021, math +0.038, olympiadbench +0.032, omnimath +0.112), which is what
+the pipeline build was launched on. But `pcd` is concat[past, current, future
+delta], so that comparison awards it the past-context gain as well, and the
+subset where the "lookahead" F1 gain is largest (OmniMath, +0.112) is exactly the
+subset where the past alone is worth +0.162 AUROC. The apparent gain tracks the
+past. The `pc` control was computed inside `cv_eval` and discarded by the caller
+rather than printed; it is now reported, and the confirming rerun is TamIA
+418674-418677.
+
+Provenance: TamIA 418070-418073, one job per subset, 17 to 59 minutes each. The
+earlier unsharded attempts (389015, 389029, 389107, 389186) were killed by
+walltime four times and never reached OlympiadBench or OmniMath, so this replaces
+a two-subset partial with the full four.
+
+**Consequence for the training arm.** Stage 1 of the pcd training pipeline had
+been launched on the strength of the confounded F1 gain: PRM800K has no
+materialized next step, so continuations must be generated
+(`scripts/generate_prm800k_next_step.py`, W=1, Qwen2.5-7B base). Val and test
+completed; the 513,810-step train split timed out at 87% (TamIA 389609, four
+unmerged shards). With the ceiling now measured as a null on all four subsets,
+that generation should be abandoned rather than resumed, and stages 2 and 3
+(`encode_prm800k_pcd.py`, `derive_pb_pcd_from_full_store.py`, both written and
+tested) should not run.
 
 ### Next Step
 
-Finish the ceiling test on all four subsets, sharded by subset with a realistic
-walltime, before spending more GPU hours on generating PRM800K continuations. If
-the full result stays null, the future-aware arm should be stopped and the
-representation axis pushed instead, where the evidence is strong: the layer
-question (`step_tokens` is currently last-layer only, while section 15 found L20
-above L28 for `last_token`), and a proper ensemble whose members differ in
-representation rather than only in readout.
+The future-aware arm is closed: the ceiling test says the information is not
+there, so no deployable version of it can help, and the generation job that would
+have trained it should be dropped at 87% rather than finished.
+
+Two things the ceiling test surfaced are worth carrying into the representation
+axis instead, where the evidence is strong. First, **past context is
+underexploited**: `pc` beats `cur` by +0.162 AUROC on OmniMath and wins on three
+of four subsets, yet every leaderboard row except `step_delta` reads the
+candidate step alone. A `step_tokens` variant that also carries the prior-step
+boundary is the obvious next row, and the store already holds the offsets for it.
+Second, the **layer axis is untouched**: `step_tokens` is last-layer only, while
+section 15 found L20 above L28 for `last_token`, so the pooling gain and the
+layer gain have never been combined. A proper ensemble whose members differ in
+representation, rather than only in readout as the current +1.0 ensemble does,
+follows from both.
 
 ---
 

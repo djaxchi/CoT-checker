@@ -4,7 +4,7 @@ One row per sprint: what we hypothesized, what we tested, what we got. Keep it t
 
 | Sprint | Dates | Hypothesis | Verdict |
 |---|---|---|---|
-| S7 | 2026-07-25 → 07-31 (open) | **Representation, not detector.** Every mechanistic result so far read the same vector: the last-layer state at a step's *final token*. Was that the right place to read? Make the representation the independent variable: one frozen Qwen2.5-7B spine, one frozen PRM800K split, one calib-20 protocol, all 4 ProcessBench subsets, rows differing only in how a step's activations are reduced (last_token / step_delta / step_stats / step_tokens) and what reads them (linear / attn-query / transformer). Then: does *future*-step context add anything for first-error localization? | ✓ on representation, ✗/incomplete on lookahead. The final-token state was leaving a lot on the table: holding the learner at linear, `last_token` → `step_stats` (5-stat pool of all step tokens) moves the 4-subset F1_PB avg **0.394 → 0.485 (+9.1)**; holding the rep at `step_tokens`, attn-query → transformer adds only **+2.2** (0.500 → 0.522). **Representation is worth ~4x the learner.** A post-hoc mean of the 3 best readouts adds +1.0 → **0.532**, clearing Skywork-PRM-7B (0.421) and closing most of the gap to fully fine-tuned Qwen2.5-Math-7B-PRM800K (0.565) from frozen states. In-domain AUROC same ordering (0.874 → 0.817). `step_delta` is weakest (0.817 vs 0.828 in-domain), so the transition geometry loses to the absolute state at step granularity, localizing CLUE's trace-level claim to a negative. Agrees with the S6/DAS picture: correctness is *distributed across a step's tokens*, hence both span-interchange causality and whole-span pooling win. **Lookahead: null so far and undecided.** Future context never beats the best future-free variant (gsm8k 0.753 cur vs ≤0.743; math 0.732 past+cur vs ≤0.727), pooling future *states* is destructive (math 0.540 at W=all), future-*deltas* only reach par; 4 runs killed by walltime so olympiadbench/omnimath never ran, and the PRM800K continuation generation timed out at 87%. |
+| S7 | 2026-07-25 → 08-17 | **Representation, not detector.** Every mechanistic result so far read the same vector: the last-layer state at a step's *final token*. Was that the right place to read? Make the representation the independent variable: one frozen Qwen2.5-7B spine, one frozen PRM800K split, one calib-20 protocol, all 4 ProcessBench subsets, rows differing only in how a step's activations are reduced (last_token / step_delta / step_stats / step_tokens) and what reads them (linear / attn-query / transformer). Then: does *future*-step context add anything for first-error localization? | ✓ on representation, ✗/incomplete on lookahead. The final-token state was leaving a lot on the table: holding the learner at linear, `last_token` → `step_stats` (5-stat pool of all step tokens) moves the 4-subset F1_PB avg **0.394 → 0.485 (+9.1)**; holding the rep at `step_tokens`, attn-query → transformer adds only **+2.2** (0.500 → 0.522). **Representation is worth ~4x the learner.** A post-hoc mean of the 3 best readouts adds +1.0 → **0.532**, clearing Skywork-PRM-7B (0.421) and closing most of the gap to fully fine-tuned Qwen2.5-Math-7B-PRM800K (0.565) from frozen states. In-domain AUROC same ordering (0.874 → 0.817). `step_delta` is weakest (0.817 vs 0.828 in-domain), so the transition geometry loses to the absolute state at step granularity, localizing CLUE's trace-level claim to a negative. Agrees with the S6/DAS picture: correctness is *distributed across a step's tokens*, hence both span-interchange causality and whole-span pooling win. **Lookahead: ✗ clean null, all 4 subsets (08-17).** In **all 8 subset×horizon cells** the best future-carrying rep is *below* the best future-free one (-0.005 to -0.036 AUROC); pooling future *states* is destructive on long solutions (math 0.540, olympiad 0.610 at W=all vs 0.732/0.770 past+cur); future-*deltas* only reach par. The F1 gain that launched the training pipeline was **confounded**: pcd = [past, cur, future], and the subset with the biggest "lookahead" F1 gain (omnimath +0.112) is exactly where the **past alone** is worth +0.162 AUROC. Arm closed; the 87%-complete continuation generation is dropped, not resumed. Carry-over: past context is underexploited by every leaderboard row. |
 | S6 | 2026-07-13 → 07-16 | **Latent transition operator.** Can a compact latent z_t = E(S_{t-1}, H_t) trained to predict a reasoning step's *downstream computational effect* (boundary next-token distribution + answer-belief shift), decoded through the frozen model's own upper blocks, represent transitions more semantically (operation type, reusable across problems) and more robustly than raw boundary activations / deltas / pooling? PRM800K matched forks. | ✗ falsified both ways. All arms learn their targets, but z organizes operations **at chance** cross-problem (0.28 vs 0.28) and *worse* than trivial pooling (decode F1 0.17-0.25 vs maxpool 0.375); on correctness z carries a real within-fork signal (pair acc 0.66, survives surface controls) but only **ties** S_t / pooling / the measured effect (0.67), never beats them. Answer-belief objective (Target B) adds nothing over the boundary objective (A). Key mechanistic Stage-0 result: a single boundary edit recovers the next-token distribution (median 0.90-1.0) but ~0 of the answer-belief shift → belief is not carried by one late boundary state. **Net: effect-prediction discards operation structure and merely preserves the correctness signal already in the boundary state.** **DAS continuation (07-17→07-21):** boundary-vector interchange is null on the answer; the whole-step-span full-state interchange IS a causal lever (0.88 of the belief margin at L12, 0.35 of the free-gen solve gap p=0.02, correct-sibling-specific); but a learned low-dim subspace recovers the belief readout (beats random on TF margin, p≈0.02) while NOT moving the solve rate (0.09, p=0.53) — readout, not lever. |
 | S5 | 2026-07-03 → 07-10 | **Knowledge boundary.** Does Qwen2.5-7B-Instruct internally represent, before it answers, whether it knows a fact, and is that signal causal? New dataset (WikiProfile), 4 behavioral retrieval classes (direct_retrieval / reasoning_unlocked / unstable / non_retrieved). | retrieved-vs-non is linearly readable pre-answer (~0.79 AUROC, 0.85 answer-side, vs 0.70 confound baseline) and carried by ~10 sparse SAE "answer-commitment" features (one at 0.76 alone, not popularity/topic). But the 4-way split does not separate and reasoning_unlocked is geometrically invisible (bal-acc ≤0.41). Causally: single-feature steering is NULL (gauge = matched random control, both necessity and sufficiency); the recall signal is absent at the prompt and builds through reasoning (within-instance 0.49→0.64); activation patching finds a small, deep-layer, fact-specific transplantable core (matched 17-19% vs mismatched 7-9%, verified real knowledge flips) but far below in-context CoT (84%). **Net: recall is mostly dynamic; the prompt-time signal is a gauge, not a lever.** |
 | S4 | 2026-06-27 → 07-02 | Step-representation geometry in PRM800K CoT: does the per-step *contribution* vector (h_i − h_{i-1}) cluster into interpretable reasoning-move types, and do correct/incorrect steps diverge along the trajectory? | descriptive / infrastructure: built 3 step reprs (state / question-residual / contribution), tag-enrichment clustering, and an interactive explorer (fork pairs, click-to-trace trajectories, dynamics + identity). No clean discrete step-type taxonomy (consistent with the S3 stage-1 null); the geometry + explorer tooling was reused in S5. |
@@ -14,7 +14,7 @@ One row per sprint: what we hypothesized, what we tested, what we got. Keep it t
 
 ---
 
-## S7: Which step representation carries the signal, representation vs detector (2026-07-25 → 07-31, open)
+## S7: Which step representation carries the signal, representation vs detector (2026-07-25 → 08-17)
 
 **Question.** Sections 15-18 of REPORT.md all read the *same* vector: the last-layer state at a
 step's final token. The mechanistic thread established that the signal there is real, distributed,
@@ -50,29 +50,41 @@ artifact keys on disk (`reprobe` / `attn_pool` / `multistat` / `dense_last` / `d
    gsm8k. The transition geometry does not beat the absolute state at step granularity: closes the
    S6 transition-operator question from the explicit-vector side and localizes CLUE's trace-level
    finding to a step-level negative.
-4. **Lookahead ceiling: null so far, and undecided.** Does *future*-step context (available at
-   ProcessBench eval time) improve first-error localization? Within-PB group-CV by trace, variants
-   differing only in context. Nothing with future context beats the best future-free variant
-   (gsm8k: current 0.753 vs ≤0.743; math: past+cur 0.732 vs ≤0.727). Pooling future *states* is
-   destructive (math 0.603 at W=1, **0.540** at W=all vs 0.719 current-only); future-*deltas* only
-   reach par (0.726/0.727). F1_PB shows a small future-delta gain (gsm8k 0.387 vs 0.366, math 0.362
-   vs 0.324) but inside the 0.03-0.08 calib noise band.
+4. **Lookahead ceiling: clean null on all 4 subsets (2026-08-17).** Does *future*-step context
+   (available at ProcessBench eval time) improve first-error localization? Within-PB group-CV by
+   trace, five reps from the *identical* states differing only in context, horizons W=1 and W=all.
+   **In all 8 subset×horizon cells the best future-carrying rep is below the best future-free one**,
+   by 0.005 to 0.036 AUROC. No cell where looking ahead wins. Pooling future *states* is actively
+   destructive on the long-solution subsets (math **0.540**, olympiadbench **0.610** at W=all, vs
+   0.732 / 0.770 for past+cur); the delta variants avoid the damage but only return to par.
+5. **The past, not the future, was the missing context, and it invalidates the earlier F1 read.**
+   Decomposing at W=1: past (cur→pc) = -0.034 / +0.012 / +0.014 / **+0.162** AUROC on gsm8k / math /
+   olympiad / omnimath, future (pc→best) = +0.024 / -0.005 / -0.031 / -0.014. The F1_PB gain that
+   the pcd training pipeline was launched on (pcd over cur: +0.021 / +0.038 / +0.032 / **+0.112**) is
+   **confounded**: pcd = concat[past, cur, future delta], so it is awarded the past-context gain too,
+   and the subset with the largest "lookahead" F1 gain is exactly the one where the past alone is
+   worth +0.162 AUROC. The `pc` F1 control was computed inside cv_eval and *discarded by the caller*;
+   now printed, confirming rerun 418674-418677.
 
 **Coherence with the mechanistic thread.** S7's win and S6/DAS's causal result are the same fact
 seen twice: correctness is **distributed across a step's tokens**. That is why interchanging the
 whole span transfers behavior while a single boundary vector does not (DAS), and why pooling the
 whole span predicts while reading one token does not (here).
 
-**Open / blocked.** The lookahead arm is half-run: 4 consecutive jobs killed by walltime (27/55/102/51
-min), so olympiadbench and omnimath never produced a row despite all 4 subsets being encoded in the
-full-solution store. The training-side pcd pipeline was launched anyway on the small F1 gain: PRM800K
-has no materialized next step, so continuations are generated with the base model (W=1); val and test
-completed but the 513,810-step train split **timed out at 87%** (4 unmerged shards, ~111.5k of 128.4k
-rows each), and stages 2-3 (`encode_prm800k_pcd.py`, `derive_pb_pcd_from_full_store.py`) are written
-and tested but unrun. Decide the go/no-go on all 4 subsets before spending more GPU hours here.
-Also unfilled: the ensemble's in-domain AUROC (only aggregate in-domain metrics were retained, not
-per-step scores), and the layer axis (`step_tokens` is last-layer only, while S3 found L20 > L28 for
-`last_token`).
+**Resolved / open.** The lookahead go/no-go is **decided (no-go)**. Sharding one job per subset fixed
+the walltime problem that killed 4 consecutive unsharded runs: 418070-418073 finished in 17-59 min
+each. Consequence: the pcd training pipeline is **dropped at 87%** (PRM800K has no materialized next
+step, so continuations were being generated with the base model; val + test completed, the
+513,810-step train split timed out with 4 unmerged shards at ~111.5k of 128.4k rows). Stages 2-3
+(`encode_prm800k_pcd.py`, `derive_pb_pcd_from_full_store.py`) are written and tested but will not run.
+
+Still open on the representation axis, and now better motivated: (a) **past context** is
+underexploited, `pc` beats `cur` on 3 of 4 subsets and by +0.162 on omnimath, yet every leaderboard
+row except `step_delta` reads the candidate step alone, so a `step_tokens` variant carrying the
+prior-step boundary is the obvious next row (the store already holds the offsets); (b) the **layer
+axis** is untouched, `step_tokens` is last-layer only while S3 found L20 > L28 for `last_token`, so
+the pooling gain and the layer gain have never been combined; (c) the ensemble's in-domain AUROC is
+unfilled (only aggregate in-domain metrics were retained, not per-step scores).
 
 **Artifacts.** `experiments/unified_harness_7b/{leaderboard,data_setup,related_work}.md`;
 `src/repstore/`; `scripts/{encode_prm800k_token_store,encode_processbench_token_store,
@@ -82,8 +94,10 @@ train_reprobe_probe,train_easy_probe_method}.py`;
 `slurm/{encode_*,derive_*,train_*,analyze_lookahead_cpu}_tamia.sh`; TamIA jobs 386396 (PRM store),
 387292 (PB store), 386558/387293/387396 (offline derives), 383143/387294/387295/387397 (linear rows),
 387398 (attn-query), 388741 (transformer), 389009 (PB full-solution store),
-389015/389029/389107/389186 (lookahead, all walltime-killed), 389606/389609/389610/389611
-(continuation generation, train split TIMEOUT).
+389015/389029/389107/389186 (lookahead unsharded, all walltime-killed),
+418070-418073 (lookahead sharded one job per subset, all COMPLETED, the result above),
+418674-418677 (pc F1 control rerun), 389606/389609/389610/389611 (continuation generation,
+train split TIMEOUT, now abandoned).
 
 ---
 

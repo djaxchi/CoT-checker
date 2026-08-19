@@ -21,15 +21,20 @@
 set -euo pipefail
 cd "${PROJECT_ROOT:-$HOME/CoT-checker}"
 RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/dense_full_7b_v1}"
+# Write the derived cache to $STORE, not $SCRATCH: the 6*d vectors are ~22G for
+# the train split and $SCRATCH is already over quota because the 984G master
+# token store lives there. This is also what data_setup.md's storage policy says.
+CACHE_ROOT="${CACHE_ROOT:-/project/aip-azouaq/$USER/cot_mech/dense_full_7b_v1/cache}"
 TAG=boundary_stats
+mkdir -p "$CACHE_ROOT"
 
 d=$(sbatch --parsable --job-name=derive_${TAG} \
-      --export=ALL,READOUT=$TAG,TAG=$TAG \
+      --export=ALL,READOUT=$TAG,TAG=$TAG,CACHE_ROOT=$CACHE_ROOT \
       slurm/derive_rep_7b_tamia.sh)
-echo "derive  -> job $d"
+echo "derive  -> job $d   (cache -> $CACHE_ROOT)"
 
 h=$(sbatch --parsable --dependency=afterok:$d --job-name=harness_${TAG} \
-      --export=ALL,REP_TAG=$TAG,RUN_TAG=$TAG,METHOD=dense_linear,PB_ROOT=$RUN_ROOT/cache/qwen2_5_7b_${TAG}_pb \
+      --export=ALL,REP_TAG=$TAG,RUN_TAG=$TAG,METHOD=dense_linear,CACHE_DIR=$CACHE_ROOT/qwen2_5_7b_${TAG},PB_ROOT=$CACHE_ROOT/qwen2_5_7b_${TAG}_pb \
       slurm/train_harness_7b_tamia.sh)
 echo "harness -> job $h  (afterok:$d)"
 echo

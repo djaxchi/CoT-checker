@@ -23,8 +23,13 @@ READOUT="${READOUT:-multistat}"
 TAG="${TAG:-$READOUT}"
 STORE_PRM="$RUN_ROOT/repstore/tokens_last_layer"
 STORE_PB="$RUN_ROOT/repstore/pb_tokens_last_layer"
-OUT_PRM="$RUN_ROOT/cache/qwen2_5_7b_${TAG}"
-OUT_PB="$RUN_ROOT/cache/qwen2_5_7b_${TAG}_pb"
+# Derived caches default to $SCRATCH next to the store, but data_setup.md's policy
+# is "master token store in $SCRATCH (regenerable), derived reps in $STORE", and
+# $SCRATCH is the tier that runs out (the 984G token store dominates its quota).
+# Set CACHE_ROOT to follow the policy: CACHE_ROOT=$STORE/cot_mech/dense_full_7b_v1/cache
+CACHE_ROOT="${CACHE_ROOT:-$RUN_ROOT/cache}"
+OUT_PRM="$CACHE_ROOT/qwen2_5_7b_${TAG}"
+OUT_PB="$CACHE_ROOT/qwen2_5_7b_${TAG}_pb"
 PRM_SPLITS="${PRM_SPLITS:-probe_train_full val_5k test_2k}"
 PB_SUBSETS="${PB_SUBSETS:-gsm8k math olympiadbench omnimath}"
 
@@ -34,7 +39,9 @@ source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
 pip install --no-index numpy
 
-echo "[derive_rep] READOUT=$READOUT TAG=$TAG"
+mkdir -p "$OUT_PRM" "$OUT_PB"
+echo "[derive_rep] READOUT=$READOUT TAG=$TAG CACHE_ROOT=$CACHE_ROOT"
+df -h "$CACHE_ROOT" | tail -1
 python scripts/derive_delta_from_token_store.py --store_root "$STORE_PRM" \
   --splits $PRM_SPLITS --out_dir "$OUT_PRM" --mode prm --readout "$READOUT"
 

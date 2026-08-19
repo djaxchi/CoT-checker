@@ -1563,9 +1563,17 @@ absolute-state pool washing out *which* step is being scored. The delta variants
 built to strip that persistent level and keep only what changed downstream, avoid
 the damage but only return to par.
 
-**The past, not the future, is what the current-token readout was missing.**
-Decomposing the same numbers at W=1, `cur` to `pc` is a pure past-context change
-and `pc` to the best future variant is a pure future-context change:
+**What the probe was missing is an explicit past anchor, not the past itself.**
+Every representation here, and every row on the leaderboard, is built from states
+produced by a causal pass over the question and all prior steps, so the past is
+already inside each vector through attention
+(`encode_processbench_full_store.py`: "a step-k token state is identical to the
+per-step encode, causal masking, same left context"). What `pc` changes is not
+what the model saw but what the *probe* is handed: the pre-step boundary state
+arrives as its own vector alongside the pooled step, so a linear readout can form
+a contrast between them instead of having to read the step's absolute level. The
+decomposition at W=1, where `cur` to `pc` adds only that anchor and `pc` to the
+best future variant adds only the future:
 
 | subset | past (cur to pc) | future (pc to best) |
 |---|---|---|
@@ -1575,9 +1583,11 @@ and `pc` to the best future variant is a pure future-context change:
 | omnimath | **+0.162** | -0.014 |
 
 Future context is negative on three of four subsets, and on gsm8k it only claws
-back part of what adding the past cost. Meanwhile past context alone is worth
-+0.162 AUROC on OmniMath, where current-alone sits near chance-ish 0.600 and
-past-plus-current reaches 0.761.
+back part of what the anchor cost. The anchor itself is worth +0.162 AUROC on
+OmniMath, where the pooled step alone reaches 0.600 and the anchored version
+0.761. Note this is a statement about linear accessibility, not about
+information: the OmniMath step states already encode their prior steps, but a
+mean-pool of them does not expose the comparison a linear probe needs.
 
 That decomposition also explains the one piece of evidence that had looked
 positive. F1_PB appeared to favor the future-delta variant (`pcd` over `cur`:
@@ -1585,10 +1595,10 @@ gsm8k +0.021, math +0.038, olympiadbench +0.032, omnimath +0.112), which is what
 the pipeline build was launched on. But `pcd` is concat[past, current, future
 delta], so that comparison awards it the past-context gain as well, and the
 subset where the "lookahead" F1 gain is largest (OmniMath, +0.112) is exactly the
-subset where the past alone is worth +0.162 AUROC. The apparent gain tracks the
-past. The `pc` control was computed inside `cv_eval` and discarded by the caller
-rather than printed; it is now reported, and the confirming rerun is TamIA
-418674-418677.
+subset where the anchor alone is worth +0.162 AUROC. The apparent gain tracks the
+anchor, not the future. The `pc` control was computed inside `cv_eval` and
+discarded by the caller rather than printed; it is now reported, and the
+confirming rerun is TamIA 418674-418677.
 
 Provenance: TamIA 418070-418073, one job per subset, 17 to 59 minutes each. The
 earlier unsharded attempts (389015, 389029, 389107, 389186) were killed by
@@ -1612,11 +1622,24 @@ there, so no deployable version of it can help, and the generation job that woul
 have trained it should be dropped at 87% rather than finished.
 
 Two things the ceiling test surfaced are worth carrying into the representation
-axis instead, where the evidence is strong. First, **past context is
-underexploited**: `pc` beats `cur` by +0.162 AUROC on OmniMath and wins on three
-of four subsets, yet every leaderboard row except `step_delta` reads the
-candidate step alone. A `step_tokens` variant that also carries the prior-step
-boundary is the obvious next row, and the store already holds the offsets for it.
+axis instead, where the evidence is strong.
+
+First, **the pre-step anchor is worth testing as a leaderboard row**. `pc` beats
+`cur` on three of four subsets and by +0.162 AUROC on OmniMath. This is not about
+giving the probe access to the past, which it already has through the causal
+encode; it is about handing it an explicit baseline so the contrast is linearly
+available. The leaderboard has never tested that form. `last_token` and
+`step_stats` read the step's own token span with no anchor
+(`derive_delta_from_token_store.py`: "step tokens only"), and `step_delta` uses
+the boundary but *forces* the subtraction `S_t - S_{t-1}`, discarding the
+absolute level. A concatenation is strictly more expressive than either, since a
+linear probe on concat[boundary, pooled step] can represent the difference as a
+special case and is free not to. That predicts concat[boundary, `step_stats`]
+beats both `last_token` (0.394) and `step_delta` (0.361), and it would explain
+why `step_delta` underperforms while `pc` wins: the anchor helps when the probe
+chooses how to weight it, and hurts when the subtraction is imposed. It derives
+offline from the existing store, no re-encoding.
+
 Second, the **layer axis is untouched**: `step_tokens` is last-layer only, while
 section 15 found L20 above L28 for `last_token`, so the pooling gain and the
 layer gain have never been combined. A proper ensemble whose members differ in

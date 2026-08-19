@@ -64,7 +64,10 @@ artifact keys on disk (`reprobe` / `attn_pool` / `multistat` / `dense_last` / `d
    +0.032 / **+0.112**) is **confounded**: pcd = concat[boundary, cur, future delta], so it is
    awarded the anchor gain too, and the subset with the largest "lookahead" F1 gain is exactly the
    one where the anchor alone is worth +0.162. The `pc` F1 control was computed inside cv_eval and
-   *discarded by the caller*; now printed, confirming rerun 418674-418677.
+   *discarded by the caller*; now printed (418674-418677) and it settles it: anchor F1 gain over cur
+   is +0.054 / +0.013 / +0.046 / +0.065 (**positive on all 4**, mean +0.045), future gain over pc is
+   -0.033 / +0.025 / -0.014 / +0.048 (**2 up, 2 down**, mean +0.007). On gsm8k the anchor alone
+   (0.420) beats anything with the future in it.
    **Precision matters here:** this is NOT "the reps lacked past context". Every rep, here and on the
    leaderboard, is built from a causal pass over question + prior steps, so the past is already in
    every vector via attention. What changes is what the *probe* is handed: an explicit baseline it

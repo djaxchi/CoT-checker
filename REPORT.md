@@ -1589,16 +1589,27 @@ OmniMath, where the pooled step alone reaches 0.600 and the anchored version
 information: the OmniMath step states already encode their prior steps, but a
 mean-pool of them does not expose the comparison a linear probe needs.
 
-That decomposition also explains the one piece of evidence that had looked
+That decomposition also disposes of the one piece of evidence that had looked
 positive. F1_PB appeared to favor the future-delta variant (`pcd` over `cur`:
-gsm8k +0.021, math +0.038, olympiadbench +0.032, omnimath +0.112), which is what
-the pipeline build was launched on. But `pcd` is concat[past, current, future
-delta], so that comparison awards it the past-context gain as well, and the
-subset where the "lookahead" F1 gain is largest (OmniMath, +0.112) is exactly the
-subset where the anchor alone is worth +0.162 AUROC. The apparent gain tracks the
-anchor, not the future. The `pc` control was computed inside `cv_eval` and
-discarded by the caller rather than printed; it is now reported, and the
-confirming rerun is TamIA 418674-418677.
+gsm8k +0.021, math +0.038, olympiadbench +0.032, omnimath +0.112), and that is
+what the pipeline build was launched on. But `pcd` is concat[boundary, current,
+future delta], so the comparison awards it the anchor as well. The `pc` control
+that separates them was computed inside `cv_eval` and discarded by the caller
+rather than printed; it is now reported (TamIA 418674-418677), and it settles the
+question on the headline metric:
+
+| subset | cur | pc (anchor) | best pcd (anchor+future) | anchor | future |
+|---|---|---|---|---|---|
+| gsm8k | 0.366 | **0.420** | 0.387 | +0.054 | -0.033 |
+| math | 0.324 | 0.337 | **0.362** | +0.013 | +0.025 |
+| olympiadbench | 0.291 | **0.337** | 0.323 | +0.046 | -0.014 |
+| omnimath | 0.248 | 0.313 | **0.361** | +0.065 | +0.048 |
+
+The anchor is positive on all four subsets (mean +0.045). The future is positive
+on two and negative on two (mean +0.007), and on gsm8k the anchor alone (0.420)
+beats anything with the future in it. So on F1_PB the future is a coin flip
+around zero once the anchor is accounted for, and on AUROC it is negative in all
+eight cells. The apparent lookahead gain was the anchor.
 
 Provenance: TamIA 418070-418073, one job per subset, 17 to 59 minutes each. The
 earlier unsharded attempts (389015, 389029, 389107, 389186) were killed by

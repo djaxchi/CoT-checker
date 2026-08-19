@@ -27,9 +27,14 @@ Two controls decide whether any of it means anything:
   compared against the same statistic under randomly permuted labels
   (--n_shuffle repeats), giving a z-score against the size-matched null.
 
-And it asks the question that decides whether the direction is the *whole* story:
-after projecting the mean-difference direction out of the data, does a probe still
-decode? If yes, the centroid direction is a summary, not the mechanism.
+One row is a SANITY CHECK, not a result. Projecting out the mean-difference
+direction makes the two class centroids identical by construction (mu_1 - mu_0 is
+parallel to w_md), so ALL first-order separation is gone and any linear probe must
+fall to chance. It is reported because it verifies the deflation is implemented
+correctly; it is NOT evidence about where the signal lives. The corollary matters
+though: for a linear reader the class mean difference IS the whole signal, so the
+gap between the raw centroid rule and LDA is entirely a question of METRIC
+(whitening), never of which direction to look along.
 
 Reported on the frozen spine (fit on train, threshold on val, report on test), with
 project metric conventions: F1 at val-selected + oracle threshold against the
@@ -285,7 +290,8 @@ def main() -> None:
     results.append(score_report("logistic_probe", logit.decision_function(Zv), y_va,
                                 logit.decision_function(Zs), y_te))
 
-    # (5) is the centroid direction the WHOLE story? project it out, refit
+    # (5) SANITY: deflating w_md zeroes mu_1 - mu_0 by construction, so this MUST
+    #     land at chance. A value away from ~0.5 means the deflation is buggy.
     def deflate(X: np.ndarray) -> np.ndarray:
         Xc = X - mu_global
         return Xc - np.outer(Xc @ w_md_u, w_md_u)
@@ -293,7 +299,7 @@ def main() -> None:
     Dt, Dv, Ds = deflate(Xt), deflate(Xv), deflate(Xs)
     dsc = StandardScaler().fit(Dt)
     logit_d = LogisticRegression(max_iter=2000, C=1.0).fit(dsc.transform(Dt), yt)
-    results.append(score_report("logistic_probe_meandiff_removed",
+    results.append(score_report("SANITY_meandiff_removed_must_be_chance",
                                 logit_d.decision_function(dsc.transform(Dv)), y_va,
                                 logit_d.decision_function(dsc.transform(Ds)), y_te))
 
@@ -304,11 +310,12 @@ def main() -> None:
     geom["cos_lda_vs_mean_diff"] = float(np.dot(unit(w_lda), w_md_u))
 
     n_fit, warn = len(ti), None
-    if n_fit < 10 * d:
-        warn = (f"train fit subsample n={n_fit} < 10*d={10 * d}: the "
-                "logistic_probe_meandiff_removed row is in the overfitting regime and its "
-                "AUROC (possibly <0.5) is NOT evidence that the mean-difference direction "
-                "carries the whole signal. Re-run on the full harness train split.")
+    sanity = next(r for r in results if r["name"].startswith("SANITY"))
+    if abs(sanity["auroc"] - 0.5) > 0.05:
+        warn = (f"SANITY row AUROC={sanity['auroc']:.4f} is not ~0.5; deflating the "
+                "mean-difference direction should destroy all first-order separation. "
+                "Check the deflation, or suspect n_fit < 10*d overfitting "
+                f"(n_fit={n_fit}, 10*d={10 * d}).")
         print(f"\n[WARN] {warn}")
 
     payload = {

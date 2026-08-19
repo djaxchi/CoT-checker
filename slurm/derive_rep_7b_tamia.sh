@@ -9,9 +9,9 @@
 
 # Derive a vector representation (READOUT) from the PRM800K and ProcessBench
 # token stores into the dense-cache contract, offline (no GPU). Pooled readouts
-# (mean/max/multistat) do a per-item span reduction over the ~1TB store, so this
-# is I/O-heavy on the train split; last/delta are vectorized gathers.
-#   READOUT: delta | last | mean | max | multistat
+# (mean/max/multistat/boundary_stats) do a per-item span reduction over the ~1TB
+# store, so this is I/O-heavy on the train split; last/delta are vectorized gathers.
+#   READOUT: delta | last | mean | max | multistat | boundary_stats
 #   TAG:     cache suffix (default = READOUT)
 
 set -euo pipefail

@@ -80,3 +80,55 @@ def test_multistat_concat(tmp_path):
     v = derive_split(tmp_path, "multistat")[0][0]
     assert v.shape == (10,)  # 5 stats x d(=2)
     np.testing.assert_allclose(v, [7, 7, 10, 10, 4, 4, 3, 3, 10, 10])
+
+
+def test_boundary_stats_prepends_boundary_and_matches_multistat(tmp_path):
+    """boundary_stats = concat[pre-step boundary row, multistat(step span)].
+
+    Item global 0: rows [1,1] (boundary), [5,5] (the only step token), so the
+    5-stat pool of a one-token span is that token repeated and the prepended
+    boundary is [1,1]. Item global 2: boundary [2,2], span rows [9,9] only.
+    """
+    d = 2
+    _write_item(
+        tmp_path / "shard_00",
+        [np.array([[1, 1], [5, 5]], np.float32), np.array([[0, 0], [2, 2], [9, 9]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 0},
+         {"pre_step_boundary_idx": 1, "global_index": 2}],
+    )
+    _write_item(
+        tmp_path / "shard_01",
+        [np.array([[3, 3], [8, 8]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 1}],
+    )
+    v, _, _ = derive_split(tmp_path, "boundary_stats")
+    ms, _, _ = derive_split(tmp_path, "multistat")
+    assert v.shape == (3, 6 * d)
+    assert ms.shape == (3, 5 * d)
+    # the trailing 5*d block is exactly multistat
+    np.testing.assert_allclose(v[:, d:], ms)
+    # the leading d block is the pre-step boundary row, in global order
+    np.testing.assert_allclose(v[:, :d], [[1, 1], [3, 3], [2, 2]])
+
+
+def test_boundary_stats_is_more_expressive_than_delta(tmp_path):
+    """A linear map over boundary_stats can reproduce delta (-boundary + last),
+    which is what makes concat strictly more expressive than the forced
+    subtraction. Guards the claim the leaderboard row is testing."""
+    d = 2
+    _write_item(
+        tmp_path / "shard_00",
+        [np.array([[1, 1], [5, 5]], np.float32), np.array([[0, 0], [2, 2], [9, 9]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 0},
+         {"pre_step_boundary_idx": 1, "global_index": 2}],
+    )
+    _write_item(
+        tmp_path / "shard_01",
+        [np.array([[3, 3], [8, 8]], np.float32)],
+        [{"pre_step_boundary_idx": 0, "global_index": 1}],
+    )
+    v, _, _ = derive_split(tmp_path, "boundary_stats")
+    delta, _, _ = derive_delta_split(tmp_path)
+    # blocks are [boundary, mean, max, min, std, last]; last block minus first
+    reconstructed = v[:, 5 * d:].astype(np.float32) - v[:, :d].astype(np.float32)
+    np.testing.assert_allclose(reconstructed, delta.astype(np.float32))

@@ -4,6 +4,10 @@
 delta_step = S_t - S_{t-1} = (last-layer state at the last step token)
                           - (last-layer state at the pre-step boundary token)
 
+Also derives the other offline readouts over the same stored states: last, mean,
+max, multistat (5-stat pool of the step span) and boundary_stats (that pool with
+the pre-step boundary state prepended as its own vector).
+
 Both rows live inside each stored token_seq item; the offsets are in the item's
 meta (n_tokens -> last row; pre_step_boundary_idx -> the pre-step boundary). This
 is pure numpy over the memory-mapped store: no model, no GPU. Vectorized per
@@ -45,11 +49,26 @@ def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
         # linear probe: concat[mean, max, min, std, last] -> 5*d.
         return np.concatenate([span.mean(0), span.max(0), span.min(0),
                                span.std(0), span[-1]])
+    if readout == "boundary_stats":
+        # multistat with the pre-step boundary state PREPENDED as its own vector
+        # -> 6*d. The point is not to add information (every state here is
+        # already causally contextualized by the question and prior steps) but to
+        # hand the linear probe an explicit baseline, so it can weigh the step
+        # against where the step started instead of reading only the step's
+        # absolute level. Strictly more expressive than `delta`, which forces the
+        # subtraction S_t - S_{t-1} and discards that level.
+        boundary = np.asarray(h[start_abs - 1], dtype=np.float32)
+        return np.concatenate([boundary, span.mean(0), span.max(0), span.min(0),
+                               span.std(0), span[-1]])
     raise ValueError(readout)
 
 
 def _out_dim(readout: str, d: int) -> int:
-    return 5 * d if readout == "multistat" else d
+    if readout == "multistat":
+        return 5 * d
+    if readout == "boundary_stats":
+        return 6 * d
+    return d
 
 
 def _shard_vecs(rs: "RepSplit", meta: list[dict], readout: str) -> np.ndarray:
@@ -78,7 +97,8 @@ def _shard_vecs(rs: "RepSplit", meta: list[dict], readout: str) -> np.ndarray:
 def derive_split(split_dir: Path, readout: str = "delta", sort: bool = True):
     """Return (vectors (N, out_dim) float16, y (N,) int8, meta).
 
-    readout: 'delta'|'last'|'mean'|'max'|'multistat'. With sort=True the rows are
+    readout: 'delta'|'last'|'mean'|'max'|'multistat'|'boundary_stats'. With
+    sort=True the rows are
     in global_index order (needed for ProcessBench first-error scan); with
     sort=False they are in shard order (fine for an order-invariant probe on
     PRM800K, and avoids a full-array copy on the ~1TB-derived train split).
@@ -125,7 +145,8 @@ def main() -> None:
                    help="Split stems present under --store_root (e.g. probe_train_full val_5k test_2k)")
     p.add_argument("--out_dir", required=True, type=Path)
     p.add_argument("--mode", choices=["prm", "pb"], default="prm")
-    p.add_argument("--readout", choices=["delta", "last", "mean", "max", "multistat"],
+    p.add_argument("--readout",
+                   choices=["delta", "last", "mean", "max", "multistat", "boundary_stats"],
                    default="delta")
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)

@@ -29,6 +29,7 @@ this table is the mapping:
 | `step_stats` x linear | 5-statistic pool of step tokens | linear | `multistat` |
 | `last_token` x linear | final token state | linear | `dense_last` |
 | `step_delta` x linear | S_t minus S_{t-1} | linear | `delta` |
+| `boundary_stats` x linear | pre-step boundary ++ step_stats | linear | `boundary_stats` |
 | readout ensemble (3) | mean of the three best readouts | none (post-hoc) | `ens3` |
 
 ## Representations: what is fed, and what is probed
@@ -61,6 +62,16 @@ the label being probed is always the step's binary correctness (0 correct,
   at the step's last token minus the state at the pre-step boundary token, read by
   a linear probe. Asks whether the *change* a step makes to the residual stream
   carries the correctness signal, rather than the absolute state it lands in.
+- **boundary_stats**: `step_stats` with the pre-step boundary state prepended as
+  its own vector, concat[S_{t-1}, mean, max, min, std, last], 6 x 3584 = 21,504
+  dims, linear probe. Every state here is already causally contextualized by the
+  question and prior steps, so this adds no information; it adds *linear
+  accessibility*, letting the probe weigh the step against where the step
+  started. It is strictly more expressive than `step_delta`, which forces the
+  subtraction S_t - S_{t-1} and discards the absolute level (a linear map on
+  `boundary_stats` reproduces `step_delta`; asserted in
+  `tests/repstore/test_derive_delta.py`). Motivated by the lookahead ceiling test,
+  where the same anchor lifted a mean-pool by up to +0.162 AUROC.
 - **readout ensemble (3)**: not a new representation. The unweighted mean of the
   predicted probabilities of the three best readouts above (`step_tokens` x
   transformer, `step_tokens` x attn-query, `step_stats` x linear), computed
@@ -75,6 +86,7 @@ the label being probed is always the step's binary correctness (0 correct,
 |---|---|---|---|---|
 | step_tokens | transformer | **0.874** | 0.790 | n/a |
 | step_stats | linear | 0.866 | 0.783 | 0.788 |
+| boundary_stats | linear | 0.861 | 0.784 | 0.785 |
 | step_tokens | attn-query | 0.860 | 0.778 | n/a |
 | last_token | linear | 0.828 | 0.754 | 0.760 |
 | step_delta | linear | 0.817 | 0.740 | 0.743 |
@@ -92,6 +104,7 @@ that saves in-domain scores to fill in.)
 | **step_tokens x transformer** | 0.568 | 0.558 | 0.492 | 0.469 | **0.522** |
 | **step_tokens x attn-query** | 0.495 | 0.533 | 0.486 | 0.486 | **0.500** |
 | **step_stats x linear** | 0.544 | 0.473 | 0.445 | 0.477 | **0.485** |
+| **boundary_stats x linear** | 0.476 | 0.485 | 0.448 | 0.418 | **0.457** |
 | **last_token x linear** | 0.459 | 0.414 | 0.347 | 0.357 | **0.394** |
 | **step_delta x linear** | 0.345 | 0.409 | 0.344 | 0.346 | **0.361** |
 
@@ -121,6 +134,7 @@ Sourcing in `related_work.md`.
 | **step_tokens x transformer** (ours, frozen states, calib-20) | 56.8 | 55.8 | 49.2 | 46.9 | **52.2** |
 | **step_tokens x attn-query** (ours, frozen states, calib-20) | 49.5 | 53.3 | 48.6 | 48.6 | **50.0** |
 | **step_stats x linear** (ours, frozen states, calib-20) | 54.4 | 47.3 | 44.5 | 47.7 | **48.5** |
+| **boundary_stats x linear** (ours, frozen states, calib-20) | 47.6 | 48.5 | 44.8 | 41.8 | **45.7** |
 | **last_token x linear** (ours, frozen states, calib-20) | 45.9 | 41.4 | 34.7 | 35.7 | **39.4** |
 | **step_delta x linear** (ours, frozen states, calib-20) | 34.5 | 40.9 | 34.4 | 34.6 | **36.1** |
 | Math-Shepherd-PRM-7B | 47.9 | 29.5 | 24.8 | 23.8 | 31.5 |
@@ -161,6 +175,28 @@ Math-Shepherd and Skywork models collapse to the low 20s.
 AUROC) and on gsm8k, though it is close on the harder subsets: the transition
 geometry does not beat the boundary state at step granularity, which echoes the
 transition-operator result in REPORT.md and localizes CLUE's trace-level finding.
+
+**The pre-step anchor does not transfer.** `boundary_stats` was added to test a
+prediction from the lookahead ceiling study, where handing a probe the pre-step
+boundary as its own vector lifted a mean-pool by up to +0.162 AUROC. Half of the
+prediction held: it beats `last_token` by +0.062 and `step_delta` by +0.096 on
+the 4-subset average, and on *every* subset for both. The other half failed. It
+loses to plain `step_stats`, the representation it strictly contains, by -0.028
+(gsm8k -0.068, math +0.012, olympiadbench +0.003, omnimath -0.059).
+
+The failure is specific to transfer. In domain the two are effectively tied
+(AUROC 0.861 vs 0.866, macro-F1 0.784 vs 0.783), so the extra 3,584 dimensions
+cost nothing where train and test share a distribution. The whole gap opens on
+ProcessBench. That points at the anchor being domain-sensitive: the pre-step
+boundary state summarizes the question and the preceding solution, which is
+exactly the content that differs most between PRM800K and ProcessBench, so a
+probe that learns to lean on it learns something that does not survive the
+domain change. Consistent with this, the lookahead test that motivated the anchor
+trained *within* ProcessBench under cross-validation, where no such shift exists.
+
+The practical reading: pooling the step's own tokens is what generalizes, and
+adding context outside the step buys accessibility in domain while costing
+robustness out of it.
 
 ## Systems reproducible within this framework
 

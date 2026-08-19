@@ -1463,6 +1463,7 @@ Out of domain, ProcessBench first-error F1_PB at calib-20:
 | step_tokens x transformer | 0.568 | 0.558 | 0.492 | 0.469 | **0.522** |
 | step_tokens x attn-query | 0.495 | 0.533 | 0.486 | 0.486 | **0.500** |
 | step_stats x linear | 0.544 | 0.473 | 0.445 | 0.477 | **0.485** |
+| boundary_stats x linear | 0.476 | 0.485 | 0.448 | 0.418 | **0.457** |
 | last_token x linear | 0.459 | 0.414 | 0.347 | 0.357 | **0.394** |
 | step_delta x linear | 0.345 | 0.409 | 0.344 | 0.346 | **0.361** |
 
@@ -1493,6 +1494,17 @@ collapse into the low 20s.
 `step_delta` is the weakest row on every axis. It trails `last_token` in domain
 (0.817 vs 0.828) and on gsm8k, though it is close on the harder subsets.
 
+`boundary_stats` (added 2026-08-19, TamIA 419234/419235) tests the anchor
+prediction from section 19.1: `step_stats` with the pre-step boundary state
+prepended as its own vector. Half the prediction held. It beats `last_token` by
++0.062 and `step_delta` by +0.096 on the 4-subset average, and on every subset
+for both, which confirms the expressiveness argument against the forced
+subtraction. The other half failed: it loses to plain `step_stats`, the
+representation it strictly contains, by -0.028. The loss is entirely
+out-of-domain. In domain the two are tied (AUROC 0.861 vs 0.866, macro-F1 0.784
+vs 0.783), so the extra 3,584 dimensions cost nothing when train and test share a
+distribution, and the whole gap opens on transfer.
+
 ### Interpretation
 
 The final-token state was leaving signal on the table, and the amount is large.
@@ -1513,6 +1525,16 @@ here the explicit transition vector underperforms the absolute state it lands in
 The transition geometry does not beat the state at step granularity, which
 localizes CLUE's trace-level finding to the step level and gives it a negative
 answer.
+
+The anchor result sharpens what "the representation matters" means here. Pooling
+the step's *own* tokens is what generalizes; importing context from outside the
+step buys linear accessibility in domain and costs robustness out of it. The
+pre-step boundary state summarizes the question and the preceding solution, which
+is precisely the content that differs most between PRM800K and ProcessBench, so a
+probe that leans on it learns something domain-specific. That also reconciles the
+two experiments: the ceiling test that motivated the anchor trained *within*
+ProcessBench under cross-validation, where there is no distribution shift for the
+anchor to be wrong about, and it is exactly there that the anchor looked best.
 
 Caveats: one backbone and one layer, so none of this separates "last layer" from
 "final token" as the limiting factor; the calib-20 protocol assumes 20 labeled
@@ -1635,21 +1657,15 @@ have trained it should be dropped at 87% rather than finished.
 Two things the ceiling test surfaced are worth carrying into the representation
 axis instead, where the evidence is strong.
 
-First, **the pre-step anchor is worth testing as a leaderboard row**. `pc` beats
-`cur` on three of four subsets and by +0.162 AUROC on OmniMath. This is not about
-giving the probe access to the past, which it already has through the causal
-encode; it is about handing it an explicit baseline so the contrast is linearly
-available. The leaderboard has never tested that form. `last_token` and
-`step_stats` read the step's own token span with no anchor
-(`derive_delta_from_token_store.py`: "step tokens only"), and `step_delta` uses
-the boundary but *forces* the subtraction `S_t - S_{t-1}`, discarding the
-absolute level. A concatenation is strictly more expressive than either, since a
-linear probe on concat[boundary, pooled step] can represent the difference as a
-special case and is free not to. That predicts concat[boundary, `step_stats`]
-beats both `last_token` (0.394) and `step_delta` (0.361), and it would explain
-why `step_delta` underperforms while `pc` wins: the anchor helps when the probe
-chooses how to weight it, and hurts when the subtraction is imposed. It derives
-offline from the existing store, no re-encoding.
+First, **the pre-step anchor was tested and is closed**: run as the
+`boundary_stats` row above. It beats `last_token` and `step_delta` on every
+subset, confirming that a concatenation dominates the forced subtraction, but it
+loses to plain `step_stats` out of domain while tying it in domain. The anchor is
+a transfer liability, not a free win, so the leaderboard keeps `step_stats` and
+the open question becomes whether *any* out-of-step context can be added without
+importing domain. A cheap follow-up would residualize the anchor against
+question-level features before concatenating, to test the domain-sensitivity
+explanation directly.
 
 Second, the **layer axis is untouched**: `step_tokens` is last-layer only, while
 section 15 found L20 above L28 for `last_token`, so the pooling gain and the

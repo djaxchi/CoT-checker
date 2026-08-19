@@ -85,13 +85,18 @@ step, so continuations were being generated with the base model; val + test comp
 513,810-step train split timed out with 4 unmerged shards at ~111.5k of 128.4k rows). Stages 2-3
 (`encode_prm800k_pcd.py`, `derive_pb_pcd_from_full_store.py`) are written and tested but will not run.
 
-Still open on the representation axis, and now better motivated: (a) **the pre-step anchor as a
-leaderboard row**, concat[boundary, step_stats]. `pc` beats `cur` on 3 of 4 subsets and by +0.162 on
-omnimath, and no existing row has this form: `last_token`/`step_stats` read the step span with no
-anchor, `step_delta` uses the boundary but *forces* `S_t - S_{t-1}`, discarding the absolute level.
-Concat is strictly more expressive (a linear probe on it can represent the difference as a special
-case), which predicts it beats both, and would explain why `step_delta` (0.361) underperforms while
-`pc` wins. Derives offline from the existing store; (b) the **layer axis** is untouched,
+**Anchor row RUN (08-19, 419234/419235): prediction half-confirmed, half-falsified.**
+`boundary_stats` = concat[pre-step boundary, step_stats], 21,504d. It beats `last_token` (+0.062)
+and `step_delta` (+0.096) on the 4-subset avg and on *every* subset, confirming concat dominates the
+forced subtraction. But it **loses to plain `step_stats`** (0.457 vs 0.485), the rep it strictly
+contains. The loss is purely OOD: in domain they tie (AUROC 0.861 vs 0.866, macro-F1 0.784 vs 0.783).
+Reading: the boundary state summarizes the question + preceding solution, the content that differs
+most between PRM800K and ProcessBench, so leaning on it is domain-specific. That also reconciles the
+two studies, since the ceiling test that motivated the anchor trained *within* PB under CV, where no
+such shift exists. Net: pooling the step's *own* tokens generalizes; importing outside context buys
+in-domain accessibility and costs transfer.
+
+Still open on the representation axis: (b) the **layer axis** is untouched,
 `step_tokens` is last-layer only while S3 found L20 > L28 for `last_token`, so the pooling gain and
 the layer gain have never been combined; (c) the ensemble's in-domain AUROC is unfilled (only
 aggregate in-domain metrics were retained, not per-step scores).

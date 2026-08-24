@@ -166,3 +166,40 @@ def test_vector_cache_is_reused_across_learners(store, tmp_path):
     assert _run(prm, pb, tmp_path / "c2", "step_mean", "mlp:h8",
                 extra=("--vec_cache_dir", str(cache))).returncode == 0
     assert (cache / "step_mean__probe_train_full_h.npy").stat().st_mtime_ns == stamp
+
+
+def test_hp_is_selected_once_per_cell_and_reused_across_seeds(store, tmp_path):
+    """Re-searching per seed lets each seed pick the config suiting its own
+    initialisation, which inflates the cell and shrinks the seed spread the three
+    seeds exist to measure. So the search runs once and siblings reuse it."""
+    prm, pb = store
+    first = tmp_path / "seed42"
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "--rep", "last_token", "--learner", "linear",
+         "--prm_store", str(prm), "--pb_store", str(pb), "--out_dir", str(first),
+         "--pb_subsets", "gsm8k", "--epochs", "2", "--patience", "1",
+         "--batch_size", "16", "--threshold_grid", "0.1", "--seed", "42",
+         "--lr_grid", "1e-2", "1e-4", "--wd_grid", "0.0", "0.01"],
+        capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 0, r.stderr[-3000:]
+    chosen = json.loads((first / "results.json").read_text())["hp"]["selected"]
+
+    second = tmp_path / "seed43"
+    r2 = _run(prm, pb, second, "last_token", "linear",
+              extra=("--seed", "43", "--hp_from", str(first / "results.json")))
+    assert r2.returncode == 0, r2.stderr[-3000:]
+    hp = json.loads((second / "results.json").read_text())["hp"]
+    assert hp["selected"] == chosen
+    assert hp["reused_from"].endswith("results.json")
+    assert "reused from" in r2.stdout
+
+
+def test_hp_from_a_different_cell_is_refused(store, tmp_path):
+    """Borrowing another cell's tuning would silently break the protocol."""
+    prm, pb = store
+    donor = tmp_path / "donor"
+    assert _run(prm, pb, donor, "step_mean", "linear").returncode == 0
+    r = _run(prm, pb, tmp_path / "recipient", "last_token", "linear",
+             extra=("--hp_from", str(donor / "results.json")))
+    assert r.returncode != 0
+    assert "step_mean" in r.stderr and "one-config-per-cell" in r.stderr

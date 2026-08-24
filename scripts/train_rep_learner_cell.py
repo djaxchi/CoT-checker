@@ -18,7 +18,11 @@ cell. It fixes:
     on validation loss, for a linear head and a transformer alike;
   * the hyperparameter protocol: the same (lr x weight-decay) grid is searched
     for every cell and selected on validation AUROC, so no cell is advantaged by
-    having been tuned harder than its neighbour;
+    having been tuned harder than its neighbour. The search runs once per cell,
+    not once per seed: `--hp_from` reuses the selection from a sibling seed's
+    results.json. Re-searching per seed would let each seed pick the config that
+    happens to suit its own initialisation, which inflates the cell and shrinks
+    the very seed spread the three seeds are there to measure;
   * the evaluation: the same threshold selection, the same in-domain metrics, and
     per-step ProcessBench scores written out for the same offline calib-20;
   * the inputs: every split it reads is fingerprinted into results.json, and the
@@ -226,6 +230,11 @@ def main() -> None:
                    help="Rows used while searching the lr x wd grid. The winning "
                         "config is then refit on the full --train_cap rows. Same "
                         "for every cell.")
+    p.add_argument("--hp_from", type=Path, default=None,
+                   help="results.json of a sibling cell (same rep and learner, "
+                        "different seed) whose selected hyperparameters to reuse. "
+                        "Skips the search; the selection stays a per-cell decision "
+                        "rather than a per-seed one.")
     p.add_argument("--lr_grid", type=float, nargs="+", default=[1e-3, 3e-4, 1e-4])
     p.add_argument("--wd_grid", type=float, nargs="+", default=[0.0, 0.01])
     p.add_argument("--epochs", type=int, default=30)
@@ -310,7 +319,20 @@ def main() -> None:
     n_val = len(y_val)
     trials = []
     best_cfg, best_auroc = None, -1.0
-    for lr in args.lr_grid:
+
+    if args.hp_from is not None:
+        prior = json.loads(args.hp_from.read_text())
+        if (prior["rep"], prior["learner"]) != (args.rep, args.learner):
+            raise SystemExit(
+                f"--hp_from is for {prior['rep']} x {prior['learner']}, not "
+                f"{args.rep} x {args.learner}; reusing another cell's tuning "
+                f"would break the one-config-per-cell protocol")
+        best_cfg = prior["hp"]["selected"]
+        trials = prior["hp"].get("trials", [])
+        n_hp = int(prior["hp"].get("search_rows", n_hp))
+        print(f"[hp] reused from {args.hp_from}: {best_cfg}", flush=True)
+
+    for lr in ([] if best_cfg is not None else args.lr_grid):
         for wd in args.wd_grid:
             torch.manual_seed(args.seed)
             m = build_learner(args.learner, d, t_max=args.t_max,
@@ -402,7 +424,8 @@ def main() -> None:
         "n_train": int(n_train),
         "n_train_available": int(n_train_all),
         "full_train": bool(args.train_cap is None),
-        "hp": {"selected": best_cfg, "search_rows": int(n_hp), "trials": trials},
+        "hp": {"selected": best_cfg, "search_rows": int(n_hp), "trials": trials,
+               "reused_from": str(args.hp_from) if args.hp_from else None},
         "protocol": {"epochs": args.epochs, "patience": args.patience,
                      "batch_size": args.batch_size, "t_max": args.t_max,
                      "dropout": args.dropout,

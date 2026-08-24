@@ -1,4 +1,5 @@
-"""The leaderboard must aggregate over seeds and must never mix capped cells in."""
+"""The leaderboard aggregates over seeds, never mixes capped cells in, and
+refuses to render at all unless every cell provably read the same inputs."""
 
 from __future__ import annotations
 
@@ -9,14 +10,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from scripts.merge_rep_grid_leaderboard import pb_avg, summarise  # noqa: E402
+import pytest  # noqa: E402
+
+from scripts.merge_rep_grid_leaderboard import (  # noqa: E402
+    check_inputs, pb_avg, summarise,
+)
 
 SCRIPT = ROOT / "scripts" / "merge_rep_grid_leaderboard.py"
 SUBSETS = ("gsm8k", "math", "olympiadbench", "omnimath")
 
 
-def _cell(rep, learner, seed, auroc, f1, full=True, n_params=3585):
+FP = {"prm/probe_train_full": "aaaa1111", "prm/val_5k": "bbbb2222",
+      "pb/gsm8k": "cccc3333"}
+
+
+def _cell(rep, learner, seed, auroc, f1, full=True, n_params=3585, inputs=None):
     return {
+        "inputs": dict(FP if inputs is None else inputs),
         "rep": rep, "learner": learner, "seed": seed, "dim": 3584,
         "n_params": n_params, "n_train": 513810 if full else 150000,
         "n_train_available": 513810, "full_train": full,
@@ -69,3 +79,40 @@ def test_capped_cells_are_reported_separately(tmp_path):
     assert "step_stats" not in main_table
     assert "±" in main_table            # the two-seed cell carries a spread
     assert "2,500,000" in text          # capacity view reports parameter counts
+
+
+def test_a_cell_that_read_a_different_store_is_a_hard_error():
+    """Two rows trained on different activations are not a controlled comparison,
+    so this fails the merge rather than adding a footnote."""
+    other = dict(FP, **{"prm/probe_train_full": "deadbeef"})
+    cells = [_cell("last_token", "linear", 42, 0.80, 0.40),
+             _cell("step_mean", "linear", 42, 0.83, 0.44, inputs=other)]
+    with pytest.raises(SystemExit, match="did not read the same inputs"):
+        check_inputs(cells)
+
+
+def test_a_cell_missing_its_fingerprint_is_a_hard_error():
+    cells = [_cell("last_token", "linear", 42, 0.80, 0.40)]
+    del cells[0]["inputs"]
+    with pytest.raises(SystemExit, match="no input fingerprint"):
+        check_inputs(cells)
+
+
+def test_matching_fingerprints_pass_and_are_returned():
+    cells = [_cell("last_token", "linear", s, 0.8, 0.4) for s in (42, 43)]
+    assert check_inputs(cells) == FP
+
+
+def test_the_fingerprints_are_published_in_the_table(tmp_path):
+    root = tmp_path / "runs"
+    for i, c in enumerate([_cell("last_token", "linear", s, 0.8, 0.4)
+                           for s in (42, 43)]):
+        d = root / f"cell_{i}"
+        d.mkdir(parents=True)
+        (d / "results.json").write_text(json.dumps(c))
+    out = tmp_path / "lb.md"
+    r = subprocess.run([sys.executable, str(SCRIPT), "--run_root", str(root),
+                        "--out", str(out)], capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 0, r.stderr
+    text = out.read_text()
+    assert "aaaa1111" in text and "prm/probe_train_full" in text

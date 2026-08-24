@@ -20,7 +20,10 @@ cell. It fixes:
     for every cell and selected on validation AUROC, so no cell is advantaged by
     having been tuned harder than its neighbour;
   * the evaluation: the same threshold selection, the same in-domain metrics, and
-    per-step ProcessBench scores written out for the same offline calib-20.
+    per-step ProcessBench scores written out for the same offline calib-20;
+  * the inputs: every split it reads is fingerprinted into results.json, and the
+    merge script refuses to build a table from cells whose fingerprints disagree,
+    so "every row saw the same activations" is checked rather than assumed.
 
 What varies is `--rep` (what the learner is shown) and `--learner` (what reads
 it). The parameter count of the learner is recorded in the results so the grid
@@ -54,6 +57,7 @@ from scripts.train_easy_probe_method import (  # noqa: E402
     select_threshold, step_binary_metrics,
 )
 from src.harness.learners import build_learner, is_sequence, param_count  # noqa: E402
+from src.repstore import split_fingerprint  # noqa: E402
 from src.repstore.store import ShardedRepSplit  # noqa: E402
 
 # rep name -> the offline readout that derives it from the step-span store.
@@ -250,6 +254,17 @@ def main() -> None:
     grid = resolve_threshold_grid(args.threshold_grid)
     t0 = time.time()
 
+    # Fingerprint the inputs before touching them. Two cells are only comparable
+    # if they read the same activations, and after the master token store is
+    # deleted this digest is the only record of which store that was.
+    inputs = {f"prm/{stem}": split_fingerprint(args.prm_store / stem)
+              for stem in (args.train_stem, args.val_stem, args.test_stem)}
+    for sub in args.pb_subsets:
+        if (args.pb_store / sub).exists():
+            inputs[f"pb/{sub}"] = split_fingerprint(args.pb_store / sub)
+    for k, v in sorted(inputs.items()):
+        print(f"[input] {k:28s} {v}", flush=True)
+
     # ---- load the three PRM800K splits in the shape this learner needs -----
     if seq:
         train_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.train_stem))
@@ -380,6 +395,9 @@ def main() -> None:
         "dim": int(d),
         "n_params": int(n_params),
         "seed": args.seed,
+        "inputs": inputs,
+        "prm_store": str(args.prm_store),
+        "pb_store": str(args.pb_store),
         "n_train": int(n_train),
         "n_train_available": int(n_train_all),
         "full_train": bool(args.train_cap is None),

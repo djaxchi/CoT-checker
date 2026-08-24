@@ -15,6 +15,11 @@ because its detector was larger converges as capacity grows.
 Cells trained with a cap (`full_train: false`) are reported in a separate section
 and never mixed into the main table, since v1's confound was exactly that kind of
 silent mixing.
+
+Before rendering anything it checks that every cell read the same inputs, by
+comparing the store fingerprints each cell recorded. A benchmark whose rows were
+trained on different activations is not a benchmark, so a disagreement is a hard
+error rather than a footnote.
 """
 
 from __future__ import annotations
@@ -48,6 +53,34 @@ def pb_avg(cell: dict, key: str) -> float | None:
         vals.append(entry["val_selected"]["F1_PB"] if key == "val"
                     else entry["oracle_F1_PB"])
     return sum(vals) / len(vals)
+
+
+def check_inputs(cells: list[dict]) -> dict[str, str]:
+    """Every cell must have read the same splits. Raises if any disagree."""
+    missing = [f"{c['rep']} x {c['learner']} seed {c['seed']}"
+               for c in cells if not c.get("inputs")]
+    if missing:
+        raise SystemExit(
+            "cells carry no input fingerprint, so it cannot be shown they read "
+            "the same activations; rerun them with the current cell runner:\n  "
+            + "\n  ".join(missing))
+
+    reference = cells[0]["inputs"]
+    problems: list[str] = []
+    for c in cells[1:]:
+        cell_id = f"{c['rep']} x {c['learner']} seed {c['seed']}"
+        if set(c["inputs"]) != set(reference):
+            problems.append(f"{cell_id}: read a different set of splits "
+                            f"({sorted(set(c['inputs']) ^ set(reference))})")
+            continue
+        for split, digest in c["inputs"].items():
+            if digest != reference[split]:
+                problems.append(f"{cell_id}: {split} fingerprint {digest} != "
+                                f"{reference[split]}")
+    if problems:
+        raise SystemExit("cells did not read the same inputs, the table would not "
+                         "be a controlled comparison:\n  " + "\n  ".join(problems))
+    return reference
 
 
 def agg(values: list[float]) -> tuple[float, float]:
@@ -109,6 +142,7 @@ def main() -> None:
     cells = load_cells(args.run_root)
     if not cells:
         raise SystemExit(f"no results.json under {args.run_root}")
+    inputs = check_inputs(cells)
     full = [c for c in cells if c["full_train"]]
     capped = [c for c in cells if not c["full_train"]]
 
@@ -142,7 +176,12 @@ def main() -> None:
               f"Every cell above trains on the same {n_train:,} PRM800K steps, is "
               "tuned over the same lr x weight-decay grid selected on validation "
               "AUROC, and is trained by the same AdamW + BCE trainer with the same "
-              "early-stopping rule. Only the representation and the learner vary.", ""]
+              "early-stopping rule. Only the representation and the learner vary.", "",
+              "Every cell was verified to have read the same inputs "
+              f"({len(cells)} cells, {len(inputs)} splits):", "",
+              "| split | fingerprint |", "|---|---|"]
+    lines += [f"| `{k}` | `{v}` |" for k, v in sorted(inputs.items())]
+    lines.append("")
 
     text = "\n".join(lines)
     if args.out:

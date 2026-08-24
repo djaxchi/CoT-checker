@@ -1,5 +1,6 @@
 """Uniform representation store: decouple representations from learners."""
 
+from .fingerprint import split_fingerprint
 from .store import (
     KINDS,
     STEP_SEQ,
@@ -18,6 +19,7 @@ __all__ = [
     "TOKEN_SEQ",
     "STEP_SEQ",
     "RepSpec",
+    "split_fingerprint",
     "RepSplit",
     "ShardedRepSplit",
     "write_split",

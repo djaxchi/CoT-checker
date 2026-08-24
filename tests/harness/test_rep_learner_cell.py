@@ -1,0 +1,168 @@
+"""End-to-end smoke of one grid cell, plus the guards that keep the grid honest.
+
+These run the real entry point on a tiny synthetic store, so they catch the
+plumbing faults that only appear when a representation, a learner, and the
+ProcessBench first-error scan are wired together.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from src.repstore import TOKEN_SEQ, RepSpec, write_split  # noqa: E402
+
+SCRIPT = ROOT / "scripts" / "train_rep_learner_cell.py"
+D = 4
+
+
+def _write_prm(root: Path, stem: str, n: int, seed: int) -> None:
+    """A split whose label is linearly readable from the step tokens."""
+    rng = np.random.default_rng(seed)
+    items, metas, labels = [], [], []
+    for k in range(n):
+        label = int(k % 2)
+        n_step = int(rng.integers(2, 5))
+        prefix = rng.normal(size=(2, D))
+        span = rng.normal(size=(n_step, D)) + (2.0 if label else -2.0)
+        items.append(np.concatenate([prefix, span]).astype(np.float32))
+        metas.append({
+            "uid": f"{stem}_{k}", "n_tokens": 2 + n_step, "step_start_idx": 2,
+            "pre_step_boundary_idx": 1, "global_index": k, "label": label,
+            "step_idx": 1,
+        })
+        labels.append(label)
+    write_split(root / stem / "shard_00", items, labels, metas,
+                RepSpec(name="step_spans", kind=TOKEN_SEQ, dim=D, layer=-1,
+                        backbone="test", readout="step_span_with_boundary"))
+
+
+def _write_pb(root: Path, subset: str, n_traces: int, seed: int) -> None:
+    """Traces of 3 steps; half are fully correct (label -1), half fail at step 1."""
+    rng = np.random.default_rng(seed)
+    items, metas, labels = [], [], []
+    gi = 0
+    for t in range(n_traces):
+        trace_label = -1 if t % 2 == 0 else 1
+        for step in range(3):
+            bad = trace_label != -1 and step >= trace_label
+            n_step = int(rng.integers(2, 5))
+            prefix = rng.normal(size=(2, D))
+            span = rng.normal(size=(n_step, D)) + (2.0 if bad else -2.0)
+            items.append(np.concatenate([prefix, span]).astype(np.float32))
+            metas.append({
+                "uid": f"{subset}_{t}_{step}", "n_tokens": 2 + n_step,
+                "step_start_idx": 2, "pre_step_boundary_idx": 1, "global_index": gi,
+                "id": f"{subset}::{t}", "step_idx": step, "label": trace_label,
+                "n_steps": 3,
+            })
+            labels.append(int(bad))
+            gi += 1
+    write_split(root / subset / "shard_00", items, labels, metas,
+                RepSpec(name="step_spans", kind=TOKEN_SEQ, dim=D, layer=-1,
+                        backbone="test", readout="step_span_with_boundary"))
+
+
+@pytest.fixture
+def store(tmp_path):
+    prm, pb = tmp_path / "prm", tmp_path / "pb"
+    _write_prm(prm, "probe_train_full", 64, 0)
+    _write_prm(prm, "val_5k", 32, 1)
+    _write_prm(prm, "test_2k", 32, 2)
+    _write_pb(pb, "gsm8k", 8, 3)
+    return prm, pb
+
+
+def _run(prm, pb, out, rep, learner, extra=()):
+    cmd = [sys.executable, str(SCRIPT), "--rep", rep, "--learner", learner,
+           "--prm_store", str(prm), "--pb_store", str(pb), "--out_dir", str(out),
+           "--pb_subsets", "gsm8k", "--epochs", "2", "--patience", "1",
+           "--batch_size", "16", "--lr_grid", "1e-2", "--wd_grid", "0.0",
+           "--threshold_grid", "0.1", *extra]
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+
+
+@pytest.mark.parametrize("rep,learner", [
+    ("last_token", "linear"),
+    ("step_stats", "mlp:h8"),
+    ("step_tokens", "attn_query"),
+])
+def test_cell_runs_and_reports_both_domains(store, tmp_path, rep, learner):
+    prm, pb = store
+    out = tmp_path / f"out_{rep}_{learner.replace(':', '_')}"
+    r = _run(prm, pb, out, rep, learner)
+    assert r.returncode == 0, r.stderr[-3000:]
+    res = json.loads((out / "results.json").read_text())
+    assert res["rep"] == rep and res["learner"] == learner
+    assert res["n_params"] > 0
+    assert 0.0 <= res["in_domain"]["auroc"] <= 1.0
+    assert "gsm8k" in res["processbench"]
+    assert (out / "pb_step_scores_gsm8k.jsonl").exists()
+
+
+def test_full_train_is_the_default_and_is_recorded(store, tmp_path):
+    """No cap unless one is asked for: the v1 leaderboard's sequence rows silently
+    trained on 150k of 513,810 rows, which is exactly what this flag makes visible."""
+    prm, pb = store
+    out = tmp_path / "out_full"
+    assert _run(prm, pb, out, "last_token", "linear").returncode == 0
+    res = json.loads((out / "results.json").read_text())
+    assert res["full_train"] is True
+    assert res["n_train"] == res["n_train_available"] == 64
+
+    out2 = tmp_path / "out_capped"
+    assert _run(prm, pb, out2, "last_token", "linear",
+                extra=("--train_cap", "16")).returncode == 0
+    res2 = json.loads((out2 / "results.json").read_text())
+    assert res2["full_train"] is False and res2["n_train"] == 16
+
+
+def test_hyperparameter_grid_is_searched_and_the_winner_recorded(store, tmp_path):
+    prm, pb = store
+    out = tmp_path / "out_hp"
+    cmd_extra = ("--lr_grid", "1e-2", "1e-4", "--wd_grid", "0.0", "0.01")
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "--rep", "last_token", "--learner", "linear",
+         "--prm_store", str(prm), "--pb_store", str(pb), "--out_dir", str(out),
+         "--pb_subsets", "gsm8k", "--epochs", "2", "--patience", "1",
+         "--batch_size", "16", "--threshold_grid", "0.1", *cmd_extra],
+        capture_output=True, text=True, cwd=ROOT)
+    assert r.returncode == 0, r.stderr[-3000:]
+    hp = json.loads((out / "results.json").read_text())["hp"]
+    assert len(hp["trials"]) == 4
+    assert hp["selected"]["lr"] in (1e-2, 1e-4)
+
+
+def test_incompatible_rep_learner_pairs_are_refused(store, tmp_path):
+    prm, pb = store
+    seq_on_vector = _run(prm, pb, tmp_path / "a", "last_token", "attn_query")
+    assert seq_on_vector.returncode != 0
+    assert "step_tokens" in seq_on_vector.stderr
+
+    vector_on_seq = _run(prm, pb, tmp_path / "b", "step_tokens", "linear")
+    assert vector_on_seq.returncode != 0
+    assert "step_mean" in vector_on_seq.stderr
+
+
+def test_vector_cache_is_reused_across_learners(store, tmp_path):
+    """The derived vectors are shared by every learner on that representation,
+    which is what keeps a 15-cell grid affordable."""
+    prm, pb = store
+    cache = tmp_path / "veccache"
+    assert _run(prm, pb, tmp_path / "c1", "step_mean", "linear",
+                extra=("--vec_cache_dir", str(cache))).returncode == 0
+    written = sorted(p.name for p in cache.glob("step_mean__*"))
+    assert "step_mean__probe_train_full_h.npy" in written
+    stamp = (cache / "step_mean__probe_train_full_h.npy").stat().st_mtime_ns
+    assert _run(prm, pb, tmp_path / "c2", "step_mean", "mlp:h8",
+                extra=("--vec_cache_dir", str(cache))).returncode == 0
+    assert (cache / "step_mean__probe_train_full_h.npy").stat().st_mtime_ns == stamp

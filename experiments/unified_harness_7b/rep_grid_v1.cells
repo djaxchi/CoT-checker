@@ -1,0 +1,43 @@
+# Representation x learner grid, v1. One line = one cell: "<rep> <learner>".
+# Run with slurm/train_rep_grid_7b_tamia.sh (CELLS_FILE=...), three seeds each.
+#
+# Grid A: fixed-vector representations, fully crossed with the vector learners.
+# Every cell sees the full 513,810-step PRM800K train split, is tuned over the
+# same lr x wd grid, and is trained by the same trainer, so a difference between
+# two cells is a difference in exactly one coordinate.
+#
+#   last_token      3,584d   the step's final token, the v1 baseline
+#   step_mean       3,584d   mean over the step's tokens; the ONLY whole-step
+#                            representation dimension-matched to last_token, so
+#                            it separates "pooling the step" from "5x the input
+#                            width", which v1 could not do
+#   step_delta      3,584d   S_t - S_{t-1}
+#   step_stats     17,920d   concat[mean, max, min, std, last]
+#   boundary_stats 21,504d   S_{t-1} prepended to step_stats
+
+last_token linear
+last_token mlp:h1024
+last_token mlp:h1024x2
+step_mean linear
+step_mean mlp:h1024
+step_mean mlp:h1024x2
+step_delta linear
+step_delta mlp:h1024
+step_delta mlp:h1024x2
+step_stats linear
+step_stats mlp:h1024
+step_stats mlp:h1024x2
+boundary_stats linear
+boundary_stats mlp:h1024
+boundary_stats mlp:h1024x2
+
+# Grid B: the token sequence, read by learners that choose what to attend to.
+# Anchored to Grid A through the bridge cell `step_mean linear`, which is what a
+# sequence learner reduces to when its pooling is fixed to the mean and its head
+# is linear. Three transformer capacities so the sequence axis is reported as a
+# curve against parameter count, not as one point.
+
+step_tokens attn_query
+step_tokens transformer:d128,l1,f512,h4
+step_tokens transformer:d256,l2,f1024,h4
+step_tokens transformer:d512,l2,f2048,h8

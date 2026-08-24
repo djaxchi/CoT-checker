@@ -93,7 +93,14 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
-pip install --no-index torch numpy
+pip install --no-index torch numpy pyyaml
+
+# ---- preflight: import the runner once, before launching anything ----------
+# A missing dependency otherwise shows up as twelve background processes dying
+# silently; here it is one clear message before any GPU time is spent.
+python -c "import scripts.train_rep_learner_cell" || {
+  echo "[FATAL] the cell runner does not import in this environment" >&2; exit 3; }
+echo "[preflight] cell runner imports cleanly"
 
 # ---- vector caches first, once, shared by every learner on that rep --------
 # Deriving inside the concurrent cells would have four processes racing to write
@@ -118,6 +125,14 @@ FIRST_SEED="${SEED_ARR[0]}"
 
 cell_tag() { echo "${1}__$(echo "$2" | tr ':,' '__')__seed${3}"; }
 
+# Cells run in the background so four share the node's GPUs, which means a
+# crashed cell is invisible unless its exit status is collected. Job 426312
+# "COMPLETED" in 33 seconds with every cell dead on a missing import, so PIDs are
+# tracked and waited on individually, and the job fails if no cell produced a
+# result.
+declare -a PIDS=() PID_TAGS=()
+FAILED=0
+
 run_cell() {  # rep learner seed gpu [extra args...]
   local rep="$1" learner="$2" seed="$3" gpu="$4"; shift 4
   local tag; tag="$(cell_tag "$rep" "$learner" "$seed")"
@@ -132,6 +147,22 @@ run_cell() {  # rep learner seed gpu [extra args...]
     --epochs "$EPOCHS" --batch_size "$BATCH_SIZE" \
     --hp_search_cap "$HP_SEARCH_CAP" "$@" \
     > "$OUT_ROOT/${tag}.log" 2>&1 &
+  PIDS+=("$!"); PID_TAGS+=("$tag")
+}
+
+wait_batch() {
+  local i rc
+  for i in "${!PIDS[@]}"; do
+    if wait "${PIDS[$i]}"; then
+      echo "[ok] ${PID_TAGS[$i]}"
+    else
+      rc=$?
+      FAILED=$(( FAILED + 1 ))
+      echo "[FAIL rc=$rc] ${PID_TAGS[$i]}"
+      tail -5 "$OUT_ROOT/${PID_TAGS[$i]}.log" 2>/dev/null | sed 's/^/    /'
+    fi
+  done
+  PIDS=(); PID_TAGS=()
 }
 
 echo "=== phase 1: seed $FIRST_SEED, hyperparameter search ==="
@@ -139,9 +170,9 @@ i=0
 for pair in "${PAIRS[@]}"; do
   run_cell "${pair%% *}" "${pair#* }" "$FIRST_SEED" "$(( i % N_GPUS ))"
   i=$(( i + 1 ))
-  if (( i % N_GPUS == 0 )); then wait; fi
+  if (( i % N_GPUS == 0 )); then wait_batch; fi
 done
-wait
+wait_batch
 
 echo "=== phase 2: remaining seeds, reusing each cell's selection ==="
 i=0
@@ -156,9 +187,14 @@ for seed in "${SEED_ARR[@]:1}"; do
       run_cell "$rep" "$learner" "$seed" "$(( i % N_GPUS ))" --hp_from "$hp"
     fi
     i=$(( i + 1 ))
-    if (( i % N_GPUS == 0 )); then wait; fi
+    if (( i % N_GPUS == 0 )); then wait_batch; fi
   done
 done
-wait
+wait_batch
 
-echo "[$(date)] rep_grid done: $(find "$OUT_ROOT" -name results.json | wc -l) cells"
+DONE=$(find "$OUT_ROOT" -name results.json | wc -l)
+echo "[$(date)] rep_grid done: $DONE cells written, $FAILED cell(s) failed"
+if (( DONE == 0 )); then
+  echo "[FATAL] no cell produced a results.json; see the per-cell logs above" >&2
+  exit 1
+fi

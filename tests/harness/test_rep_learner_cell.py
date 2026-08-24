@@ -160,12 +160,13 @@ def test_vector_cache_is_reused_across_learners(store, tmp_path):
     cache = tmp_path / "veccache"
     assert _run(prm, pb, tmp_path / "c1", "step_mean", "linear",
                 extra=("--vec_cache_dir", str(cache))).returncode == 0
-    written = sorted(p.name for p in cache.glob("step_mean__*"))
-    assert "step_mean__probe_train_full_h.npy" in written
-    stamp = (cache / "step_mean__probe_train_full_h.npy").stat().st_mtime_ns
+    written = sorted(p.name for p in cache.glob("step_mean__probe_train_full__*_h.npy"))
+    assert len(written) == 1, written
+    cached = cache / written[0]
+    stamp = cached.stat().st_mtime_ns
     assert _run(prm, pb, tmp_path / "c2", "step_mean", "mlp:h8",
                 extra=("--vec_cache_dir", str(cache))).returncode == 0
-    assert (cache / "step_mean__probe_train_full_h.npy").stat().st_mtime_ns == stamp
+    assert cached.stat().st_mtime_ns == stamp
 
 
 def test_hp_is_selected_once_per_cell_and_reused_across_seeds(store, tmp_path):
@@ -203,3 +204,32 @@ def test_hp_from_a_different_cell_is_refused(store, tmp_path):
              extra=("--hp_from", str(donor / "results.json")))
     assert r.returncode != 0
     assert "step_mean" in r.stderr and "one-config-per-cell" in r.stderr
+
+
+def test_the_vector_cache_is_keyed_by_the_store_fingerprint(store, tmp_path):
+    """A vector cell trains on the derived cache, not on the store. If the store
+    changes, the cache must miss rather than be reused under a fingerprint the
+    cell never actually read."""
+    prm, pb = store
+    cache = tmp_path / "fpcache"
+    assert _run(prm, pb, tmp_path / "d1", "last_token", "linear",
+                extra=("--vec_cache_dir", str(cache))).returncode == 0
+    before = sorted(p.name for p in cache.glob("last_token__probe_train_full__*_h.npy"))
+    assert len(before) == 1
+
+    # Flip one training label: same shapes, different store, different fingerprint.
+    y_path = prm / "probe_train_full" / "shard_00" / "y.npy"
+    y = np.load(y_path)
+    y[0] = 1 - y[0]
+    np.save(y_path, y)
+
+    assert _run(prm, pb, tmp_path / "d2", "last_token", "linear",
+                extra=("--vec_cache_dir", str(cache))).returncode == 0
+    after = sorted(p.name for p in cache.glob("last_token__probe_train_full__*_h.npy"))
+    assert len(after) == 2, after      # the old cache was not silently reused
+
+    fps = {json.loads((tmp_path / d / "results.json").read_text())
+           ["inputs"]["prm/probe_train_full"] for d in ("d1", "d2")}
+    assert len(fps) == 2
+    for fp in fps:
+        assert any(fp in name for name in after)

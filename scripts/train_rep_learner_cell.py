@@ -81,17 +81,26 @@ REPS = tuple(REP_READOUT) + ("step_tokens",)
 # ---------------------------------------------------------------------------
 
 def load_vectors(store_root: Path, stem: str, rep: str, cache_dir: Path | None,
-                 sort: bool):
+                 sort: bool, fingerprint: str | None = None):
     """(X (N, D) float32, y (N,), meta) for a fixed-vector representation.
 
     Derivation is a pure numpy slice over the memory-mapped store, so it is cached
     on disk: the same vectors are reused by every learner on that representation,
     which is what makes the grid affordable.
+
+    The cache filename carries the source split's fingerprint. A vector cell
+    trains on the cache rather than on the store directly, so without this a cache
+    left over from a different or rebuilt store would be reused silently while the
+    cell still recorded the current store's fingerprint, and the "every cell read
+    the same inputs" guarantee would be reporting on data the cell never touched.
+    With the fingerprint in the name a changed store simply misses the cache and
+    re-derives.
     """
     readout = REP_READOUT[rep]
-    cache_h = cache_dir / f"{rep}__{stem}_h.npy" if cache_dir else None
-    cache_y = cache_dir / f"{rep}__{stem}_y.npy" if cache_dir else None
-    cache_m = cache_dir / f"{rep}__{stem}_meta.jsonl" if cache_dir else None
+    key = f"{rep}__{stem}" + (f"__{fingerprint}" if fingerprint else "")
+    cache_h = cache_dir / f"{key}_h.npy" if cache_dir else None
+    cache_y = cache_dir / f"{key}_y.npy" if cache_dir else None
+    cache_m = cache_dir / f"{key}_meta.jsonl" if cache_dir else None
     if cache_h is not None and cache_h.exists() and cache_y.exists() and (
             not sort or cache_m.exists()):
         X = np.load(cache_h, mmap_mode="r")
@@ -290,11 +299,14 @@ def main() -> None:
         n_train_all = len(train_h)
     else:
         Xtr, y_train, _ = load_vectors(args.prm_store, args.train_stem, args.rep,
-                                       args.vec_cache_dir, sort=False)
+                                       args.vec_cache_dir, sort=False,
+                                       fingerprint=inputs[f"prm/{args.train_stem}"])
         Xva, y_val, _ = load_vectors(args.prm_store, args.val_stem, args.rep,
-                                     args.vec_cache_dir, sort=False)
+                                     args.vec_cache_dir, sort=False,
+                                     fingerprint=inputs[f"prm/{args.val_stem}"])
         Xte, y_test, _ = load_vectors(args.prm_store, args.test_stem, args.rep,
-                                      args.vec_cache_dir, sort=False)
+                                      args.vec_cache_dir, sort=False,
+                                      fingerprint=inputs[f"prm/{args.test_stem}"])
         d = Xtr.shape[1]
         train_fn = lambda idx: collate_vec(Xtr, y_train, idx, device)   # noqa: E731
         val_fn = lambda idx: collate_vec(Xva, y_val, idx, device)       # noqa: E731
@@ -390,7 +402,8 @@ def main() -> None:
             scores = score_all(model, len(handles), fn, args.batch_size)
         else:
             Xpb, _, meta = load_vectors(args.pb_store, sub, args.rep,
-                                        args.vec_cache_dir, sort=True)
+                                        args.vec_cache_dir, sort=True,
+                                        fingerprint=inputs[f"pb/{sub}"])
             ypb = np.zeros(Xpb.shape[0], dtype=np.int8)
             fn = lambda idx: collate_vec(Xpb, ypb, idx, device)  # noqa: E731
             scores = score_all(model, Xpb.shape[0], fn, args.batch_size)

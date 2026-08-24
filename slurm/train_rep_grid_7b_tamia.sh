@@ -19,6 +19,9 @@
 # CELLS: newline- or semicolon-separated "rep learner" pairs, or a file path via
 # CELLS_FILE (one "rep learner" per line, # comments allowed).
 #   e.g. CELLS="last_token linear;step_mean linear;step_stats mlp:h1024"
+# CELLS_FILE must live on a SHARED filesystem. Compute nodes have their own
+# /tmp, so a file written to /tmp on the login node is not there at runtime;
+# the cell lists are kept in experiments/unified_harness_7b/ for that reason.
 # SEEDS: seeds to run for every cell (default "42 43 44"); the grid reports
 # mean +- std across them, because a single seed cannot rank cells that differ
 # by a couple of F1 points.
@@ -55,10 +58,15 @@ mkdir -p "$OUT_ROOT" "$VEC_CACHE"
 # ---- assemble the cell list ------------------------------------------------
 declare -a PAIRS=()
 if [[ -n "$CELLS_FILE" ]]; then
+  [[ -r "$CELLS_FILE" ]] || {
+    echo "[FATAL] CELLS_FILE not readable from the compute node: $CELLS_FILE" >&2
+    echo "        it must be on a shared filesystem, not the login node's /tmp" >&2
+    exit 2; }
   while IFS= read -r line; do
     line="${line%%#*}"; line="$(echo "$line" | xargs || true)"
     [[ -n "$line" ]] && PAIRS+=("$line")
   done < "$CELLS_FILE"
+  [[ ${#PAIRS[@]} -gt 0 ]] || { echo "[FATAL] no cells read from $CELLS_FILE" >&2; exit 2; }
 else
   [[ -n "$CELLS" ]] || { echo "[FATAL] set CELLS or CELLS_FILE" >&2; exit 2; }
   IFS=';' read -r -a raw <<< "$CELLS"

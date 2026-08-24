@@ -1,0 +1,14 @@
+# Grid B: the token sequence, read by learners that choose what to attend to.
+# Split out of rep_grid_v1.cells because it launches separately: these cells
+# derive no vector caches, they read the step-span store directly, so they can
+# run while disk is still tight.
+#
+# Anchored to Grid A through the `step_mean linear` bridge cell, which is what a
+# sequence learner reduces to when its pooling is fixed to the mean and its head
+# is linear. Three transformer capacities so the sequence axis is reported as a
+# curve against parameter count rather than as one point.
+
+step_tokens attn_query
+step_tokens transformer:d128,l1,f512,h4
+step_tokens transformer:d256,l2,f1024,h4
+step_tokens transformer:d512,l2,f2048,h8

@@ -1,0 +1,33 @@
+# Grid A: fixed-vector representations, fully crossed with the vector learners.
+# Split out of rep_grid_v1.cells because it launches separately: step_stats and
+# boundary_stats derive ~40 GB of vector cache, so these wait until the master
+# token store is deleted and disk frees up.
+#
+# Every cell sees the full 513,810-step PRM800K train split, is tuned over the
+# same lr x wd grid (once per cell, reused across seeds), and is trained by the
+# same trainer, so two cells differ in exactly one coordinate.
+#
+#   last_token      3,584d   the step's final token, the v1 baseline
+#   step_mean       3,584d   mean over the step's tokens; the ONLY whole-step
+#                            representation dimension-matched to last_token, so
+#                            it separates "pooling the step" from "5x the input
+#                            width", which v1 could not do
+#   step_delta      3,584d   S_t - S_{t-1}
+#   step_stats     17,920d   concat[mean, max, min, std, last]
+#   boundary_stats 21,504d   S_{t-1} prepended to step_stats
+
+last_token linear
+last_token mlp:h1024
+last_token mlp:h1024x2
+step_mean linear
+step_mean mlp:h1024
+step_mean mlp:h1024x2
+step_delta linear
+step_delta mlp:h1024
+step_delta mlp:h1024x2
+step_stats linear
+step_stats mlp:h1024
+step_stats mlp:h1024x2
+boundary_stats linear
+boundary_stats mlp:h1024
+boundary_stats mlp:h1024x2

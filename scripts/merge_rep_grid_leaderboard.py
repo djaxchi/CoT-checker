@@ -7,10 +7,21 @@ std over its seeds, and the table is laid out as representation x learner so the
 two axes can be read separately: down a column, the learner is held fixed and
 only the representation moves; across a row, the reverse.
 
+The headline metric is F1_PB at **calib-20**, the same one the v1 leaderboard
+reported: hold out 20 ProcessBench traces per subset (stratified error/correct),
+grid-max the first-error threshold there, apply it to the rest, average over 20
+splits. It is recomputed here from each cell's saved per-trace scores using
+`scripts/analysis/pb_threshold_calibration.py`, so the new table and the old one
+are comparable on the number that matters rather than only on AUROC. The
+val-selected threshold picks about 0.5 and under-tunes for ProcessBench's
+correct-skew; oracle peeks at the whole test set. Both are kept for context.
+
 Also emits the capacity view, F1_PB against learner parameter count, which is
 what actually answers "representation or detector?": a representation that is
 genuinely better dominates at every capacity, while one that only looked better
-because its detector was larger converges as capacity grows.
+because its detector was larger converges as capacity grows. Learner columns are
+ordered by parameter count, not alphabetically, so that story is readable
+straight off the main table.
 
 Cells trained with a cap (`full_train: false`) are reported in a separate section
 and never mixed into the main table, since v1's confound was exactly that kind of
@@ -27,19 +38,32 @@ from __future__ import annotations
 import argparse
 import json
 import statistics as st
+import sys
 from collections import defaultdict
 from pathlib import Path
 
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.analysis.pb_threshold_calibration import load_traces  # noqa: E402
+
 PB_SUBSETS = ("gsm8k", "math", "olympiadbench", "omnimath")
+CALIB_SIZE = 20
+CALIB_SPLITS = 20
+CALIB_GRID = np.arange(0.01, 1.00, 0.01)
 
 
 def load_cells(root: Path) -> list[dict]:
     out = []
     for f in sorted(root.rglob("results.json")):
         try:
-            out.append(json.loads(f.read_text()))
+            cell = json.loads(f.read_text())
         except json.JSONDecodeError:
             print(f"[warn] unreadable: {f}")
+            continue
+        cell["_dir"] = str(f.parent)
+        out.append(cell)
     return out
 
 
@@ -53,6 +77,89 @@ def pb_avg(cell: dict, key: str) -> float | None:
         vals.append(entry["val_selected"]["F1_PB"] if key == "val"
                     else entry["oracle_F1_PB"])
     return sum(vals) / len(vals)
+
+
+def pred_matrix(traces: list, grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(predictions (n_traces, n_thresholds), labels (n_traces,)).
+
+    The first-error prediction is the first step whose score exceeds the
+    threshold, else -1. Precomputing it for the whole grid once turns every
+    later calibration split into counting, which is what makes 20 splits x 99
+    thresholds x 57 cells finish at all: the straightforward nested loop is
+    billions of trace scans.
+    """
+    n_t = len(grid)
+    preds = np.empty((len(traces), n_t), dtype=np.int32)
+    labels = np.empty(len(traces), dtype=np.int64)
+    for i, (label, scores) in enumerate(traces):
+        s = np.asarray(scores, dtype=np.float64)
+        hit = s[None, :] > grid[:, None]              # (n_t, L)
+        any_hit = hit.any(axis=1)
+        preds[i] = np.where(any_hit, hit.argmax(axis=1), -1)
+        labels[i] = label
+    return preds, labels
+
+
+def f1_pb_from_preds(preds: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    """F1_PB for every threshold column of `preds`, the harmonic mean of the
+    error-trace and correct-trace accuracies (identical definition to
+    evaluate_processbench and trace_f1_pb)."""
+    is_cor = labels == -1
+    n_err, n_cor = int((~is_cor).sum()), int(is_cor.sum())
+    cor_hit = (preds[is_cor] == -1).sum(axis=0)
+    err_hit = (preds[~is_cor] == labels[~is_cor, None]).sum(axis=0)
+    acc_err = err_hit / n_err if n_err else np.zeros(preds.shape[1])
+    acc_cor = cor_hit / n_cor if n_cor else np.zeros(preds.shape[1])
+    denom = acc_err + acc_cor
+    return np.where(denom > 0, 2 * acc_err * acc_cor / np.maximum(denom, 1e-12), 0.0)
+
+
+def calib20_subset(traces: list) -> float:
+    """F1_PB at calib-20 for one subset: hold out CALIB_SIZE traces (stratified),
+    grid-max the threshold there, apply it to the remainder, mean over splits."""
+    preds, labels = pred_matrix(traces, CALIB_GRID)
+    idx = np.arange(len(traces))
+    evals = []
+    for sd in range(CALIB_SPLITS):
+        rng = np.random.default_rng(sd)
+        # stratified_calib_split works on traces; this mirrors it exactly on
+        # indices (same permutation order, same counts) so the split is identical
+        # while the scoring stays vectorized. A test pins the two together.
+        err = idx[labels != -1]
+        cor = idx[labels == -1]
+        frac = CALIB_SIZE / len(traces)
+        n_err_c = min(len(err), round(len(err) * frac))
+        n_cor_c = min(len(cor), CALIB_SIZE - n_err_c)
+        err_p, cor_p = rng.permutation(len(err)), rng.permutation(len(cor))
+        calib = np.concatenate([err[err_p[:n_err_c]], cor[cor_p[:n_cor_c]]])
+        ev = np.concatenate([err[err_p[n_err_c:]], cor[cor_p[n_cor_c:]]])
+        t_star = int(np.argmax(f1_pb_from_preds(preds[calib], labels[calib])))
+        evals.append(float(f1_pb_from_preds(preds[ev], labels[ev])[t_star]))
+    return float(np.mean(evals))
+
+
+def calib20(cell: dict) -> float | None:
+    """F1_PB at calib-20, averaged over the four subsets.
+
+    Recomputed from the cell's saved per-trace scores under the same protocol the
+    v1 rows used, so the two leaderboards report the same metric. Returns None if
+    any subset's scores are missing, since a three-subset average would not be
+    comparable to a four-subset one.
+    """
+    if cell.get("_calib20") is not None:
+        return cell["_calib20"]
+    out_dir = Path(cell.get("_dir", ""))
+    per_subset = []
+    for sub in PB_SUBSETS:
+        path = out_dir / f"pb_step_scores_{sub}.jsonl"
+        if not path.exists():
+            return None
+        traces = load_traces(path)
+        if len(traces) <= CALIB_SIZE:
+            return None
+        per_subset.append(calib20_subset(traces))
+    cell["_calib20"] = sum(per_subset) / len(per_subset)
+    return cell["_calib20"]
 
 
 def check_inputs(cells: list[dict]) -> dict[str, str]:
@@ -98,6 +205,7 @@ def summarise(cells: list[dict]) -> dict[tuple[str, str], dict]:
     out = {}
     for key, members in groups.items():
         aurocs = [m["in_domain"]["auroc"] for m in members]
+        calibs = [v for v in (calib20(m) for m in members) if v is not None]
         f1s = [v for v in (pb_avg(m, "val") for m in members) if v is not None]
         oracles = [v for v in (pb_avg(m, "oracle") for m in members) if v is not None]
         out[key] = {
@@ -108,6 +216,7 @@ def summarise(cells: list[dict]) -> dict[tuple[str, str], dict]:
             "n_train": members[0]["n_train"],
             "full_train": all(m["full_train"] for m in members),
             "auroc": agg(aurocs),
+            "f1_pb_calib20": agg(calibs) if calibs else None,
             "f1_pb_val": agg(f1s) if f1s else None,
             "f1_pb_oracle": agg(oracles) if oracles else None,
             "hp": [m["hp"]["selected"] for m in members],
@@ -115,9 +224,18 @@ def summarise(cells: list[dict]) -> dict[tuple[str, str], dict]:
     return out
 
 
+def learner_order(summary: dict[tuple[str, str], dict]) -> list[str]:
+    """Learners smallest first, by parameter count. Alphabetical ordering hid the
+    capacity story; this makes each row read left to right as a capacity curve."""
+    params: dict[str, int] = {}
+    for (_, learner), v in summary.items():
+        params[learner] = min(params.get(learner, v["n_params"]), v["n_params"])
+    return sorted(params, key=lambda k: (params[k], k))
+
+
 def render(summary: dict[tuple[str, str], dict], metric: str) -> list[str]:
     reps = sorted({r for r, _ in summary})
-    learners = sorted({l for _, l in summary})
+    learners = learner_order(summary)
     lines = ["| representation | dim | " + " | ".join(learners) + " |",
              "|---|---|" + "---|" * len(learners)]
     for rep in reps:
@@ -148,16 +266,19 @@ def main() -> None:
 
     lines = [f"# Representation x learner grid ({len(full)} full-split cells)", ""]
     summary = summarise(full)
-    for metric, title in [("auroc", "In-domain PRM800K test AUROC"),
-                          ("f1_pb_val", "ProcessBench F1_PB, val-selected threshold, 4-subset mean"),
-                          ("f1_pb_oracle", "ProcessBench F1_PB, oracle threshold, 4-subset mean")]:
+    for metric, title in [
+            ("f1_pb_calib20",
+             "ProcessBench F1_PB @ calib-20, 4-subset mean (HEADLINE)"),
+            ("auroc", "In-domain PRM800K test AUROC"),
+            ("f1_pb_val", "ProcessBench F1_PB, val-selected threshold, 4-subset mean"),
+            ("f1_pb_oracle", "ProcessBench F1_PB, oracle threshold, 4-subset mean")]:
         lines += [f"## {title}", ""] + render(summary, metric) + [""]
 
-    lines += ["## Capacity view (F1_PB against learner parameters)", "",
-              "| representation | learner | params | AUROC | F1_PB (val) | seeds |",
+    lines += ["## Capacity view (F1_PB @ calib-20 against learner parameters)", "",
+              "| representation | learner | params | AUROC | F1_PB @ calib-20 | seeds |",
               "|---|---|---|---|---|---|"]
     for (rep, learner), v in sorted(summary.items(), key=lambda kv: (kv[0][0], kv[1]["n_params"])):
-        f1 = fmt(*v["f1_pb_val"], v["n_seeds"]) if v["f1_pb_val"] else "—"
+        f1 = fmt(*v["f1_pb_calib20"], v["n_seeds"]) if v["f1_pb_calib20"] else "—"
         lines.append(f"| `{rep}` | `{learner}` | {v['n_params']:,} | "
                      f"{fmt(*v['auroc'], v['n_seeds'])} | {f1} | {v['n_seeds']} |")
     lines.append("")
@@ -177,6 +298,11 @@ def main() -> None:
               "tuned over the same lr x weight-decay grid selected on validation "
               "AUROC, and is trained by the same AdamW + BCE trainer with the same "
               "early-stopping rule. Only the representation and the learner vary.", "",
+              f"The headline is F1_PB at calib-20: {CALIB_SIZE} held-out "
+              f"ProcessBench traces per subset (stratified) pick the first-error "
+              f"threshold, which is applied to the rest, averaged over "
+              f"{CALIB_SPLITS} splits. Same protocol and same code path as the v1 "
+              "leaderboard, so the two are comparable on the headline metric.", "",
               "Every cell was verified to have read the same inputs "
               f"({len(cells)} cells, {len(inputs)} splits):", "",
               "| split | fingerprint |", "|---|---|"]

@@ -372,7 +372,7 @@ def main() -> None:
             ypb = np.zeros(Xpb.shape[0], dtype=np.int8)
             fn = lambda idx: collate_vec(Xpb, ypb, idx, device)  # noqa: E731
             scores = score_all(model, Xpb.shape[0], fn, args.batch_size)
-        _, m_val = evaluate_processbench(scores, meta, t_val)
+        rows, m_val = evaluate_processbench(scores, meta, t_val)
         best_f1, best_t = -1.0, grid[0]
         for t in grid:
             _, mt = evaluate_processbench(scores, meta, t)
@@ -380,12 +380,13 @@ def main() -> None:
                 best_f1, best_t = mt["F1_PB"], t
         pb[sub] = {"val_selected": m_val, "oracle_F1_PB": float(best_f1),
                    "oracle_threshold": float(best_t)}
+        # Per-trace scores in the format scripts/analysis/pb_threshold_calibration.py
+        # already consumes, so calib-20 is the same offline computation on this
+        # grid as it was on the v1 rows. Changing the layout here would silently
+        # make the two leaderboards' headline metric incomparable.
         with (args.out_dir / f"pb_step_scores_{sub}.jsonl").open("w") as f:
-            for s, m in zip(scores, meta):
-                f.write(json.dumps({"id": m["id"], "step_idx": int(m["step_idx"]),
-                                    "label": int(m["label"]),
-                                    "n_steps": int(m["n_steps"]),
-                                    "score": float(s)}) + "\n")
+            for row in rows:
+                f.write(json.dumps(row) + "\n")
         print(f"[pb:{sub}] F1_PB@val={m_val['F1_PB']:.4f} "
               f"F1_PB@oracle={best_f1:.4f}", flush=True)
 

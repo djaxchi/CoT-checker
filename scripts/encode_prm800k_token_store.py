@@ -15,6 +15,18 @@ From the store, offline: dense_last = row n_tokens-1; step tokens = rows
 pooled = mean/max over the step span. (Trajectory needs prior-step boundaries,
 a small builder change; the context tokens are already stored here.)
 
+Span-only mode (`--span_only`) writes just the rows any representation reads:
+the pre-step boundary state followed by the step's own tokens. That is a 7x
+saving (a step spans 38.8 tokens against 283 for the full sequence), and it is
+what makes a backbone swap affordable: the full-sequence store for an 8B model
+at hidden 4096 is ~1.1 TB, which does not fit, while the span store is ~157 GiB.
+The output is byte-identical to encoding in full and then running
+`scripts/build_step_span_store.py`, which was verified over all 513,810 training
+items before the previous master store was deleted. Offsets are rewritten the
+same way (`pre_step_boundary_idx` 0, `step_start_idx` 1), so every reader works
+unchanged. What it gives up is the question and prior-step token states, which
+no current representation reads.
+
 Memory-safe two-pass per shard: tokenize first to size an on-disk memmap, then
 stream the forward pass into it. Whole-node H100:4 -> 4 shards via
 CUDA_VISIBLE_DEVICES; read back with repstore.ShardedRepSplit (no merge copy).
@@ -57,6 +69,7 @@ def encode_split(
     jsonl_path: Path, rep_root: Path, stem: str, tokenizer, model, device,
     layer: int, max_seq_len: int, batch_size: int, pad_id: int,
     shard_idx: int, num_shards: int, backbone: str, limit: int | None,
+    span_only: bool = False,
 ) -> None:
     rows = [json.loads(l) for l in jsonl_path.read_text().splitlines() if l.strip()]
     for gi, r in enumerate(rows):
@@ -70,7 +83,11 @@ def encode_split(
     for ex in shard:
         ids, start = tokenize_with_offsets(tokenizer, ex, max_seq_len)
         toks.append((ids, start, ex))
-    lengths = np.array([len(t[0]) for t in toks], dtype=np.int32)
+    if span_only and any(start < 1 for _, start, _ in toks):
+        raise ValueError("span_only needs a non-empty prefix (step_start_idx >= 1)")
+    lengths = np.array(
+        [len(ids) - start + 1 if span_only else len(ids) for ids, start, _ in toks],
+        dtype=np.int32)
     total_rows = int(lengths.sum())
     d = model.config.hidden_size
 
@@ -102,18 +119,28 @@ def encode_split(
         del out
         for b, (ids, start, ex) in enumerate(batch):
             nt = len(ids)
-            vecs = hs[b, :nt, :].detach().to(torch.float16).cpu().numpy()
-            h_mm[cursor:cursor + nt] = vecs
+            lo = start - 1 if span_only else 0
+            keep = nt - lo
+            vecs = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
+            h_mm[cursor:cursor + keep] = vecs
             y[i + b] = int(ex["label"])
-            meta.append({
+            row = {
                 "uid": ex["uid"], "problem_id": ex["problem_id"],
                 "solution_id": ex.get("solution_id"), "step_idx": ex["step_idx"],
                 "label": int(ex["label"]), "rating": ex.get("rating"),
                 "n_tokens": nt, "step_start_idx": start,
                 "pre_step_boundary_idx": start - 1,
                 "global_index": ex["global_index"],
-            })
-            cursor += nt
+            }
+            if span_only:
+                row.update({
+                    "orig_n_tokens": nt, "orig_step_start_idx": start,
+                    "orig_pre_step_boundary_idx": start - 1,
+                    "n_tokens": keep, "step_start_idx": 1,
+                    "pre_step_boundary_idx": 0,
+                })
+            meta.append(row)
+            cursor += keep
         del hs
         if (i // batch_size) % 32 == 0 or i + batch_size >= len(toks):
             print(f"[tokstore] {stem} shard {shard_idx}: {i+len(batch)}/{len(toks)} "
@@ -125,8 +152,10 @@ def encode_split(
     with (out_dir / "meta.jsonl").open("w") as f:
         for m in meta:
             f.write(json.dumps(m) + "\n")
-    spec = RepSpec(name=rep_root.name, kind=TOKEN_SEQ, dim=d, layer=layer,
-                   backbone=backbone, readout="token_all_last_layer", source_split=stem)
+    spec = RepSpec(
+        name=rep_root.name, kind=TOKEN_SEQ, dim=d, layer=layer, backbone=backbone,
+        readout="step_span_with_boundary" if span_only else "token_all_last_layer",
+        source_split=stem)
     (out_dir / "spec.json").write_text(spec.to_json())
     print(f"[tokstore] {stem} shard {shard_idx}: done ({cursor:,} rows written)", flush=True)
 
@@ -146,6 +175,10 @@ def main() -> None:
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
     p.add_argument("--limit_per_file", type=int, default=None)
+    p.add_argument("--span_only", action="store_true",
+                   help="Store only the pre-step boundary row plus the step's own "
+                        "tokens (~7x smaller, byte-identical to encoding in full "
+                        "then compacting).")
     args = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -163,7 +196,7 @@ def main() -> None:
             args.data_dir / jsonl_name, args.rep_root, stem, tok, model, device,
             args.layer, args.max_seq_len, args.batch_size, pad_id,
             args.shard_idx, args.num_shards, Path(args.model_name_or_path).name,
-            args.limit_per_file,
+            args.limit_per_file, args.span_only,
         )
 
 

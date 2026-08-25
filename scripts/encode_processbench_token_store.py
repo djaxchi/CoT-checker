@@ -59,7 +59,8 @@ def flatten(traces: list[dict], subset: str) -> list[dict]:
 
 
 def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
-                  max_seq_len, batch_size, pad_id, shard_idx, num_shards, backbone):
+                  max_seq_len, batch_size, pad_id, shard_idx, num_shards, backbone,
+                  span_only=False):
     flat = flatten(load_traces(raw_file), subset)
     shard = [r for r in flat if r["global_index"] % num_shards == shard_idx]
 
@@ -75,7 +76,11 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
             continue
         toks.append((ids, len(prefix_ids), ex))
 
-    lengths = np.array([len(t[0]) for t in toks], dtype=np.int32)
+    if span_only and any(start < 1 for _, start, _ in toks):
+        raise ValueError("span_only needs a non-empty prefix (step_start_idx >= 1)")
+    lengths = np.array(
+        [len(ids) - start + 1 if span_only else len(ids) for ids, start, _ in toks],
+        dtype=np.int32)
     total = int(lengths.sum())
     d = model.config.hidden_size
     out_dir = rep_root / subset / f"shard_{shard_idx:02d}"
@@ -100,15 +105,24 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
         hs = out.hidden_states[layer]; del out
         for b, (ids, start, ex) in enumerate(batch):
             nt = len(ids)
-            h_mm[cur:cur + nt] = hs[b, :nt, :].detach().to(torch.float16).cpu().numpy()
+            lo = start - 1 if span_only else 0
+            keep = nt - lo
+            h_mm[cur:cur + keep] = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
             y[i + b] = int(ex["step_idx"] == ex["label"])
-            meta.append({
+            row = {
                 "id": ex["id"], "step_idx": ex["step_idx"], "label": ex["label"],
                 "n_steps": ex["n_steps"], "pb_subset": subset,
                 "n_tokens": nt, "step_start_idx": start, "pre_step_boundary_idx": start - 1,
                 "global_index": ex["global_index"],
-            })
-            cur += nt
+            }
+            if span_only:
+                row.update({
+                    "orig_n_tokens": nt, "orig_step_start_idx": start,
+                    "orig_pre_step_boundary_idx": start - 1,
+                    "n_tokens": keep, "step_start_idx": 1, "pre_step_boundary_idx": 0,
+                })
+            meta.append(row)
+            cur += keep
         del hs
     h_mm.flush()
     np.save(out_dir / "lengths.npy", lengths)
@@ -116,8 +130,10 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
     with (out_dir / "meta.jsonl").open("w") as f:
         for m in meta:
             f.write(json.dumps(m) + "\n")
-    spec = RepSpec(name=rep_root.name, kind=TOKEN_SEQ, dim=d, layer=layer,
-                   backbone=backbone, readout="token_all_last_layer", source_split=subset)
+    spec = RepSpec(
+        name=rep_root.name, kind=TOKEN_SEQ, dim=d, layer=layer, backbone=backbone,
+        readout="step_span_with_boundary" if span_only else "token_all_last_layer",
+        source_split=subset)
     (out_dir / "spec.json").write_text(spec.to_json())
     print(f"[pb_tokstore] {subset} shard {shard_idx}: done {cur:,} rows ({time.perf_counter()-t0:.0f}s)", flush=True)
 
@@ -133,6 +149,9 @@ def main():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
+    p.add_argument("--span_only", action="store_true",
+                   help="Store only the pre-step boundary row plus the step's own "
+                        "tokens (byte-identical to encoding in full then compacting).")
     args = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -147,7 +166,7 @@ def main():
         subset, raw = spec.split(":", 1)
         encode_subset(Path(raw), subset, args.rep_root, tok, model, device, args.layer,
                       args.max_seq_len, args.batch_size, pad_id, args.shard_idx, args.num_shards,
-                      Path(args.model_name_or_path).name)
+                      Path(args.model_name_or_path).name, args.span_only)
 
 
 if __name__ == "__main__":

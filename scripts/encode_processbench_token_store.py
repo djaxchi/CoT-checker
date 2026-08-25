@@ -107,7 +107,12 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
             nt = len(ids)
             lo = start - 1 if span_only else 0
             keep = nt - lo
-            h_mm[cur:cur + keep] = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
+            vecs = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
+            if not np.isfinite(vecs).all():
+                raise ValueError(
+                    f"non-finite float16 activations for {ex['id']} step "
+                    f"{ex['step_idx']}; the store cannot hold this step at float16")
+            h_mm[cur:cur + keep] = vecs
             y[i + b] = int(ex["step_idx"] == ex["label"])
             row = {
                 "id": ex["id"], "step_idx": ex["step_idx"], "label": ex["label"],
@@ -149,6 +154,9 @@ def main():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
+    p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
+                   default="float16",
+                   help="Forward-pass dtype; prefer the backbone's training dtype.")
     p.add_argument("--span_only", action="store_true",
                    help="Store only the pre-step boundary row plus the step's own "
                         "tokens (byte-identical to encoding in full then compacting).")
@@ -159,7 +167,9 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model_name_or_path, local_files_only=args.local_files_only)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path, local_files_only=args.local_files_only, torch_dtype=torch.float16,
+        args.model_name_or_path, local_files_only=args.local_files_only,
+        torch_dtype={"float16": torch.float16, "bfloat16": torch.bfloat16,
+                     "float32": torch.float32}[args.model_dtype],
     ).to(device).eval()
 
     for spec in args.raw_specs:

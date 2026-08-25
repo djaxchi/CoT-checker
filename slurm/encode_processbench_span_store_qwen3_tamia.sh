@@ -84,6 +84,7 @@ for i in $(seq 0 $((NUM_SHARDS-1))); do
     --span_only \
     --layer -1 --max_seq_len "$MAX_SEQ_LEN" \
     --batch_size "$BATCH_SIZE" \
+    --model_dtype "${MODEL_DTYPE:-bfloat16}" \
     --shard_idx "$i" --num_shards "$NUM_SHARDS" >>"$LOG_FILE" 2>&1 &
   pids+=($!); tags+=("shard_$i")
 done

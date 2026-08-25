@@ -122,6 +122,13 @@ def encode_split(
             lo = start - 1 if span_only else 0
             keep = nt - lo
             vecs = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
+            if not np.isfinite(vecs).all():
+                # float16 storage overflowed on an activation outlier. Silently
+                # storing inf would poison every readout derived from this step.
+                raise ValueError(
+                    f"non-finite float16 activations for {ex['uid']} "
+                    f"(max |h| = {np.abs(hs[b, lo:nt, :].float().cpu().numpy()).max():.1f}); "
+                    f"the store cannot hold this step at float16")
             h_mm[cursor:cursor + keep] = vecs
             y[i + b] = int(ex["label"])
             row = {
@@ -173,7 +180,11 @@ def main() -> None:
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
-    p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
+    p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
+                   default="float16",
+                   help="Forward-pass dtype. Prefer the backbone's training dtype "
+                        "(bfloat16 for Qwen3) so the forward pass keeps its range; "
+                        "the store is float16 either way.")
     p.add_argument("--limit_per_file", type=int, default=None)
     p.add_argument("--span_only", action="store_true",
                    help="Store only the pre-step boundary row plus the step's own "
@@ -185,7 +196,8 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tok = AutoTokenizer.from_pretrained(args.model_name_or_path, local_files_only=args.local_files_only)
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    dtype = torch.float16 if args.model_dtype == "float16" else torch.float32
+    dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16,
+             "float32": torch.float32}[args.model_dtype]
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path, local_files_only=args.local_files_only, torch_dtype=dtype,
     ).to(device).eval()

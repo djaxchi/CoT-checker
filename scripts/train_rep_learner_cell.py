@@ -61,6 +61,7 @@ from scripts.train_easy_probe_method import (  # noqa: E402
     select_threshold, step_binary_metrics,
 )
 from src.harness.learners import build_learner, is_sequence, param_count  # noqa: E402
+from src.harness.spanloader import SpanLoader  # noqa: E402
 from src.repstore import split_fingerprint  # noqa: E402
 from src.repstore.store import ShardedRepSplit  # noqa: E402
 
@@ -167,9 +168,15 @@ def collate_vec(X, y, idx, device):
 # One shared trainer for every learner
 # ---------------------------------------------------------------------------
 
-def train_one(model, batches_fn, n_train, n_val, val_batches_fn, epochs, batch_size,
-              lr, weight_decay, patience, device, seed):
-    """AdamW + BCE with early stopping on validation loss. Identical for all cells."""
+def train_one(model, collate, train_plan, n_val, val_plan, val_collate, epochs,
+              lr, weight_decay, patience, seed):
+    """AdamW + BCE with early stopping on validation loss. Identical for all cells.
+
+    `train_plan(rng)` returns this epoch's list of index arrays. The vector path
+    returns shuffled fixed-size chunks; the sequence path returns length-bucketed
+    batches, which is a batching change only, never a change to what the model
+    sees for a given index.
+    """
     rng = np.random.default_rng(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     best = float("inf")
@@ -177,9 +184,8 @@ def train_one(model, batches_fn, n_train, n_val, val_batches_fn, epochs, batch_s
     bad = 0
     for _ in range(epochs):
         model.train()
-        order = rng.permutation(n_train)
-        for i in range(0, n_train, batch_size):
-            xb, mb, yb = batches_fn(order[i:i + batch_size])
+        for idx in train_plan(rng):
+            xb, mb, yb = collate(idx)
             loss = F.binary_cross_entropy_with_logits(model(xb, mb), yb)
             opt.zero_grad()
             loss.backward()
@@ -187,8 +193,8 @@ def train_one(model, batches_fn, n_train, n_val, val_batches_fn, epochs, batch_s
         model.eval()
         tot = 0.0
         with torch.no_grad():
-            for i in range(0, n_val, batch_size):
-                xb, mb, yb = val_batches_fn(np.arange(i, min(i + batch_size, n_val)))
+            for idx in val_plan:
+                xb, mb, yb = val_collate(idx)
                 tot += F.binary_cross_entropy_with_logits(
                     model(xb, mb), yb, reduction="sum").item()
         val_loss = tot / max(n_val, 1)
@@ -205,12 +211,11 @@ def train_one(model, batches_fn, n_train, n_val, val_batches_fn, epochs, batch_s
 
 
 @torch.no_grad()
-def score_all(model, n, batches_fn, batch_size):
+def score_all(model, n, collate, plan):
     model.eval()
     out = np.empty(n, dtype=np.float32)
-    for i in range(0, n, batch_size):
-        idx = np.arange(i, min(i + batch_size, n))
-        xb, mb, _ = batches_fn(idx)
+    for idx in plan:
+        xb, mb, _ = collate(idx)
         out[idx] = torch.sigmoid(model(xb, mb)).float().cpu().numpy()
     return out
 
@@ -253,6 +258,16 @@ def main() -> None:
                    help="Token cap for sequence learners. 512 covers >99.9%% of "
                         "steps (p99 span is 155 tokens), so it is effectively no cap.")
     p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--preload_spans", choices=["auto", "yes", "no"], default="auto",
+                   help="Hold the whole training split's spans in RAM so an epoch "
+                        "touches no disk. 'auto' preloads when it fits the budget.")
+    p.add_argument("--preload_budget_gb", type=float, default=300.0,
+                   help="RAM budget for span preloading (whole-node allocations "
+                        "make a few hundred GB available).")
+    p.add_argument("--no_bucket", action="store_true",
+                   help="Disable length-bucketed batching for sequence learners. "
+                        "Bucketing only changes which items share a batch, never "
+                        "what the model sees for a given item.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--threshold_grid", default="0.01")
     args = p.parse_args()
@@ -293,9 +308,17 @@ def main() -> None:
         y_val = np.array([h[4] for h in val_h], dtype=np.int8)
         y_test = np.array([h[4] for h in test_h], dtype=np.int8)
 
-        def mk(handles):
-            return lambda idx: collate_seq(handles, idx, args.t_max, device)
-        train_fn, val_fn, test_fn = mk(train_h), mk(val_h), mk(test_h)
+        probe = SpanLoader(train_h, args.t_max, device, preload=False)
+        want = probe.preload_bytes()
+        preload = (args.preload_spans == "yes" or
+                   (args.preload_spans == "auto" and want <= args.preload_budget_gb * 1e9))
+        print(f"[spans] train needs {want/1e9:.1f} GB in RAM; preload={preload} "
+              f"(budget {args.preload_budget_gb} GB)", flush=True)
+        train_loader = SpanLoader(train_h, args.t_max, device, preload=preload)
+        val_loader = SpanLoader(val_h, args.t_max, device, preload=True)
+        test_loader = SpanLoader(test_h, args.t_max, device, preload=True)
+        train_fn, val_fn, test_fn = (train_loader.collate, val_loader.collate,
+                                     test_loader.collate)
         n_train_all = len(train_h)
     else:
         Xtr, y_train, _ = load_vectors(args.prm_store, args.train_stem, args.rep,
@@ -321,13 +344,30 @@ def main() -> None:
           f"train={n_train}/{n_train_all} val={len(y_val)} test={len(y_test)} "
           f"device={device.type}", flush=True)
 
-    def sub_fn(base_fn, subset):
-        return lambda idx: base_fn(subset[idx])
+    def plan_for(subset):
+        """Epoch batch plan over `subset`, in global indices.
+
+        The sequence path buckets by length so a batch is not padded out to its
+        longest member; the vector path has no padding to save, so it shuffles.
+        """
+        if seq:
+            return lambda rng: train_loader.batches(
+                args.batch_size, rng, bucketed=not args.no_bucket, subset=subset)
+        return lambda rng: [subset[o] for o in np.array_split(
+            rng.permutation(len(subset)),
+            max(1, int(np.ceil(len(subset) / args.batch_size))))]
+
+    def eval_plan(n):
+        return [np.arange(i, min(i + args.batch_size, n), dtype=np.int64)
+                for i in range(0, n, args.batch_size)]
+
+    val_plan = eval_plan(len(y_val))
+    test_plan = eval_plan(len(y_test))
 
     # ---- hyperparameter search, identical protocol for every cell ---------
     n_hp = min(args.hp_search_cap, n_train)
     hp_subset = train_subset[:n_hp]
-    hp_fn = sub_fn(train_fn, hp_subset)
+    hp_plan = plan_for(hp_subset)
     n_val = len(y_val)
     trials = []
     best_cfg, best_auroc = None, -1.0
@@ -349,10 +389,9 @@ def main() -> None:
             torch.manual_seed(args.seed)
             m = build_learner(args.learner, d, t_max=args.t_max,
                               dropout=args.dropout).to(device)
-            m, vloss = train_one(m, hp_fn, n_hp, n_val, val_fn, args.epochs,
-                                 args.batch_size, lr, wd, args.patience, device,
-                                 args.seed)
-            va = auroc_numpy(y_val, score_all(m, n_val, val_fn, args.batch_size))
+            m, vloss = train_one(m, train_fn, hp_plan, n_val, val_plan, val_fn,
+                                 args.epochs, lr, wd, args.patience, args.seed)
+            va = auroc_numpy(y_val, score_all(m, n_val, val_fn, val_plan))
             trials.append({"lr": lr, "weight_decay": wd, "val_loss": vloss,
                            "val_auroc": float(va)})
             print(f"[hp] lr={lr} wd={wd} val_loss={vloss:.4f} val_auroc={va:.4f}",
@@ -366,16 +405,16 @@ def main() -> None:
     model = build_learner(args.learner, d, t_max=args.t_max,
                           dropout=args.dropout).to(device)
     n_params = param_count(model)
-    model, _ = train_one(model, sub_fn(train_fn, train_subset), n_train, n_val, val_fn,
-                         args.epochs, args.batch_size, best_cfg["lr"],
-                         best_cfg["weight_decay"], args.patience, device, args.seed)
+    model, _ = train_one(model, train_fn, plan_for(train_subset), n_val, val_plan,
+                         val_fn, args.epochs, best_cfg["lr"],
+                         best_cfg["weight_decay"], args.patience, args.seed)
     print(f"[cell] refit on {n_train} rows with {best_cfg}, {n_params} params",
           flush=True)
 
     # ---- in-domain -------------------------------------------------------
-    val_scores = score_all(model, n_val, val_fn, args.batch_size)
+    val_scores = score_all(model, n_val, val_fn, val_plan)
     t_val, val_bacc, _ = select_threshold(val_scores, y_val, grid)
-    test_scores = score_all(model, len(y_test), test_fn, args.batch_size)
+    test_scores = score_all(model, len(y_test), test_fn, test_plan)
     test_auroc = auroc_numpy(y_test, test_scores)
     t_oracle, _, _ = select_threshold(test_scores, y_test, grid)
     in_domain = {
@@ -398,15 +437,16 @@ def main() -> None:
         if seq:
             view = ShardedRepSplit(sub_dir)
             handles, meta = build_handles(view)
-            fn = lambda idx: collate_seq(handles, idx, args.t_max, device)  # noqa: E731
-            scores = score_all(model, len(handles), fn, args.batch_size)
+            pb_loader = SpanLoader(handles, args.t_max, device, preload=True)
+            scores = score_all(model, len(handles), pb_loader.collate,
+                               eval_plan(len(handles)))
         else:
             Xpb, _, meta = load_vectors(args.pb_store, sub, args.rep,
                                         args.vec_cache_dir, sort=True,
                                         fingerprint=inputs[f"pb/{sub}"])
             ypb = np.zeros(Xpb.shape[0], dtype=np.int8)
             fn = lambda idx: collate_vec(Xpb, ypb, idx, device)  # noqa: E731
-            scores = score_all(model, Xpb.shape[0], fn, args.batch_size)
+            scores = score_all(model, Xpb.shape[0], fn, eval_plan(Xpb.shape[0]))
         rows, m_val = evaluate_processbench(scores, meta, t_val)
         best_f1, best_t = -1.0, grid[0]
         for t in grid:
@@ -440,6 +480,7 @@ def main() -> None:
         "hp": {"selected": best_cfg, "search_rows": int(n_hp), "trials": trials,
                "reused_from": str(args.hp_from) if args.hp_from else None},
         "protocol": {"epochs": args.epochs, "patience": args.patience,
+                     "bucketed": bool(seq and not args.no_bucket),
                      "batch_size": args.batch_size, "t_max": args.t_max,
                      "dropout": args.dropout,
                      "threshold_grid": args.threshold_grid},

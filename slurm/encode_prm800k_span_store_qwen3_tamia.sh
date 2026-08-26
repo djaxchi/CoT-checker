@@ -61,7 +61,7 @@ LOG_FILE="$LOG_DIR/spanstore_q3-${SLURM_JOB_ID:-$$}.log"
 
 # Fail at once, with a message, rather than 4 shards each hanging on a download
 # they cannot make.
-SNAP="$HF_CACHE/hub/models--$(echo "$MODEL_NAME_OR_PATH" | tr '/' '-')/snapshots"
+SNAP="$HF_CACHE/hub/models--$(echo "$MODEL_NAME_OR_PATH" | sed 's|/|--|g')/snapshots"
 if [[ ! -d "$SNAP" ]] || [[ -z "$(ls -A "$SNAP" 2>/dev/null)" ]]; then
   echo "[FATAL] no local snapshot for $MODEL_NAME_OR_PATH under $SNAP" >&2
   echo "        compute nodes have no internet; download on the login node:" >&2

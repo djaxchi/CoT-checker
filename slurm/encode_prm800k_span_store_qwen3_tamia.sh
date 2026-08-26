@@ -44,6 +44,12 @@ TEST_STEM="${TEST_STEM:-test_2k}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-2048}"
+# hidden_states index to store. HF returns len(layers)+1 states where
+# index i is the INPUT to block i, so resid_post_layer_N is index N+1.
+# Index -1 is special: it is post-final-RMSNorm, and no Qwen-Scope SAE
+# reconstructs it (measured FVU 224.65 against layer35). 35 is the last
+# genuine resid_post, block 34, and pairs with layer34.sae.pt.
+LAYER="${LAYER:-35}"
 LIMIT_PER_FILE="${LIMIT_PER_FILE:-0}"
 
 mkdir -p "$REP_ROOT" "$LOG_DIR"
@@ -85,6 +91,7 @@ job          : ${SLURM_JOB_NAME:-prm_spanstore_q3}  job_id: ${SLURM_JOB_ID:-N/A}
 git_commit   : $GIT_COMMIT
 model        : $MODEL_NAME_OR_PATH   (offline, HF_HOME=$HF_CACHE)
 rep_root     : $REP_ROOT   (span-only, no full-sequence intermediate)
+layer        : hidden_states[$LAYER]  (resid_post of block $((LAYER-1)))
 data_dir     : $DATA_DIR   (frozen splits, reused from the previous backbone)
 splits       : ${SPLITS[*]}
 shards       : $NUM_SHARDS on ${SLURM_GPUS_ON_NODE:-4} GPUs   batch: $BATCH_SIZE
@@ -112,7 +119,7 @@ for i in $(seq 0 $((NUM_SHARDS-1))); do
     --model_name_or_path "$MODEL_NAME_OR_PATH" \
     --local_files_only \
     --span_only \
-    --layer -1 --max_seq_len "$MAX_SEQ_LEN" \
+    --layer "$LAYER" --max_seq_len "$MAX_SEQ_LEN" \
     --batch_size "$BATCH_SIZE" \
     --model_dtype "${MODEL_DTYPE:-bfloat16}" \
     --shard_idx "$i" --num_shards "$NUM_SHARDS" \

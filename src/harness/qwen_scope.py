@@ -10,19 +10,27 @@ One file per layer, `layer{N}.sae.pt`, a plain state_dict:
     W_enc (d_sae, d_model)   b_enc (d_sae,)
     W_dec (d_model, d_sae)   b_dec (d_model,)
 
-TopK inference:
-    pre  = (h - b_dec) @ W_enc.T + b_enc
-    z    = pre with all but its k largest entries zeroed
+TopK inference, matching the reference `app.py` shipped in the SAE repo:
+    pre  = h @ W_enc.T + b_enc        (no b_dec subtraction)
+    z    = topk(relu(pre), k)         (ReLU first, then TopK)
     hhat = z @ W_dec.T + b_dec
 
-**Layer pairing is the thing to get right, and it is checkable.** HF's
-`output_hidden_states` gives len(layers)+1 entries: index 0 is the embedding and
-index i is the output of block i, so block N's resid_post is `hidden_states[N+1]`
-and pairs with `layer{N}.sae.pt`. The exception is the final entry, which HF
-returns *after* the model's final RMSNorm, so `hidden_states[-1]` is not the raw
-resid_post of the last block. Pair the wrong tensor with an SAE and reconstruction
-collapses, which is why `fvu` exists: a correct pairing reconstructs most of the
-variance, a wrong one leaves FVU near or above 1.
+Both details matter and neither is guessable. Subtracting b_dec before encoding
+(the convention several other SAE suites use, including the BatchTopK SAE already
+in this repo) and taking TopK of the raw pre-activation instead of its ReLU
+together give FVU ~5 on correctly-paired states, versus well under 1 when done
+their way.
+
+Their hook is `model.model.layers[N].register_forward_hook` capturing `out[0]`,
+i.e. the OUTPUT of block N. So `layer{N}.sae.pt` pairs with `hidden_states[N+1]`,
+and `layer34.sae.pt` pairs with a store encoded at `--layer 35`.
+
+**Layer pairing is checkable, and worth checking.** HF's `output_hidden_states`
+gives len(layers)+1 entries where index i is the *input* to block i, so block N's
+output is `hidden_states[N+1]`. The final entry is special: HF returns it after
+the model's final RMSNorm, so `hidden_states[-1]` is not a raw resid_post at all
+and no SAE reconstructs it (measured FVU 224.65). `fvu` is the gate: a correct
+pairing with a correct convention sits well below 1, anything else does not.
 """
 
 from __future__ import annotations
@@ -85,7 +93,7 @@ class TopKSAE:
 
     def encode(self, h: torch.Tensor) -> torch.Tensor:
         """(n, d_model) -> (n, d_sae) with exactly k non-zeros per row."""
-        pre = (h.to(self.device, self.dtype) - self.b_dec) @ self.W_enc.T + self.b_enc
+        pre = torch.relu(h.to(self.device, self.dtype) @ self.W_enc.T + self.b_enc)
         vals, idx = torch.topk(pre, self.k, dim=-1)
         z = torch.zeros_like(pre)
         z.scatter_(-1, idx, vals)
@@ -97,7 +105,7 @@ class TopKSAE:
         A dense 65,536-wide code is 128 KB per token at float16; the sparse form
         is what makes pooling over a corpus of steps tractable.
         """
-        pre = (h.to(self.device, self.dtype) - self.b_dec) @ self.W_enc.T + self.b_enc
+        pre = torch.relu(h.to(self.device, self.dtype) @ self.W_enc.T + self.b_enc)
         vals, idx = torch.topk(pre, self.k, dim=-1)
         return vals, idx
 

@@ -163,3 +163,33 @@ def test_unique_problems_still_defaults_to_fork_id():
     from scripts.generate_onpolicy_steps import unique_problems
     rows = [{"fork_id": "f1", "problem": "A", "ground_truth_answer": "1"}]
     assert [g["fork_id"] for g in unique_problems(rows)] == ["f1"]
+
+
+def test_every_model_dtype_choice_actually_resolves():
+    """Job 430438 died with KeyError 'bfloat16' after 38s: the CLI accepted the
+    choice but the lookup table behind it had not been widened to match. Pin the
+    two together so widening one without the other fails here, not on a node."""
+    import ast
+    import torch
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "scripts" / "generate_onpolicy_steps.py"
+    tree = ast.parse(src.read_text())
+
+    choices = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "add_argument"
+                and node.args and getattr(node.args[0], "value", "") == "--model_dtype"):
+            choices = next(ast.literal_eval(k.value) for k in node.keywords
+                           if k.arg == "choices")
+    assert choices, "--model_dtype not found"
+
+    mapped = None
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "dtype_map"):
+            # values are torch.<dtype> attributes, so only the keys are literals
+            mapped = {ast.literal_eval(k) for k in node.value.keys}
+    assert mapped is not None, "dtype_map not found"
+    assert set(choices) == mapped, f"CLI offers {sorted(choices)}, map has {sorted(mapped)}"
+    for name in choices:
+        assert hasattr(torch, name), name

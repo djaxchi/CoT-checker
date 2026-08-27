@@ -186,7 +186,8 @@ def main() -> None:
     print(f"[gen] {len(problems)} problems x {args.n_samples} samples "
           f"(T={args.temperature})", flush=True)
 
-    dtype_map = {"float16": torch.float16, "float32": torch.float32}
+    dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16,
+                 "float32": torch.float32}
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path, local_files_only=args.local_files_only)

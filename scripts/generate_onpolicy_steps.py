@@ -180,7 +180,7 @@ def main() -> None:
         sys.exit(f"[gen] Refusing to overwrite {items_path}. Pass --force.")
 
     torch.manual_seed(args.seed)
-    problems = unique_problems(read_jsonl(args.fork_items))
+    problems = unique_problems(read_jsonl(args.fork_items), args.id_field)
     if args.max_problems > 0:
         problems = problems[:args.max_problems]
     print(f"[gen] {len(problems)} problems x {args.n_samples} samples "

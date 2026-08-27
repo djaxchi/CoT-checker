@@ -1,5 +1,6 @@
 """Unit tests for the Stage 1 on-policy generation + analysis helpers."""
 
+import json
 import importlib.util
 from pathlib import Path
 
@@ -193,3 +194,41 @@ def test_every_model_dtype_choice_actually_resolves():
     assert set(choices) == mapped, f"CLI offers {sorted(choices)}, map has {sorted(mapped)}"
     for name in choices:
         assert hasattr(torch, name), name
+
+
+def test_cli_passes_id_field_through_to_the_helper(tmp_path, monkeypatch):
+    """Two jobs died because a flag was added to argparse and to a helper, but the
+    call site kept the default: --model_dtype bfloat16 (KeyError) and then
+    --id_field problem_id (0 problems, 53s of wasted allocation).
+
+    Record what the CLI actually hands the helper, so a flag that is accepted and
+    then ignored fails here instead of on a node."""
+    import sys as _sys
+    import scripts.generate_onpolicy_steps as g
+
+    src = tmp_path / "prm.jsonl"
+    src.write_text("\n".join(json.dumps({
+        "problem_id": f"p{i}", "problem": f"Problem {i}",
+        "ground_truth_answer": str(i), "step_idx": 0,
+    }) for i in range(3)))
+
+    seen = {}
+    real = g.unique_problems
+
+    def spy(rows, id_field="fork_id"):
+        seen["id_field"] = id_field
+        seen["problems"] = real(rows, id_field)
+        raise SystemExit(0)          # stop before any model is touched
+
+    monkeypatch.setattr(g, "unique_problems", spy)
+    monkeypatch.setattr(_sys, "argv", [
+        "prog", "--fork_items", str(src), "--id_field", "problem_id",
+        "--out_dir", str(tmp_path / "out"), "--stem", "t",
+        "--model_name_or_path", "stub", "--run_name", "t",
+        "--model_dtype", "bfloat16", "--force",
+    ])
+    with pytest.raises(SystemExit):
+        g.main()
+
+    assert seen["id_field"] == "problem_id", "CLI --id_field never reached the helper"
+    assert [q["fork_id"] for q in seen["problems"]] == ["p0", "p1", "p2"]

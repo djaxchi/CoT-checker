@@ -33,3 +33,10 @@ sae_stats linear
 sae_stats mlp:h1024
 sae_boundary_stats linear
 sae_boundary_stats mlp:h1024
+
+# The sequence twin. Read by sparse-input learners: a padded (B, T, 65536) batch
+# would be 4.3 GB against ~47 KB of real data, so they consume the sparse form
+# directly. Reading only the 50 active features per token also makes the input
+# projection cheaper than the dense one, not merely smaller.
+sae_tokens attn_query
+sae_tokens transformer:d256,l2,f1024,h4

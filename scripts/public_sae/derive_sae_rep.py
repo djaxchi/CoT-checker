@@ -13,6 +13,7 @@ Two readouts, deliberately mirroring two dense ones so the contrast is clean:
     sae_delta           code(last) - code(pre-step boundary)     <-> step_delta
     sae_stats           concat[mean, max, min, std, last]        <-> step_stats
     sae_boundary_stats  boundary code prepended to sae_stats     <-> boundary_stats
+    sae_tokens          the per-token codes, unreduced          <-> step_tokens
 
 Every dense vector representation in the grid has a sparse twin, so the sparsity
 question can be asked of the whole leaderboard rather than of two rows.
@@ -47,14 +48,24 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from src.harness.qwen_scope import TopKSAE, find_snapshot  # noqa: E402
-from src.harness.sparse_vec import write_csr  # noqa: E402
+from src.harness.sparse_vec import write_csr, write_token_csr  # noqa: E402
 from src.repstore.store import RepSplit  # noqa: E402
 
 READOUTS = ("sae_last", "sae_mean", "sae_delta", "sae_stats",
-            "sae_boundary_stats")
+            "sae_boundary_stats", "sae_tokens")
 # multiplier on d_sae for each readout's output width
 WIDTH = {"sae_last": 1, "sae_mean": 1, "sae_delta": 1,
-         "sae_stats": 5, "sae_boundary_stats": 6}
+         "sae_stats": 5, "sae_boundary_stats": 6, "sae_tokens": 1}
+
+
+def token_codes(sae: TopKSAE, span: torch.Tensor):
+    """[(indices, values)] per token, unreduced, for the sequence learners."""
+    codes = sae.encode(span)
+    out = []
+    for t in range(codes.shape[0]):
+        nz = torch.nonzero(codes[t], as_tuple=True)[0]
+        out.append((nz.cpu().numpy(), codes[t][nz].cpu().numpy()))
+    return out
 
 
 def _cat_sparse(parts: list[torch.Tensor], d: int):
@@ -116,8 +127,10 @@ def derive_split(split_dir: Path, sae: TopKSAE, readout: str, device, batch: int
             bi = int(rs.offsets[k]) + int(m["pre_step_boundary_idx"])
             boundary = torch.from_numpy(
                 np.asarray(rs.h[bi:bi + 1], dtype=np.float32)).to(device)
-            idx, val = pooled_codes(sae, span, boundary, readout)
-            rows.append((idx, val))
+            if readout == "sae_tokens":
+                rows.append(token_codes(sae, span))
+            else:
+                rows.append(pooled_codes(sae, span, boundary, readout))
             labels.append(int(rs.y[k]))
             gi.append(int(m["global_index"]))
             if sort:
@@ -174,22 +187,26 @@ def main() -> None:
         print(f"[derive] {args.readout} :: {stem}", flush=True)
         rows, y, metas = derive_split(args.store_root / stem, sae, args.readout,
                                       device, args.batch, sort=(args.mode == "pb"))
+        writer = write_token_csr if args.readout == "sae_tokens" else write_csr
+        width = sae.d_sae * WIDTH[args.readout]
         if args.mode == "prm":
-            out = args.out_dir / f"{args.readout}__{stem}.npz"
-            s = write_csr(out, rows, y, sae.d_sae * WIDTH[args.readout])
+            s = writer(args.out_dir / f"{args.readout}__{stem}.npz", rows, y, width)
         else:
             sub = args.out_dir / stem
             sub.mkdir(parents=True, exist_ok=True)
-            s = write_csr(sub / f"{args.readout}.npz", rows, y,
-                          sae.d_sae * WIDTH[args.readout])
+            s = writer(sub / f"{args.readout}.npz", rows, y, width)
             with (sub / f"{args.readout}_meta.jsonl").open("w") as f:
                 for m in metas:
                     f.write(json.dumps(m) + "\n")
         stats["splits"][stem] = s
-        print(f"  {s['items']:,} items  mean nnz {s['mean_nnz']:.1f} "
-              f"({100*s['density']:.3f}% of {sae.d_sae*WIDTH[args.readout]:,})  "
-              f"{s['bytes']/1e9:.2f} GB",
-              flush=True)
+        if args.readout == "sae_tokens":
+            print(f"  {s['items']:,} steps  {s['tokens']:,} tokens  "
+                  f"mean {s['mean_tokens']:.1f} tok/step, {s['mean_nnz']:.1f} nnz/tok  "
+                  f"{s['bytes']/1e9:.2f} GB", flush=True)
+        else:
+            print(f"  {s['items']:,} items  mean nnz {s['mean_nnz']:.1f} "
+                  f"({100*s['density']:.3f}% of {width:,})  {s['bytes']/1e9:.2f} GB",
+                  flush=True)
 
     (args.out_dir / f"{args.readout}_manifest.json").write_text(json.dumps(stats, indent=2))
     print(f"[derive] wrote {args.out_dir}/{args.readout}_manifest.json")

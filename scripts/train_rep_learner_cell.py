@@ -60,9 +60,11 @@ from scripts.train_easy_probe_method import (  # noqa: E402
     auroc_numpy, evaluate_processbench, resolve_threshold_grid,
     select_threshold, step_binary_metrics,
 )
-from src.harness.learners import build_learner, is_sequence, param_count  # noqa: E402
+from src.harness.learners import (  # noqa: E402
+    build_learner, build_sparse_learner, is_sequence, param_count,
+)
 from src.harness.spanloader import SpanLoader  # noqa: E402
-from src.harness.sparse_vec import SparseVecSplit  # noqa: E402
+from src.harness.sparse_vec import SparseTokenSplit, SparseVecSplit  # noqa: E402
 from src.repstore import split_fingerprint  # noqa: E402
 from src.repstore.store import ShardedRepSplit  # noqa: E402
 
@@ -80,12 +82,14 @@ REP_READOUT = {
 #   sae_last <-> last_token        sae_mean <-> step_mean
 #   sae_delta <-> step_delta       sae_stats <-> step_stats
 #   sae_boundary_stats <-> boundary_stats
+#   sae_tokens <-> step_tokens     (read by the sparse sequence learners)
 # Derived offline by scripts/public_sae/derive_sae_rep.py (the SAE is a matmul
 # over states already in the store) and stored CSR, since a pooled 65,536-wide
 # code stays sparse and densifying it would cost 67 GB for the train split.
 REP_SPARSE = ("sae_last", "sae_mean", "sae_delta", "sae_stats",
               "sae_boundary_stats")
-REPS = tuple(REP_READOUT) + REP_SPARSE + ("step_tokens",)
+REP_SPARSE_SEQ = "sae_tokens"
+REPS = tuple(REP_READOUT) + REP_SPARSE + (REP_SPARSE_SEQ, "step_tokens")
 
 
 # ---------------------------------------------------------------------------
@@ -288,10 +292,14 @@ def main() -> None:
 
     seq = is_sequence(args.learner)
     sparse = args.rep in REP_SPARSE
+    sparse_seq = args.rep == REP_SPARSE_SEQ
     if sparse and seq:
         raise SystemExit(f"{args.rep} is a fixed vector; use a vector learner")
-    if seq and args.rep != "step_tokens":
-        raise SystemExit(f"learner {args.learner!r} reads sequences; rep must be step_tokens")
+    if sparse_seq and not seq:
+        raise SystemExit(f"{args.rep} is a token sequence; use a sequence learner")
+    if seq and args.rep not in ("step_tokens", REP_SPARSE_SEQ):
+        raise SystemExit(f"learner {args.learner!r} reads sequences; rep must be "
+                         f"step_tokens or {REP_SPARSE_SEQ}")
     if not seq and args.rep == "step_tokens":
         raise SystemExit(
             f"rep 'step_tokens' is a sequence; use a sequence learner, or the "
@@ -316,7 +324,23 @@ def main() -> None:
         print(f"[input] {k:28s} {v}", flush=True)
 
     # ---- load the three PRM800K splits in the shape this learner needs -----
-    if seq:
+    if sparse_seq:
+        if args.sae_dir is None:
+            raise SystemExit(f"--sae_dir is required for {args.rep}")
+        def _tok(stem):
+            f = args.sae_dir / f"{args.rep}__{stem}.npz"
+            if not f.exists():
+                raise SystemExit(f"missing {f}; run the SAE derive for this split")
+            return SparseTokenSplit(f, t_max=args.t_max, device=device)
+        tr, va, te = _tok(args.train_stem), _tok(args.val_stem), _tok(args.test_stem)
+        d = tr.d
+        y_train, y_val, y_test = (tr.y.astype(np.int8), va.y.astype(np.int8),
+                                  te.y.astype(np.int8))
+        train_fn, val_fn, test_fn = tr.collate, va.collate, te.collate
+        n_train_all = len(tr)
+        print(f"[sae-seq] {args.rep} d={d} mean tokens/step "
+              f"{tr.lengths.mean():.1f}", flush=True)
+    elif seq:
         train_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.train_stem))
         val_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.val_stem))
         test_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.test_stem))
@@ -384,6 +408,17 @@ def main() -> None:
         The sequence path buckets by length so a batch is not padded out to its
         longest member; the vector path has no padding to save, so it shuffles.
         """
+        if sparse_seq:
+            lens = tr.lengths
+            def plan(rng, subset=subset, lens=lens):
+                if args.no_bucket:
+                    o = rng.permutation(len(subset))
+                    return [subset[o[i:i + args.batch_size]]
+                            for i in range(0, len(subset), args.batch_size)]
+                from src.harness.spanloader import length_bucketed_batches
+                return [subset[b] for b in
+                        length_bucketed_batches(lens[subset], args.batch_size, rng)]
+            return plan
         if seq:
             return lambda rng: train_loader.batches(
                 args.batch_size, rng, bucketed=not args.no_bucket, subset=subset)
@@ -421,8 +456,8 @@ def main() -> None:
     for lr in ([] if best_cfg is not None else args.lr_grid):
         for wd in args.wd_grid:
             torch.manual_seed(args.seed)
-            m = build_learner(args.learner, d, t_max=args.t_max,
-                              dropout=args.dropout).to(device)
+            mk = build_sparse_learner if sparse_seq else build_learner
+            m = mk(args.learner, d, t_max=args.t_max, dropout=args.dropout).to(device)
             m, vloss = train_one(m, train_fn, hp_plan, n_val, val_plan, val_fn,
                                  args.epochs, lr, wd, args.patience, args.seed)
             va = auroc_numpy(y_val, score_all(m, n_val, val_fn, val_plan))
@@ -436,8 +471,8 @@ def main() -> None:
 
     # ---- refit the winner on the full training rows ----------------------
     torch.manual_seed(args.seed)
-    model = build_learner(args.learner, d, t_max=args.t_max,
-                          dropout=args.dropout).to(device)
+    mk = build_sparse_learner if sparse_seq else build_learner
+    model = mk(args.learner, d, t_max=args.t_max, dropout=args.dropout).to(device)
     n_params = param_count(model)
     model, _ = train_one(model, train_fn, plan_for(train_subset), n_val, val_plan,
                          val_fn, args.epochs, best_cfg["lr"],
@@ -474,6 +509,15 @@ def main() -> None:
             pb_loader = SpanLoader(handles, args.t_max, device, preload=True)
             scores = score_all(model, len(handles), pb_loader.collate,
                                eval_plan(len(handles)))
+        elif sparse_seq:
+            f = args.sae_dir / sub / f"{args.rep}.npz"
+            mf = args.sae_dir / sub / f"{args.rep}_meta.jsonl"
+            if not f.exists():
+                print(f"[pb] skip {sub}: {f} missing", flush=True)
+                continue
+            sp = SparseTokenSplit(f, t_max=args.t_max, device=device)
+            meta = [json.loads(l) for l in mf.read_text().splitlines() if l.strip()]
+            scores = score_all(model, len(sp), sp.collate, eval_plan(len(sp)))
         elif sparse:
             f = args.sae_dir / sub / f"{args.rep}.npz"
             mf = args.sae_dir / sub / f"{args.rep}_meta.jsonl"

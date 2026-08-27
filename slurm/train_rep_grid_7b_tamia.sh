@@ -48,6 +48,14 @@ EPOCHS="${EPOCHS:-30}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 HP_SEARCH_CAP="${HP_SEARCH_CAP:-100000}"
 N_GPUS="${N_GPUS:-4}"
+# Span preloading is a PER-PROCESS budget, but N_GPUS cells run concurrently on
+# one node. Job 429667 died OOM because each of 4 cells independently decided
+# 163.4 GB fitted in a 300 GB budget: 4 x 163.4 = 654 GB on a node with less
+# than that free. Derive the per-cell budget from the node's actual memory
+# divided by the concurrency, so the decision is made with the right denominator.
+MEM_KB="$(awk "/MemTotal/ {print \$2}" /proc/meminfo 2>/dev/null || echo 0)"
+PRELOAD_BUDGET_GB="${PRELOAD_BUDGET_GB:-$(awk -v m="$MEM_KB" -v n="$N_GPUS" \
+  "BEGIN{printf \"%.0f\", (m/1048576)*0.60/n}")}"
 CELLS_FILE="${CELLS_FILE:-}"
 CELLS="${CELLS:-}"
 
@@ -84,6 +92,7 @@ prm_store   : $PRM_STORE
 pb_store    : $PB_STORE
 out_root    : $OUT_ROOT
 cells       : ${#PAIRS[@]}  seeds: $SEEDS  gpus: $N_GPUS
+preload cap : ${PRELOAD_BUDGET_GB} GB per cell (node mem / $N_GPUS x 0.60)
 train_stem  : $TRAIN_STEM (no cap: the full split)
 ================================================================
 BANNER
@@ -145,7 +154,8 @@ run_cell() {  # rep learner seed gpu [extra args...]
     --out_dir "$out" --vec_cache_dir "$VEC_CACHE" \
     --train_stem "$TRAIN_STEM" --seed "$seed" \
     --epochs "$EPOCHS" --batch_size "$BATCH_SIZE" \
-    --hp_search_cap "$HP_SEARCH_CAP" "$@" \
+    --hp_search_cap "$HP_SEARCH_CAP" \
+    --preload_budget_gb "$PRELOAD_BUDGET_GB" "$@" \
     > "$OUT_ROOT/${tag}.log" 2>&1 &
   PIDS+=("$!"); PID_TAGS+=("$tag")
 }

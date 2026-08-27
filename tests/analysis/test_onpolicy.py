@@ -142,3 +142,24 @@ def test_f1_helpers_handle_degenerate_single_class():
     label = np.array([0, 0, 0])
     f1, thr, p, r = ana.oracle_f1(score, label)
     assert np.isnan(f1)
+
+
+def test_unique_problems_reads_a_prm800k_split_by_problem_id():
+    """The on-policy arm draws its problems from the same PRM800K splits the
+    off-policy grid was scored on, which group by problem_id, not fork_id."""
+    from scripts.generate_onpolicy_steps import unique_problems
+    rows = [
+        {"problem_id": "p1", "problem": "A", "ground_truth_answer": "1", "step_idx": 0},
+        {"problem_id": "p1", "problem": "A", "ground_truth_answer": "1", "step_idx": 1},
+        {"problem_id": "p2", "problem": "B", "ground_truth_answer": "2", "step_idx": 0},
+        {"problem_id": "p3", "problem": "C", "ground_truth_answer": "",  "step_idx": 0},
+    ]
+    got = unique_problems(rows, id_field="problem_id")
+    assert [g["fork_id"] for g in got] == ["p1", "p2"]      # deduped, gold-less dropped
+    assert got[0]["problem"] == "A" and got[0]["ground_truth_answer"] == "1"
+
+
+def test_unique_problems_still_defaults_to_fork_id():
+    from scripts.generate_onpolicy_steps import unique_problems
+    rows = [{"fork_id": "f1", "problem": "A", "ground_truth_answer": "1"}]
+    assert [g["fork_id"] for g in unique_problems(rows)] == ["f1"]

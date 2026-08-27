@@ -57,15 +57,20 @@ def split_into_steps(solution: str) -> list[str]:
     return parts
 
 
-def unique_problems(fork_items: list[dict]) -> list[dict]:
-    """One (problem, ground_truth_answer) per fork_id, gold answer present."""
+def unique_problems(fork_items: list[dict], id_field: str = "fork_id") -> list[dict]:
+    """One (problem, ground_truth_answer) per group id, gold answer present.
+
+    `id_field` lets this read any per-step jsonl, not only the S3 fork set: the
+    PRM800K splits group by `problem_id`, which is what the on-policy arm draws
+    from so its problems are the ones the off-policy grid was scored on.
+    """
     seen: dict[str, dict] = {}
     for it in fork_items:
-        fid = it.get("fork_id")
+        fid = it.get(id_field)
         gt = (it.get("ground_truth_answer") or "").strip()
         if fid is None or not gt or fid in seen:
             continue
-        seen[fid] = {"fork_id": fid, "problem": it["problem"],
+        seen[fid] = {"fork_id": str(fid), "problem": it["problem"],
                      "ground_truth_answer": gt}
     return list(seen.values())
 
@@ -145,7 +150,11 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Generate + grade on-policy reasoning steps.")
-    p.add_argument("--fork_items", type=Path, required=True)
+    p.add_argument("--fork_items", type=Path, required=True,
+                   help="Per-step jsonl to draw problems from (S3 forks, or a "
+                        "PRM800K split with --id_field problem_id).")
+    p.add_argument("--id_field", type=str, default="fork_id",
+                   help="Field that groups rows into problems.")
     p.add_argument("--out_dir", type=Path, required=True)
     p.add_argument("--stem", type=str, default="onpolicy_val")
     p.add_argument("--model_name_or_path", type=str, required=True)
@@ -157,7 +166,9 @@ def main() -> None:
     p.add_argument("--max_new_tokens", type=int, default=1024)
     p.add_argument("--max_problems", type=int, default=300)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--model_dtype", choices=["float16", "float32"], default="float16")
+    p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
+                   default="float16",
+                   help="Use the backbone's training dtype; Qwen3 ships bfloat16.")
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
 

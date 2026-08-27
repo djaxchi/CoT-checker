@@ -1,0 +1,18 @@
+# Sparse SAE codes as a representation, mirroring two dense readouts so the
+# sparsity question is a controlled contrast:
+#
+#   sae_last  <-> last_token    the step's final token, raw state vs sparse code
+#   sae_mean  <-> step_mean     mean over the step's tokens, likewise
+#
+# Same layer, same activations, same trainer, same hyperparameter protocol.
+# Qwen-Scope TopK, 65,536 features, k=50, reconstruction FVU 0.336 at this layer.
+#
+# The prediction is that these LOSE. The SAE discards a third of the variance,
+# and section 15 found step correctness to be a distributed low-variance margin,
+# which is exactly what a dictionary trained for reconstruction has no reason to
+# keep. A clean loss is informative; a win would be more so.
+
+sae_last linear
+sae_last mlp:h1024
+sae_mean linear
+sae_mean mlp:h1024

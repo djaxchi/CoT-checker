@@ -62,6 +62,7 @@ from scripts.train_easy_probe_method import (  # noqa: E402
 )
 from src.harness.learners import build_learner, is_sequence, param_count  # noqa: E402
 from src.harness.spanloader import SpanLoader  # noqa: E402
+from src.harness.sparse_vec import SparseVecSplit  # noqa: E402
 from src.repstore import split_fingerprint  # noqa: E402
 from src.repstore.store import ShardedRepSplit  # noqa: E402
 
@@ -74,7 +75,14 @@ REP_READOUT = {
     "step_stats": "multistat",
     "boundary_stats": "boundary_stats",
 }
-REPS = tuple(REP_READOUT) + ("step_tokens",)
+# Sparse SAE codes of the same states, mirroring two dense readouts so the
+# sparsity question is a controlled contrast rather than a separate study:
+#   sae_last <-> last_token       sae_mean <-> step_mean
+# Derived offline by scripts/public_sae/derive_sae_rep.py (the SAE is a matmul
+# over states already in the store) and stored CSR, since a pooled 65,536-wide
+# code stays sparse and densifying it would cost 67 GB for the train split.
+REP_SPARSE = ("sae_last", "sae_mean")
+REPS = tuple(REP_READOUT) + REP_SPARSE + ("step_tokens",)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +237,9 @@ def main() -> None:
                    help="Step-span store rep dir, e.g. <repstore>/step_spans")
     p.add_argument("--pb_store", required=True, type=Path)
     p.add_argument("--out_dir", required=True, type=Path)
+    p.add_argument("--sae_dir", type=Path, default=None,
+                   help="Directory of derived sparse SAE codes (CSR .npz), for "
+                        "the sae_* representations.")
     p.add_argument("--vec_cache_dir", type=Path, default=None,
                    help="Where derived fixed-vector representations are cached.")
     p.add_argument("--train_stem", default="probe_train_full")
@@ -273,6 +284,9 @@ def main() -> None:
     args = p.parse_args()
 
     seq = is_sequence(args.learner)
+    sparse = args.rep in REP_SPARSE
+    if sparse and seq:
+        raise SystemExit(f"{args.rep} is a fixed vector; use a vector learner")
     if seq and args.rep != "step_tokens":
         raise SystemExit(f"learner {args.learner!r} reads sequences; rep must be step_tokens")
     if not seq and args.rep == "step_tokens":
@@ -320,6 +334,23 @@ def main() -> None:
         train_fn, val_fn, test_fn = (train_loader.collate, val_loader.collate,
                                      test_loader.collate)
         n_train_all = len(train_h)
+    elif sparse:
+        if args.sae_dir is None:
+            raise SystemExit(f"--sae_dir is required for {args.rep}; derive it "
+                             f"first with scripts/public_sae/derive_sae_rep.py")
+        def _load(stem):
+            f = args.sae_dir / f"{args.rep}__{stem}.npz"
+            if not f.exists():
+                raise SystemExit(f"missing {f}; run the SAE derive for this split")
+            return SparseVecSplit(f, device)
+        tr, va, te = (_load(args.train_stem), _load(args.val_stem), _load(args.test_stem))
+        d = tr.d
+        y_train, y_val, y_test = (tr.y.astype(np.int8), va.y.astype(np.int8),
+                                  te.y.astype(np.int8))
+        train_fn, val_fn, test_fn = tr.collate, va.collate, te.collate
+        n_train_all = len(tr)
+        print(f"[sae] {args.rep} d={d} mean nnz {tr.mean_nnz:.1f} "
+              f"({100*tr.mean_nnz/d:.3f}% dense)", flush=True)
     else:
         Xtr, y_train, _ = load_vectors(args.prm_store, args.train_stem, args.rep,
                                        args.vec_cache_dir, sort=False,
@@ -440,6 +471,15 @@ def main() -> None:
             pb_loader = SpanLoader(handles, args.t_max, device, preload=True)
             scores = score_all(model, len(handles), pb_loader.collate,
                                eval_plan(len(handles)))
+        elif sparse:
+            f = args.sae_dir / sub / f"{args.rep}.npz"
+            mf = args.sae_dir / sub / f"{args.rep}_meta.jsonl"
+            if not f.exists():
+                print(f"[pb] skip {sub}: {f} missing", flush=True)
+                continue
+            sp = SparseVecSplit(f, device)
+            meta = [json.loads(l) for l in mf.read_text().splitlines() if l.strip()]
+            scores = score_all(model, len(sp), sp.collate, eval_plan(len(sp)))
         else:
             Xpb, _, meta = load_vectors(args.pb_store, sub, args.rep,
                                         args.vec_cache_dir, sort=True,

@@ -1,211 +1,257 @@
-# Unified Harness 7B: Representation Leaderboard
+# Representation x Learner Leaderboard
 
-Backbone **Qwen2.5-7B base**. Every representation is trained on the same frozen
-PRM800K split, evaluated in-domain on a held-out balanced PRM800K test, then
-transferred to all four ProcessBench subsets. Only the representation and the
-learner vary. See `data_setup.md` for splits, sizes, and metrics.
+Which part of a reasoning step's activations carries its correctness, and how much
+of the answer is the detector rather than the representation?
 
-Deployable OOD headline is **F1_PB @ calib-20**: the first-error threshold is
-calibrated on 20 held-out ProcessBench traces per subset (stratified), applied to
-the rest, mean over 20 splits. `val-selected` (t~0.5) and `oracle` (peeks at the
-full test) are recorded in the run artifacts for context.
+Every row is a **pair**: a representation (which rows of the forward pass survive
+into the vector the learner sees) and a learner (what reads it). Everything else
+is pinned. Two neighbouring cells differ in exactly one coordinate, which is what
+the earlier version of this file could not claim.
 
-## Naming
+Two runs are recorded, on different backbones:
 
-Rows are named for **what the representation is**, never for the paper that
-happens to use it. The representation (what vector the learner sees) and the
-learner (what reads it) are separate axes, and two rows can share a
-representation while differing in learner. Where a row reproduces a published
-system, that is noted in the description and in `related_work.md`, but it does
-not name the row.
-
-Run directories and score files on disk still carry the original short keys, so
-this table is the mapping:
-
-| row | representation | learner | artifact key |
-|---|---|---|---|
-| `step_tokens` x transformer | all step token states | 2-layer transformer | `reprobe` |
-| `step_tokens` x attn-query | all step token states | learned attention query | `attn_pool` |
-| `step_stats` x linear | 5-statistic pool of step tokens | linear | `multistat` |
-| `last_token` x linear | final token state | linear | `dense_last` |
-| `step_delta` x linear | S_t minus S_{t-1} | linear | `delta` |
-| `boundary_stats` x linear | pre-step boundary ++ step_stats | linear | `boundary_stats` |
-| readout ensemble (3) | mean of the three best readouts | none (post-hoc) | `ens3` |
-
-## Representations: what is fed, and what is probed
-
-Every entry reads from the same frozen Qwen2.5-7B base last-layer states. They
-differ only in how a step's tokens are turned into the vector the learner sees;
-the label being probed is always the step's binary correctness (0 correct,
-1 incorrect).
-
-- **step_tokens**: the raw *set* of all last-layer token states of the step
-  (variable length, capped at 128 tokens). No pooling is applied, so the learner
-  sees the sequence and decides what to read. Two learners sit on it:
-  - *transformer*: a small (~2.5M-param) sequence model (project 3584 to 256,
-    learned positions, 2 encoder layers, masked mean-pool, linear head). This is
-    the maximal learner on this axis and asks how much of the OOD gap is detector
-    capacity rather than representation. It also reproduces ReProbe (Ni et al.,
-    2025), restricted to the last-layer subset we store.
-  - *attn-query*: a single learned attention query that softmax-weights the tokens
-    into one 3584-dim vector, then a linear head. Asks whether learning *which*
-    tokens to read beats a fixed pooling rule, at a fraction of the capacity.
-- **step_stats**: a fixed 5-statistic summary of all of a step's last-layer token
-  states, concat[mean, max, min, std, last-token], giving 5 x 3584 = 17,920 dims,
-  read by a single linear probe. Asks whether step correctness is linearly
-  readable from a permutation-invariant summary of the whole step rather than from
-  its final token alone.
-- **last_token**: a single 3584-dim vector, the last-layer state at the step's
-  last token, read by a linear probe. This is the point-readout baseline every
-  other representation is measured against.
-- **step_delta**: the 3584-dim transition vector S_t minus S_{t-1}, i.e. the state
-  at the step's last token minus the state at the pre-step boundary token, read by
-  a linear probe. Asks whether the *change* a step makes to the residual stream
-  carries the correctness signal, rather than the absolute state it lands in.
-- **boundary_stats**: `step_stats` with the pre-step boundary state prepended as
-  its own vector, concat[S_{t-1}, mean, max, min, std, last], 6 x 3584 = 21,504
-  dims, linear probe. Every state here is already causally contextualized by the
-  question and prior steps, so this adds no information; it adds *linear
-  accessibility*, letting the probe weigh the step against where the step
-  started. It is strictly more expressive than `step_delta`, which forces the
-  subtraction S_t - S_{t-1} and discards the absolute level (a linear map on
-  `boundary_stats` reproduces `step_delta`; asserted in
-  `tests/repstore/test_derive_delta.py`). Motivated by the lookahead ceiling test,
-  where the same anchor lifted a mean-pool by up to +0.162 AUROC.
-- **readout ensemble (3)**: not a new representation. The unweighted mean of the
-  predicted probabilities of the three best readouts above (`step_tokens` x
-  transformer, `step_tokens` x attn-query, `step_stats` x linear), computed
-  post-hoc from the saved per-step scores. It bounds how much of each readout's
-  error is idiosyncratic rather than shared. Note the members are *not*
-  independent: all three read the same frozen last-layer token states, so this is
-  diversity in the readout, not in the representation.
-
-## In-domain: PRM800K test (balanced, 2,000 steps)
-
-| representation | learner | AUROC | macro-F1 (val) | macro-F1 (oracle) |
+| run | backbone | layer read | dim | cells |
 |---|---|---|---|---|
-| step_tokens | transformer | **0.874** | 0.790 | n/a |
-| step_stats | linear | 0.866 | 0.783 | 0.788 |
-| boundary_stats | linear | 0.861 | 0.784 | 0.785 |
-| step_tokens | attn-query | 0.860 | 0.778 | n/a |
-| last_token | linear | 0.828 | 0.754 | 0.760 |
-| step_delta | linear | 0.817 | 0.740 | 0.743 |
-| readout ensemble (3) | n/a | not computed | | |
+| **v1** | Qwen2.5-7B base | `hidden_states[-1]`, post-final-RMSNorm | 3,584 | 57 |
+| **v2** | Qwen3-8B-Base | `hidden_states[35]` = `resid_post` of block 34 | 4,096 | 57 |
 
-(The ensemble's in-domain number is missing because only aggregate in-domain
-metrics were retained per row, not per-step in-domain scores. It needs one rerun
-that saves in-domain scores to fill in.)
+Both train on the same frozen problem-disjoint PRM800K split (513,810 / 5,000 /
+2,000), transfer to all four ProcessBench subsets, and use one trainer, one
+hyperparameter protocol, and three seeds per cell. v2 reads a genuine `resid_post`
+rather than the post-norm final state because that is what the public Qwen-Scope
+SAEs are trained on, so one store carries both the dense representations and the
+forthcoming SAE cell at the same layer.
 
-## Out-of-domain: ProcessBench first-error F1_PB @ calib-20
+---
 
-| representation x learner | gsm8k | math | olympiadbench | omnimath | **avg (4)** |
-|---|---|---|---|---|---|
-| **readout ensemble (3)** | 0.591 | 0.553 | 0.500 | 0.484 | **0.532** |
-| **step_tokens x transformer** | 0.568 | 0.558 | 0.492 | 0.469 | **0.522** |
-| **step_tokens x attn-query** | 0.495 | 0.533 | 0.486 | 0.486 | **0.500** |
-| **step_stats x linear** | 0.544 | 0.473 | 0.445 | 0.477 | **0.485** |
-| **boundary_stats x linear** | 0.476 | 0.485 | 0.448 | 0.418 | **0.457** |
-| **last_token x linear** | 0.459 | 0.414 | 0.347 | 0.357 | **0.394** |
-| **step_delta x linear** | 0.345 | 0.409 | 0.344 | 0.346 | **0.361** |
+## The headline: the ranking survives a change of backbone
 
-(calib-20 std ~0.03 to 0.08 per subset; calib-20 recovers 85 to 95% of per-subset
-oracle for every row. Per-subset oracle for `last_token`: gsm8k 0.501, math 0.472,
-olympiadbench 0.391, omnimath 0.395. For the ensemble: 0.628 / 0.597 / 0.558 /
-0.532, avg 0.579, with calib-20 recovering 94.2 / 92.7 / 89.7 / 90.9% of it.)
+The point of a controlled grid is that its ordering should be a property of the
+representations, not of the model it was measured on. That is testable, and it
+holds.
 
-The ensemble is a post-hoc combination computed with
-`scripts/analysis/pb_threshold_calibration.py` over the saved per-step scores of
-its three members; it involved no training and no re-encoding. Its identity was
-verified by matching the stored `ens3` scores against every candidate combination
-rule (exact match, max per-step absolute difference 0.0, for the unweighted
-probability mean of the three).
+```
+19 shared cells, both runs scored under the same metric
 
-## External reference systems (ProcessBench, reported elsewhere)
+  ProcessBench F1_PB @ calib-20    Spearman +0.919   Kendall +0.782   p < 1e-6
+  In-domain PRM800K AUROC          Spearman +0.839   Kendall +0.689   p < 1e-5
 
-Same benchmark, same first-error F1 as our F1_PB, on the same human-labeled
-ProcessBench solutions, so directly comparable on the 4-subset average. These are
-fully fine-tuned 7B+ PRMs (vs our frozen-state readouts) with their own
-threshold, so a reference ceiling, not an apples-to-apples training comparison.
-Sourcing in `related_work.md`.
+  14 of 19 cells move by at most 2 ranks
+```
 
-| system | gsm8k | math | olympiad | omnimath | **avg (4)** |
-|---|---|---|---|---|---|
-| **readout ensemble (3)** (ours, frozen states, calib-20) | 59.1 | 55.3 | 50.0 | 48.4 | **53.2** |
-| **step_tokens x transformer** (ours, frozen states, calib-20) | 56.8 | 55.8 | 49.2 | 46.9 | **52.2** |
-| **step_tokens x attn-query** (ours, frozen states, calib-20) | 49.5 | 53.3 | 48.6 | 48.6 | **50.0** |
-| **step_stats x linear** (ours, frozen states, calib-20) | 54.4 | 47.3 | 44.5 | 47.7 | **48.5** |
-| **boundary_stats x linear** (ours, frozen states, calib-20) | 47.6 | 48.5 | 44.8 | 41.8 | **45.7** |
-| **last_token x linear** (ours, frozen states, calib-20) | 45.9 | 41.4 | 34.7 | 35.7 | **39.4** |
-| **step_delta x linear** (ours, frozen states, calib-20) | 34.5 | 40.9 | 34.4 | 34.6 | **36.1** |
-| Math-Shepherd-PRM-7B | 47.9 | 29.5 | 24.8 | 23.8 | 31.5 |
-| Skywork-PRM-7B | 70.8 | 53.6 | 22.9 | 21.0 | 42.1 |
-| Qwen2.5-Math-7B-PRM800K | 68.2 | 62.6 | 50.7 | 44.3 | 56.5 |
-| ThinkPRM-14B | n/a | n/a | 87.3 | 85.7 | n/a |
+That is across a simultaneous change of **backbone** (Qwen2.5-7B to Qwen3-8B-Base),
+**hidden dimension** (3,584 to 4,096), and **layer** (post-final-norm last state to
+block 34's `resid_post`). Absolute scores rise about 0.04, which is expected from a
+stronger backbone and says nothing on its own; the ordering is the claim.
 
-**Reading.** Because every row shares the same frozen 7B spine, the
-representation and the learner effects separate cleanly, and the naming above
-makes the comparison direct.
+| cell | v1 | v2 | rank |
+|---|---|---|---|
+| `step_tokens` x transformer d512 | 0.534 | **0.566** | 1 -> 1 |
+| `step_tokens` x attn_query | 0.506 | 0.558 | 4 -> 2 |
+| `step_tokens` x transformer d128 | 0.528 | 0.554 | 3 -> 3 |
+| `boundary_stats` x mlp:h1024 | 0.480 | 0.540 | 7 -> 4 |
+| `step_stats` x mlp:h1024 | 0.494 | 0.540 | 5 -> 5 |
+| `boundary_stats` x mlp:h1024x2 | 0.473 | 0.536 | 10 -> 6 |
+| `step_stats` x mlp:h1024x2 | 0.482 | 0.535 | 6 -> 7 |
+| `step_tokens` x transformer d256 | 0.532 | 0.531 | 2 -> 8 |
+| `step_stats` x linear | 0.474 | 0.511 | 9 -> 9 |
+| `boundary_stats` x linear | 0.476 | 0.509 | 8 -> 10 |
+| `step_mean` x mlp:h1024 | 0.446 | 0.495 | 11 -> 11 |
+| `step_mean` x mlp:h1024x2 | 0.429 | 0.481 | 13 -> 12 |
+| `step_mean` x linear | 0.443 | 0.469 | 12 -> 13 |
+| `step_delta` x mlp:h1024 | 0.384 | 0.440 | 16 -> 14 |
+| `step_delta` x mlp:h1024x2 | 0.369 | 0.436 | 18 -> 15 |
+| `last_token` x mlp:h1024 | 0.408 | 0.422 | 15 -> 16 |
+| `last_token` x mlp:h1024x2 | 0.414 | 0.422 | 14 -> 17 |
+| `last_token` x linear | 0.381 | 0.419 | 17 -> 18 |
+| `step_delta` x linear | 0.351 | **0.395** | 19 -> 19 |
 
-*Representation effect (learner held fixed at linear).* Going from `last_token` to
-`step_stats`, i.e. from the step's final token to a fixed 5-statistic pool of all
-its tokens, moves the 4-subset average from **39.4** to **48.5**. That is **+9.1
-F1_PB for feeding the whole step**, with no change in learner and no added
-capacity beyond the wider input.
+**What holds exactly.** All four `step_tokens` cells occupy the top three plus one
+in both runs. `step_delta x linear` is last in both and `last_token x linear`
+second-to-last in both. The three `step_mean` cells sit in the same block of the
+table in both. The families do not interleave.
 
-*Learner effect (representation held fixed at `step_tokens`).* Swapping the
-attention-query readout for the ~2.5M-param transformer moves **50.0** to
-**52.2**, i.e. **+2.2**.
+**The one large move is a tie, not a disagreement.** `transformer d256` falls six
+places, but on v2 the three transformer capacities score 0.566 +- 0.026, 0.554 +-
+0.021 and 0.531 +- 0.020 — mutually overlapping. Ordering statistically
+indistinguishable cells is not information, and the same is true of the four
+`step_stats` / `boundary_stats` MLP cells that shuffle among ranks 4 to 7.
 
-So the representation change is worth roughly 4x the learner change. Most of the
-OOD gain comes from having the step's tokens at all, not from the sequence model
-that reads them. `step_tokens` x transformer is the best single row on every axis
-(in-domain AUROC **0.874**, OOD avg **52.2**); averaging the three best readouts
-adds a further **+1.0** to **53.2** without any training, which says a meaningful
-slice of each readout's error is idiosyncratic rather than a shared property of
-the frozen states.
+**Which contrasts replicate**, at matched dimension and matched parameter count
+where noted:
 
-Against external systems, the frozen-state ensemble clears Skywork-PRM-7B (42.1)
-outright and closes most of the gap to the fully fine-tuned
-Qwen2.5-Math-7B-PRM800K (56.5), with no backbone fine-tuning at all. The gains
-concentrate on the hard subsets: the ensemble scores 50.0 / 48.4 on OlympiadBench
-/ OmniMath where `last_token` sat at 34.7 / 35.7 and the fine-tuned
-Math-Shepherd and Skywork models collapse to the low 20s.
+| contrast | v1 | v2 |
+|---|---|---|
+| `last_token` -> `step_mean` (identical dim, identical params) | +0.062 | +0.050 |
+| `step_delta` -> `last_token` | +0.030 | +0.024 |
+| `step_mean` -> `step_stats` (5x wider input) | +0.031 | +0.042 |
+| pooling, then learned pooling (`step_mean` lin -> `attn_query`) | +0.063 | +0.089 |
 
-`step_delta` remains the weakest. It trails `last_token` in domain (0.817 vs 0.828
-AUROC) and on gsm8k, though it is close on the harder subsets: the transition
-geometry does not beat the boundary state at step granularity, which echoes the
-transition-operator result in REPORT.md and localizes CLUE's trace-level finding.
+---
 
-**The pre-step anchor does not transfer.** `boundary_stats` was added to test a
-prediction from the lookahead ceiling study, where handing a probe the pre-step
-boundary as its own vector lifted a mean-pool by up to +0.162 AUROC. Half of the
-prediction held: it beats `last_token` by +0.062 and `step_delta` by +0.096 on
-the 4-subset average, and on *every* subset for both. The other half failed. It
-loses to plain `step_stats`, the representation it strictly contains, by -0.028
-(gsm8k -0.068, math +0.012, olympiadbench +0.003, omnimath -0.059).
+## v2: Qwen3-8B-Base, `resid_post` of block 34
 
-The failure is specific to transfer. In domain the two are effectively tied
-(AUROC 0.861 vs 0.866, macro-F1 0.784 vs 0.783), so the extra 3,584 dimensions
-cost nothing where train and test share a distribution. The whole gap opens on
-ProcessBench. That points at the anchor being domain-sensitive: the pre-step
-boundary state summarizes the question and the preceding solution, which is
-exactly the content that differs most between PRM800K and ProcessBench, so a
-probe that learns to lean on it learns something that does not survive the
-domain change. Consistent with this, the lookahead test that motivated the anchor
-trained *within* ProcessBench under cross-validation, where no such shift exists.
+ProcessBench first-error F1_PB at calib-20, four-subset mean, mean +- sd over 3 seeds.
 
-The practical reading: pooling the step's own tokens is what generalizes, and
-adding context outside the step buys accessibility in domain while costing
-robustness out of it.
+| representation | dim | linear | mlp:h1024 | mlp:h1024x2 | attn_query | tf d128 | tf d256 | tf d512 |
+|---|---|---|---|---|---|---|---|---|
+| `step_tokens` | 4096 | — | — | — | 0.558 ± 0.004 | 0.554 ± 0.021 | 0.531 ± 0.020 | **0.566 ± 0.026** |
+| `step_stats` | 20480 | 0.511 ± 0.005 | 0.540 ± 0.006 | 0.535 ± 0.002 | — | — | — | — |
+| `boundary_stats` | 24576 | 0.509 ± 0.002 | 0.540 ± 0.003 | 0.536 ± 0.009 | — | — | — | — |
+| `step_mean` | 4096 | 0.469 ± 0.009 | 0.495 ± 0.006 | 0.481 ± 0.011 | — | — | — | — |
+| `step_delta` | 4096 | 0.395 ± 0.006 | 0.440 ± 0.006 | 0.436 ± 0.013 | — | — | — | — |
+| `last_token` | 4096 | 0.419 ± 0.009 | 0.422 ± 0.036 | 0.422 ± 0.025 | — | — | — | — |
 
-## Systems reproducible within this framework
+In-domain PRM800K test AUROC:
 
-Each is one representation x learner under the same protocol (see
-`related_work.md`), named here by the paper only to record the correspondence:
-**ReProbe = `step_tokens` x transformer, DONE** (`scripts/train_reprobe_probe.py`,
-~2.5M-param transformer, last-layer token subset); CLUE = `step_delta` x
-nearest-centroid; SSAE = sparse latents x linear;
-Hidden-States-as-Early-Signals = `last_token` x MLP. All rows read from the same
-7B token store (`data_setup.md`): `last_token` / `step_delta` / `step_stats`
-derive offline with no re-encoding, while the `step_tokens` learners train
-directly on the stored token spans.
+| representation | dim | linear | mlp:h1024 | mlp:h1024x2 | attn_query | tf d128 | tf d256 | tf d512 |
+|---|---|---|---|---|---|---|---|---|
+| `step_tokens` | 4096 | — | — | — | 0.885 ± 0.002 | 0.887 ± 0.014 | 0.888 ± 0.009 | **0.895 ± 0.005** |
+| `step_stats` | 20480 | 0.874 ± 0.004 | 0.893 ± 0.002 | 0.887 ± 0.002 | — | — | — | — |
+| `boundary_stats` | 24576 | 0.866 ± 0.003 | 0.891 ± 0.002 | 0.888 ± 0.002 | — | — | — | — |
+| `step_mean` | 4096 | 0.869 ± 0.002 | 0.895 ± 0.002 | 0.892 ± 0.005 | — | — | — | — |
+| `step_delta` | 4096 | 0.831 ± 0.009 | 0.860 ± 0.003 | 0.859 ± 0.004 | — | — | — | — |
+| `last_token` | 4096 | 0.849 ± 0.002 | 0.866 ± 0.002 | 0.869 ± 0.003 | — | — | — | — |
+
+Capacity, for the F1_PB-against-parameters view:
+
+| representation x learner | params | F1_PB @ calib-20 |
+|---|---|---|
+| `last_token` x linear | 4,097 | 0.419 ± 0.009 |
+| `step_mean` x linear | 4,097 | 0.469 ± 0.009 |
+| `step_tokens` x attn_query | 8,193 | 0.558 ± 0.004 |
+| `step_stats` x linear | 20,481 | 0.511 ± 0.005 |
+| `boundary_stats` x linear | 24,577 | 0.509 ± 0.002 |
+| `step_tokens` x transformer d128 | 788,353 | 0.554 ± 0.021 |
+| `step_tokens` x transformer d256 | 2,759,681 | 0.531 ± 0.020 |
+| `last_token` x mlp:h1024 | 4,196,353 | 0.422 ± 0.036 |
+| `step_tokens` x transformer d512 | 8,665,089 | 0.566 ± 0.026 |
+| `step_stats` x mlp:h1024 | 20,973,569 | 0.540 ± 0.006 |
+| `boundary_stats` x mlp:h1024 | 25,167,873 | 0.540 ± 0.003 |
+
+An 8,193-parameter learned pooling beats every fixed-vector cell in the grid,
+including MLPs three thousand times larger. Learning *which* of a step's tokens to
+read is worth more than any amount of capacity applied to a pooled vector.
+
+---
+
+## v1: Qwen2.5-7B base, post-final-norm last state
+
+Preserved. These are the numbers behind `REPORT.md` section 19 and the sprint-6
+write-up, restated under the corrected calib-20 metric (see Protocol) so the two
+runs are comparable. The originals, computed on a uniform threshold grid, differ
+by 0.00 to 0.02; the conclusions drawn from them are unchanged.
+
+| representation | dim | linear | mlp:h1024 | mlp:h1024x2 | attn_query | tf d128 | tf d256 | tf d512 |
+|---|---|---|---|---|---|---|---|---|
+| `step_tokens` | 3584 | — | — | — | 0.506 ± 0.005 | 0.528 ± 0.008 | 0.532 ± 0.022 | **0.534 ± 0.021** |
+| `step_stats` | 17920 | 0.474 ± 0.005 | 0.494 ± 0.005 | 0.482 ± 0.002 | — | — | — | — |
+| `boundary_stats` | 21504 | 0.476 ± 0.004 | 0.480 ± 0.002 | 0.473 ± 0.001 | — | — | — | — |
+| `step_mean` | 3584 | 0.443 ± 0.010 | 0.446 ± 0.017 | 0.429 ± 0.007 | — | — | — | — |
+| `step_delta` | 3584 | 0.351 ± 0.007 | 0.384 ± 0.012 | 0.369 ± 0.014 | — | — | — | — |
+| `last_token` | 3584 | 0.381 ± 0.005 | 0.408 ± 0.012 | 0.414 ± 0.001 | — | — | — | — |
+
+---
+
+## Representations: what each keeps
+
+All read the same frozen activations, one causal pass over question + prior steps
++ current step. The past is inside every vector through attention; they differ
+only in which rows survive.
+
+- **`last_token`** — the single state at the step's final token. The point-readout
+  baseline everything else is measured against.
+- **`step_delta`** — final-token state minus the pre-step boundary state: the
+  *change* the step makes rather than the state it lands in. Weakest in both runs,
+  which localises CLUE's trace-level finding to the step level and answers it
+  negatively.
+- **`step_mean`** — the mean over every token state of the step. The load-bearing
+  addition: the only whole-step representation at the *same dimension and same
+  parameter count* as `last_token`, so pooling can be measured without width
+  moving underneath it.
+- **`step_stats`** — concat[mean, max, min, std, last], 5x dim.
+- **`boundary_stats`** — the above with the pre-step boundary state prepended, 6x dim.
+- **`step_tokens`** — no reduction: the full variable-length sequence.
+
+## Learners
+
+Vector learners read one fixed vector: `linear`, and MLPs at one and two hidden
+layers of 1,024. Sequence learners read the padded token sequence: `attn_query`
+(one learned query pools the tokens, then a linear head) and transformer encoders
+at three capacities.
+
+The grid cannot be fully crossed — a linear head cannot consume a variable-length
+sequence, and a transformer has nothing to attend over on one vector. `step_mean`
+is the bridge: mean-pooling a sequence and reading it with a linear head *is*
+`step_mean` x `linear`, which anchors the two families to a shared axis.
+
+Note an MLP's parameter count scales with the representation, so "the same
+learner" is not the same capacity across a row: `mlp:h1024` is 4.2M parameters on
+`last_token` and 25.2M on `boundary_stats`. The capacity table reports true
+per-cell counts.
+
+## Protocol
+
+Held fixed for every cell in both runs: all 513,810 PRM800K training steps (a cap
+is recorded in the results and can never be silently compared against an uncapped
+row); one AdamW + BCE trainer with the same epoch budget and early-stopping rule
+for a linear head and an 8.7M-parameter transformer alike; the same learning-rate
+x weight-decay grid, selected on validation AUROC, searched **once per cell** and
+reused across its seeds; three seeds; and a fingerprint of every data split each
+cell reads, which the merge script checks before rendering anything.
+
+**calib-20**, the headline metric: 20 held-out ProcessBench traces per subset
+(stratified) pick the first-error threshold, applied to the rest, averaged over 20
+splits, meaned over the four subsets.
+
+**Threshold candidates are score quantiles, not a uniform probability grid.** A
+uniform grid assumes scores spread over [0,1]. On v2 the wide representations are
+overconfident, piling 54 to 66% of scores below 0.01 and 10 to 30% above 0.99, so
+a 0.01-step grid had almost no resolution where the decision boundary sat and
+threshold selection from 20 traces became near-random: one seed of
+`boundary_stats x linear` scored 0.248 against 0.498 and 0.494 for its siblings,
+while its in-domain AUROC was 0.869, in line with theirs. Quantiles put the
+candidates where the scores are. Broken cells recover (0.248 -> 0.510) and healthy
+cells move by 0.000 to 0.005. Each split's grid comes from its own calibration
+traces, never the evaluation traces.
+
+The saturation is a consequence of the v2 layer change: post-final-norm states
+have std 4.4, the pre-norm `resid_post` states have std 22.6, and five times
+larger inputs push logits into saturation. v1 never hit it.
+
+## External reference systems
+
+Fully fine-tuned 7B+ PRMs on the same benchmark and metric. A reference ceiling,
+not a matched training comparison: ours are small readouts on frozen states.
+
+| system | added verifier | 4-subset avg |
+|---|---|---|
+| Qwen2.5-Math-7B-PRM800K | 7B fine-tuned | 56.5 |
+| **`step_tokens` x transformer d512** (v2, frozen states) | 8.7M params | **56.6** |
+| **`step_tokens` x attn_query** (v2, frozen states) | 8,193 params | **55.8** |
+| Skywork-PRM-7B | 7B fine-tuned | 42.1 |
+| Math-Shepherd-PRM-7B | 7B fine-tuned | 31.5 |
+| ThinkPRM-14B | 14B generative | olympiad 87.3 / omnimath 85.7 |
+
+Read with care: the external numbers come from the ProcessBench paper under those
+systems' own threshold protocols, while ours use calib-20, which assumes 20
+labelled target-domain traces. The comparison is indicative, not matched.
+
+## Limits
+
+- **One layer per run.** Nothing here separates "late layer" from "final token" as
+  the limiting factor, and section 15 found layer 20 above layer 28 on Qwen2.5.
+  The layer axis and the pooling axis have never been crossed.
+- **Off-policy throughout.** PRM800K solutions were written by a GPT-4 fine-tune;
+  we re-encode them with a model that would not produce that text. Every
+  comparable internal-state paper reads the states of the model that generated the
+  reasoning, and off-policy training measurably degrades probe generalisation
+  (arXiv:2511.17408). Human step labels only exist for that generator's output, so
+  this is a forced trade, not an oversight — and it is the subject of the on-policy
+  arm.
+- **calib-20 assumes 20 labelled target-domain traces.** The val-selected and
+  oracle thresholds are recorded alongside in every cell's results.
+- **Three seeds bound noise, they do not remove it.** Differences under about 0.02
+  in this grid should not be ranked.
+- **Readouts, not mechanisms.** Section 15.8 found steering along the decoded
+  direction to be null; decodability is not causal relevance.

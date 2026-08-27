@@ -51,7 +51,8 @@ from scripts.analysis.pb_threshold_calibration import load_traces  # noqa: E402
 PB_SUBSETS = ("gsm8k", "math", "olympiadbench", "omnimath")
 CALIB_SIZE = 20
 CALIB_SPLITS = 20
-CALIB_GRID = np.arange(0.01, 1.00, 0.01)
+CALIB_GRID = np.arange(0.01, 1.00, 0.01)   # legacy uniform grid, kept for comparison
+N_QUANTILES = 99
 
 
 def load_cells(root: Path) -> list[dict]:
@@ -114,27 +115,59 @@ def f1_pb_from_preds(preds: np.ndarray, labels: np.ndarray) -> np.ndarray:
     return np.where(denom > 0, 2 * acc_err * acc_cor / np.maximum(denom, 1e-12), 0.0)
 
 
-def calib20_subset(traces: list) -> float:
+def quantile_grid(traces: list, n: int = N_QUANTILES) -> np.ndarray:
+    """Candidate thresholds at the score quantiles of `traces`.
+
+    A uniform grid in probability space assumes scores are spread across [0,1].
+    An overconfident probe breaks that assumption: on Qwen3 the wide
+    representations pushed 54-66% of scores below 0.01 and 10-30% above 0.99, so
+    a 0.01-step grid had almost no resolution where the decision boundary sat,
+    and threshold selection on 20 traces became a coin flip (one seed of
+    boundary_stats scored 0.248 against 0.498 and 0.494 for its siblings, while
+    its in-domain AUROC was 0.8685, in line with theirs).
+
+    Quantiles put the candidates where the scores actually are, whatever the
+    calibration. `traces` should be the calibration split only, never the
+    evaluation traces, or the grid has seen data the threshold is scored on.
+    """
+    s = np.concatenate([np.asarray(sc, dtype=np.float64) for _, sc in traces])
+    q = np.unique(np.quantile(s, np.linspace(0.005, 0.995, n)))
+    return q if len(q) >= 3 else CALIB_GRID
+
+
+def calib20_subset(traces: list, grid_mode: str = "quantile") -> float:
     """F1_PB at calib-20 for one subset: hold out CALIB_SIZE traces (stratified),
-    grid-max the threshold there, apply it to the remainder, mean over splits."""
-    preds, labels = pred_matrix(traces, CALIB_GRID)
+    grid-max the threshold there, apply it to the remainder, mean over splits.
+
+    With grid_mode='quantile' each split derives its candidate thresholds from
+    its own calibration traces, so the grid never sees the evaluation traces.
+    Predictions are still computed once, over the union of every split's grid,
+    and each split reads back the columns belonging to its own.
+    """
     idx = np.arange(len(traces))
-    evals = []
+    labels_all = np.array([t[0] for t in traces])
+    splits, grids = [], []
     for sd in range(CALIB_SPLITS):
         rng = np.random.default_rng(sd)
-        # stratified_calib_split works on traces; this mirrors it exactly on
-        # indices (same permutation order, same counts) so the split is identical
-        # while the scoring stays vectorized. A test pins the two together.
-        err = idx[labels != -1]
-        cor = idx[labels == -1]
+        err, cor = idx[labels_all != -1], idx[labels_all == -1]
         frac = CALIB_SIZE / len(traces)
         n_err_c = min(len(err), round(len(err) * frac))
         n_cor_c = min(len(cor), CALIB_SIZE - n_err_c)
         err_p, cor_p = rng.permutation(len(err)), rng.permutation(len(cor))
-        calib = np.concatenate([err[err_p[:n_err_c]], cor[cor_p[:n_cor_c]]])
+        cal = np.concatenate([err[err_p[:n_err_c]], cor[cor_p[:n_cor_c]]])
         ev = np.concatenate([err[err_p[n_err_c:]], cor[cor_p[n_cor_c:]]])
-        t_star = int(np.argmax(f1_pb_from_preds(preds[calib], labels[calib])))
-        evals.append(float(f1_pb_from_preds(preds[ev], labels[ev])[t_star]))
+        splits.append((cal, ev))
+        grids.append(CALIB_GRID if grid_mode == "uniform"
+                     else quantile_grid([traces[i] for i in cal]))
+
+    union = np.unique(np.concatenate(grids))
+    preds, labels = pred_matrix(traces, union)
+    evals = []
+    for (cal, ev), g in zip(splits, grids):
+        cols = np.searchsorted(union, g)
+        f1_cal = f1_pb_from_preds(preds[cal][:, cols], labels[cal])
+        t = int(cols[int(np.argmax(f1_cal))])
+        evals.append(float(f1_pb_from_preds(preds[ev], labels[ev])[t]))
     return float(np.mean(evals))
 
 
@@ -301,8 +334,11 @@ def main() -> None:
               f"The headline is F1_PB at calib-20: {CALIB_SIZE} held-out "
               f"ProcessBench traces per subset (stratified) pick the first-error "
               f"threshold, which is applied to the rest, averaged over "
-              f"{CALIB_SPLITS} splits. Same protocol and same code path as the v1 "
-              "leaderboard, so the two are comparable on the headline metric.", "",
+              f"{CALIB_SPLITS} splits. Candidate thresholds are the score "
+              "quantiles of each split's own calibration traces, not a uniform "
+              "grid in probability space: an overconfident probe piles its scores "
+              "at 0 and 1, where a uniform grid has no resolution and threshold "
+              "selection on 20 traces becomes near-random.", "",
               "Every cell was verified to have read the same inputs "
               f"({len(cells)} cells, {len(inputs)} splits):", "",
               "| split | fingerprint |", "|---|---|"]

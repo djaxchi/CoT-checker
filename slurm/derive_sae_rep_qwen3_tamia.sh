@@ -58,19 +58,23 @@ source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
 pip install --no-index torch numpy
 
-# One readout per GPU; each is an independent pass over the store.
+# Two passes per readout (PRM800K and ProcessBench), each on its own GPU. With
+# more readouts than GPUs the assignment wraps, so several passes share a device
+# rather than being handed a CUDA index that does not exist -- 3 readouts is 6
+# passes on a 4-GPU node.
+N_GPUS="${N_GPUS:-4}"
 pids=(); tags=()
 gpu=0
 for R in $READOUTS; do
-  echo "[launch] gpu$gpu $R (PRM800K)"
-  CUDA_VISIBLE_DEVICES=$gpu python scripts/public_sae/derive_sae_rep.py \
+  echo "[launch] gpu$((gpu % N_GPUS)) $R (PRM800K)"
+  CUDA_VISIBLE_DEVICES=$((gpu % N_GPUS)) python scripts/public_sae/derive_sae_rep.py \
     --store_root "$PRM_STORE" --splits $PRM_SPLITS \
     --out_dir "$OUT_DIR" --readout "$R" --mode prm \
     --hf_cache "$HF_CACHE" --repo_id "$REPO_ID" --sae_layer "$SAE_LAYER" \
     > "$OUT_DIR/${R}_prm.log" 2>&1 &
   pids+=($!); tags+=("$R:prm"); gpu=$((gpu+1))
-  echo "[launch] gpu$gpu $R (ProcessBench)"
-  CUDA_VISIBLE_DEVICES=$gpu python scripts/public_sae/derive_sae_rep.py \
+  echo "[launch] gpu$((gpu % N_GPUS)) $R (ProcessBench)"
+  CUDA_VISIBLE_DEVICES=$((gpu % N_GPUS)) python scripts/public_sae/derive_sae_rep.py \
     --store_root "$PB_STORE" --splits $PB_SUBSETS \
     --out_dir "$OUT_DIR" --readout "$R" --mode pb \
     --hf_cache "$HF_CACHE" --repo_id "$REPO_ID" --sae_layer "$SAE_LAYER" \

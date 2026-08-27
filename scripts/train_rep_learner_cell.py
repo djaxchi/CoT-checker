@@ -77,11 +77,14 @@ REP_READOUT = {
 }
 # Sparse SAE codes of the same states, mirroring two dense readouts so the
 # sparsity question is a controlled contrast rather than a separate study:
-#   sae_last <-> last_token       sae_mean <-> step_mean
+#   sae_last <-> last_token        sae_mean <-> step_mean
+#   sae_delta <-> step_delta       sae_stats <-> step_stats
+#   sae_boundary_stats <-> boundary_stats
 # Derived offline by scripts/public_sae/derive_sae_rep.py (the SAE is a matmul
 # over states already in the store) and stored CSR, since a pooled 65,536-wide
 # code stays sparse and densifying it would cost 67 GB for the train split.
-REP_SPARSE = ("sae_last", "sae_mean")
+REP_SPARSE = ("sae_last", "sae_mean", "sae_delta", "sae_stats",
+              "sae_boundary_stats")
 REPS = tuple(REP_READOUT) + REP_SPARSE + ("step_tokens",)
 
 

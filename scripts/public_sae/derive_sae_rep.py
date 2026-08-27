@@ -8,8 +8,14 @@ interpretable feature activations instead of 4,096 raw dimensions.
 
 Two readouts, deliberately mirroring two dense ones so the contrast is clean:
 
-    sae_last   the code of the step's final token      <-> last_token
-    sae_mean   the mean of the codes of every token    <-> step_mean
+    sae_last            code of the step's final token          <-> last_token
+    sae_mean            mean of the codes of every token        <-> step_mean
+    sae_delta           code(last) - code(pre-step boundary)     <-> step_delta
+    sae_stats           concat[mean, max, min, std, last]        <-> step_stats
+    sae_boundary_stats  boundary code prepended to sae_stats     <-> boundary_stats
+
+Every dense vector representation in the grid has a sparse twin, so the sparsity
+question can be asked of the whole leaderboard rather than of two rows.
 
 Same pooling rule, same layer, same activations, same protocol: the only thing
 that changes is whether the learner sees the raw state or its sparse code. That
@@ -44,18 +50,51 @@ from src.harness.qwen_scope import TopKSAE, find_snapshot  # noqa: E402
 from src.harness.sparse_vec import write_csr  # noqa: E402
 from src.repstore.store import RepSplit  # noqa: E402
 
-READOUTS = ("sae_last", "sae_mean")
+READOUTS = ("sae_last", "sae_mean", "sae_delta", "sae_stats",
+            "sae_boundary_stats")
+# multiplier on d_sae for each readout's output width
+WIDTH = {"sae_last": 1, "sae_mean": 1, "sae_delta": 1,
+         "sae_stats": 5, "sae_boundary_stats": 6}
 
 
-def pooled_codes(sae: TopKSAE, span: torch.Tensor, readout: str):
-    """(indices, values) of one step's pooled sparse code."""
+def _cat_sparse(parts: list[torch.Tensor], d: int):
+    """Concatenate blocks into one sparse (indices, values), offsetting each block.
+
+    Keeps the wide readouts sparse: sae_stats is 327,680 wide but only about
+    2,050 entries are non-zero, because `min` over a step's tokens is empty
+    wherever any token is silent and `std` shares `mean`'s support.
+    """
+    idx, val = [], []
+    for b, z in enumerate(parts):
+        nz = torch.nonzero(z, as_tuple=True)[0]
+        idx.append(nz + b * d)
+        val.append(z[nz])
+    return torch.cat(idx).cpu().numpy(), torch.cat(val).cpu().numpy()
+
+
+def pooled_codes(sae: TopKSAE, span: torch.Tensor, boundary: torch.Tensor,
+                 readout: str):
+    """(indices, values) of one step's pooled sparse code.
+
+    `span` is the step's own token states; `boundary` is the single pre-step
+    state, the same rows the dense readouts use.
+    """
+    d = sae.d_sae
     if readout == "sae_last":
-        z = sae.encode(span[-1:])                    # (1, d_sae)
-        z = z[0]
-    else:                                            # sae_mean
-        z = sae.encode(span).mean(0)                 # mean over the step's tokens
-    nz = torch.nonzero(z, as_tuple=True)[0]
-    return nz.cpu().numpy(), z[nz].cpu().numpy()
+        return _cat_sparse([sae.encode(span[-1:])[0]], d)
+    codes = sae.encode(span)                          # (T, d_sae)
+    if readout == "sae_mean":
+        return _cat_sparse([codes.mean(0)], d)
+    if readout == "sae_delta":
+        return _cat_sparse([codes[-1] - sae.encode(boundary)[0]], d)
+    stats = [codes.mean(0), codes.max(0).values, codes.min(0).values,
+             codes.std(0) if codes.shape[0] > 1 else torch.zeros_like(codes[0]),
+             codes[-1]]
+    if readout == "sae_stats":
+        return _cat_sparse(stats, d)
+    if readout == "sae_boundary_stats":
+        return _cat_sparse([sae.encode(boundary)[0]] + stats, d)
+    raise ValueError(readout)
 
 
 def derive_split(split_dir: Path, sae: TopKSAE, readout: str, device, batch: int,
@@ -74,7 +113,10 @@ def derive_split(split_dir: Path, sae: TopKSAE, readout: str, device, batch: int
             if b <= a:
                 a = b - 1
             span = torch.from_numpy(np.asarray(rs.h[a:b], dtype=np.float32)).to(device)
-            idx, val = pooled_codes(sae, span, readout)
+            bi = int(rs.offsets[k]) + int(m["pre_step_boundary_idx"])
+            boundary = torch.from_numpy(
+                np.asarray(rs.h[bi:bi + 1], dtype=np.float32)).to(device)
+            idx, val = pooled_codes(sae, span, boundary, readout)
             rows.append((idx, val))
             labels.append(int(rs.y[k]))
             gi.append(int(m["global_index"]))
@@ -134,17 +176,19 @@ def main() -> None:
                                       device, args.batch, sort=(args.mode == "pb"))
         if args.mode == "prm":
             out = args.out_dir / f"{args.readout}__{stem}.npz"
-            s = write_csr(out, rows, y, sae.d_sae)
+            s = write_csr(out, rows, y, sae.d_sae * WIDTH[args.readout])
         else:
             sub = args.out_dir / stem
             sub.mkdir(parents=True, exist_ok=True)
-            s = write_csr(sub / f"{args.readout}.npz", rows, y, sae.d_sae)
+            s = write_csr(sub / f"{args.readout}.npz", rows, y,
+                          sae.d_sae * WIDTH[args.readout])
             with (sub / f"{args.readout}_meta.jsonl").open("w") as f:
                 for m in metas:
                     f.write(json.dumps(m) + "\n")
         stats["splits"][stem] = s
         print(f"  {s['items']:,} items  mean nnz {s['mean_nnz']:.1f} "
-              f"({100*s['density']:.3f}% of {sae.d_sae})  {s['bytes']/1e9:.2f} GB",
+              f"({100*s['density']:.3f}% of {sae.d_sae*WIDTH[args.readout]:,})  "
+              f"{s['bytes']/1e9:.2f} GB",
               flush=True)
 
     (args.out_dir / f"{args.readout}_manifest.json").write_text(json.dumps(stats, indent=2))

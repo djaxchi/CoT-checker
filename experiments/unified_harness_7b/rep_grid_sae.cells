@@ -1,18 +1,35 @@
-# Sparse SAE codes as a representation, mirroring two dense readouts so the
-# sparsity question is a controlled contrast:
+# The sparse mirror: every dense vector representation has an SAE twin.
 #
-#   sae_last  <-> last_token    the step's final token, raw state vs sparse code
-#   sae_mean  <-> step_mean     mean over the step's tokens, likewise
+#   sae_last            <-> last_token          code of the step's final token
+#   sae_mean            <-> step_mean           mean of the codes of its tokens
+#   sae_delta           <-> step_delta          code(last) - code(boundary)
+#   sae_stats           <-> step_stats          concat[mean,max,min,std,last]
+#   sae_boundary_stats  <-> boundary_stats      boundary code prepended
 #
-# Same layer, same activations, same trainer, same hyperparameter protocol.
-# Qwen-Scope TopK, 65,536 features, k=50, reconstruction FVU 0.336 at this layer.
+# Same layer, same activations, same trainer, same hyperparameter protocol as the
+# dense grid, so the only thing that changes is whether the learner reads the raw
+# 4,096-dim state or its 65,536-wide sparse code. Qwen-Scope TopK, k=50,
+# reconstruction FVU 0.336 at this layer.
 #
-# The prediction is that these LOSE. The SAE discards a third of the variance,
-# and section 15 found step correctness to be a distributed low-variance margin,
-# which is exactly what a dictionary trained for reconstruction has no reason to
-# keep. A clean loss is informative; a win would be more so.
+# READ THE LINEAR COLUMN FOR THE SPARSITY CLAIM. A linear probe is dim+1
+# parameters, so 65,537 against 4,097 -- both negligible, no capacity story
+# needed. The MLP columns are NOT capacity-matched to their dense twins:
+# sae_stats x mlp:h1024 is 336M parameters against step_stats x mlp:h1024's 21M,
+# a 16x gap that would flatter any SAE "win". They are here for the capacity
+# curve, not for the headline.
+#
+# Prediction on record: these should lose. Reconstruction discards a third of the
+# variance, and section 15 found step correctness to be a distributed
+# low-variance margin, which is what a dictionary trained for reconstruction has
+# no reason to preserve.
 
 sae_last linear
 sae_last mlp:h1024
 sae_mean linear
 sae_mean mlp:h1024
+sae_delta linear
+sae_delta mlp:h1024
+sae_stats linear
+sae_stats mlp:h1024
+sae_boundary_stats linear
+sae_boundary_stats mlp:h1024

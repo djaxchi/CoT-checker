@@ -546,14 +546,7 @@ def main() -> None:
         if not sub_dir.exists():
             print(f"[pb] skip {sub}: {sub_dir} missing", flush=True)
             continue
-        if seq:
-            view = ShardedRepSplit(sub_dir)
-            handles, meta = build_handles(view)
-            pb_loader = SpanLoader(handles, args.t_max, device, preload=True,
-                                   stats=seq_stats)
-            scores = score_all(model, len(handles), pb_loader.collate,
-                               eval_plan(len(handles)))
-        elif sparse_seq:
+        if sparse_seq:
             f = args.sae_dir / sub / f"{args.rep}.npz"
             mf = args.sae_dir / sub / f"{args.rep}_meta.jsonl"
             if not f.exists():
@@ -562,6 +555,13 @@ def main() -> None:
             sp = SparseTokenSplit(f, t_max=args.t_max, device=device, stats=tok_stats)
             meta = [json.loads(l) for l in mf.read_text().splitlines() if l.strip()]
             scores = score_all(model, len(sp), sp.collate, eval_plan(len(sp)))
+        elif seq:
+            view = ShardedRepSplit(sub_dir)
+            handles, meta = build_handles(view)
+            pb_loader = SpanLoader(handles, args.t_max, device, preload=True,
+                                   stats=seq_stats)
+            scores = score_all(model, len(handles), pb_loader.collate,
+                               eval_plan(len(handles)))
         elif sparse:
             f = args.sae_dir / sub / f"{args.rep}.npz"
             mf = args.sae_dir / sub / f"{args.rep}_meta.jsonl"

@@ -233,3 +233,32 @@ def test_the_vector_cache_is_keyed_by_the_store_fingerprint(store, tmp_path):
     assert len(fps) == 2
     for fp in fps:
         assert any(fp in name for name in after)
+
+
+def test_sparse_sequence_rep_is_dispatched_before_the_dense_sequence_branch():
+    """sae_tokens is BOTH sparse and a sequence, so branch order decides which
+    loader it gets. The ProcessBench block tested `seq` first, handed a
+    sae_tokens cell a dense SpanLoader, and every such cell died with
+    AttributeError: 'Tensor' object has no attribute 'tok_id' -- after training
+    had already completed. Pin the order in both blocks."""
+    import ast
+    src = (ROOT / "scripts" / "train_rep_learner_cell.py").read_text()
+    tree = ast.parse(src)
+
+    def branch_order(node):
+        """Names tested, in order, down an if/elif chain."""
+        out = []
+        while isinstance(node, ast.If):
+            t = node.test
+            if isinstance(t, ast.Name):
+                out.append(t.id)
+            node = node.orelse[0] if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If) else None
+        return out
+
+    chains = [branch_order(n) for n in ast.walk(tree)
+              if isinstance(n, ast.If) and "sparse_seq" in branch_order(n)]
+    assert chains, "no if/elif chain dispatches on sparse_seq"
+    for c in chains:
+        if "seq" in c:
+            assert c.index("sparse_seq") < c.index("seq"), \
+                f"sparse_seq must be tested before seq, got {c}"

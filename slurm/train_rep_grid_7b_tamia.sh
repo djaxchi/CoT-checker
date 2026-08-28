@@ -47,6 +47,7 @@ TRAIN_STEM="${TRAIN_STEM:-probe_train_full}"
 EPOCHS="${EPOCHS:-30}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 HP_SEARCH_CAP="${HP_SEARCH_CAP:-100000}"
+RESCALE="${RESCALE:-none}"
 N_GPUS="${N_GPUS:-4}"
 # Span preloading is a PER-PROCESS budget, but N_GPUS cells run concurrently on
 # one node. Job 429667 died OOM because each of 4 cells independently decided
@@ -93,6 +94,7 @@ pb_store    : $PB_STORE
 out_root    : $OUT_ROOT
 cells       : ${#PAIRS[@]}  seeds: $SEEDS  gpus: $N_GPUS
 preload cap : ${PRELOAD_BUDGET_GB} GB per cell (node mem / $N_GPUS x 0.60)
+rescale     : $RESCALE
 train_stem  : $TRAIN_STEM (no cap: the full split)
 ================================================================
 BANNER
@@ -154,7 +156,7 @@ run_cell() {  # rep learner seed gpu [extra args...]
     --out_dir "$out" --vec_cache_dir "$VEC_CACHE" \
     --train_stem "$TRAIN_STEM" --seed "$seed" \
     --epochs "$EPOCHS" --batch_size "$BATCH_SIZE" \
-    --hp_search_cap "$HP_SEARCH_CAP" \
+    --hp_search_cap "$HP_SEARCH_CAP" --rescale "$RESCALE" \
     --preload_budget_gb "$PRELOAD_BUDGET_GB" "$@" \
     > "$OUT_ROOT/${tag}.log" 2>&1 &
   PIDS+=("$!"); PID_TAGS+=("$tag")

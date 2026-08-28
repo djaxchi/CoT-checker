@@ -64,6 +64,7 @@ from src.harness.learners import (  # noqa: E402
     build_learner, build_sparse_learner, is_sequence, param_count,
 )
 from src.harness.spanloader import SpanLoader  # noqa: E402
+from src.harness import rescale as rs  # noqa: E402
 from src.harness.sparse_vec import SparseTokenSplit, SparseVecSplit  # noqa: E402
 from src.repstore import split_fingerprint  # noqa: E402
 from src.repstore.store import ShardedRepSplit  # noqa: E402
@@ -282,6 +283,11 @@ def main() -> None:
     p.add_argument("--preload_budget_gb", type=float, default=300.0,
                    help="RAM budget for span preloading (whole-node allocations "
                         "make a few hundred GB available).")
+    p.add_argument("--rescale", choices=["none", "zscore"], default="none",
+                   help="zscore: subtract each position's training average and "
+                        "divide by its swing, so the numbers entering the probe "
+                        "sit near 0 and swing by ~1 instead of ~22. Sparse codes "
+                        "are divided but not centred, to keep their zeros.")
     p.add_argument("--no_bucket", action="store_true",
                    help="Disable length-bucketed batching for sequence learners. "
                         "Bucketing only changes which items share a batch, never "
@@ -389,9 +395,21 @@ def main() -> None:
                                       args.vec_cache_dir, sort=False,
                                       fingerprint=inputs[f"prm/{args.test_stem}"])
         d = Xtr.shape[1]
-        train_fn = lambda idx: collate_vec(Xtr, y_train, idx, device)   # noqa: E731
-        val_fn = lambda idx: collate_vec(Xva, y_val, idx, device)       # noqa: E731
-        test_fn = lambda idx: collate_vec(Xte, y_test, idx, device)     # noqa: E731
+        stats = None
+        if args.rescale == "zscore":
+            stats = rs.fit(Xtr)
+            print(f"[rescale] {args.rep}: {rs.describe(stats, np.asarray(Xtr[:2000]))}",
+                  flush=True)
+
+        def mkvec(X, y):
+            if stats is None:
+                return lambda idx: collate_vec(X, y, idx, device)
+            def f(idx):
+                xb = torch.from_numpy(rs.apply(X[idx], stats)).to(device)
+                yb = torch.from_numpy(np.asarray(y[idx], dtype=np.float32)).to(device)
+                return xb, None, yb
+            return f
+        train_fn, val_fn, test_fn = mkvec(Xtr, y_train), mkvec(Xva, y_val), mkvec(Xte, y_test)
         n_train_all = Xtr.shape[0]
 
     rng = np.random.default_rng(args.seed)
@@ -532,7 +550,7 @@ def main() -> None:
                                         args.vec_cache_dir, sort=True,
                                         fingerprint=inputs[f"pb/{sub}"])
             ypb = np.zeros(Xpb.shape[0], dtype=np.int8)
-            fn = lambda idx: collate_vec(Xpb, ypb, idx, device)  # noqa: E731
+            fn = mkvec(Xpb, ypb)          # same training statistics, never refitted
             scores = score_all(model, Xpb.shape[0], fn, eval_plan(Xpb.shape[0]))
         rows, m_val = evaluate_processbench(scores, meta, t_val)
         best_f1, best_t = -1.0, grid[0]

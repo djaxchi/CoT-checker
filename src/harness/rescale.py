@@ -81,3 +81,20 @@ def describe(stats: dict, x_sample: np.ndarray | None = None) -> str:
         after = apply(x_sample, stats)
         s += f"; after: std {after.std():.3f}"
     return s
+
+
+def fit_sparse(indices: np.ndarray, values: np.ndarray, n_rows: int, d: int) -> dict:
+    """Per-feature swing of a CSR store, counting the zeros.
+
+    A feature that fires on 1% of steps has a small swing across the corpus, and
+    that is the number to divide by. Computing it from the non-zeros alone would
+    ignore the 99% of rows where the feature is absent and badly understate it.
+    """
+    s = np.bincount(indices, weights=values.astype(np.float64), minlength=d)
+    sq = np.bincount(indices, weights=values.astype(np.float64) ** 2, minlength=d)
+    mean = s / max(n_rows, 1)
+    var = np.maximum(sq / max(n_rows, 1) - mean ** 2, 0.0)
+    std = np.sqrt(var).astype(np.float32)
+    std[std < EPS] = 1.0
+    return {"mean": np.zeros(d, np.float32), "std": std, "center": False,
+            "rows": int(n_rows)}

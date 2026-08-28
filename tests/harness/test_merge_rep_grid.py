@@ -116,3 +116,21 @@ def test_the_fingerprints_are_published_in_the_table(tmp_path):
     assert r.returncode == 0, r.stderr
     text = out.read_text()
     assert "aaaa1111" in text and "prm/probe_train_full" in text
+
+
+def test_mixing_rescaled_and_unrescaled_cells_is_refused():
+    """Rescaling changes the numbers entering every probe, so a table mixing the
+    two is not one protocol -- the same reasoning as capped vs uncapped."""
+    a = _cell("last_token", "linear", 42, 0.80, 0.40)
+    b = _cell("step_mean", "linear", 42, 0.83, 0.44)
+    a["protocol"] = {"rescale": "zscore"}
+    b["protocol"] = {"rescale": "none"}
+    with pytest.raises(SystemExit, match="different rescaling settings"):
+        check_inputs([a, b])
+
+
+def test_one_rescaling_setting_passes():
+    cells = [_cell("last_token", "linear", s, 0.8, 0.4) for s in (42, 43)]
+    for c in cells:
+        c["protocol"] = {"rescale": "zscore"}
+    assert check_inputs(cells) == FP

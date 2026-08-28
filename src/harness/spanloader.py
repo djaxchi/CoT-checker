@@ -92,13 +92,17 @@ def length_bucketed_batches(
 class SpanLoader:
     """Vectorized padded-batch builder over a step-span store."""
 
-    def __init__(self, handles, t_max: int, device, preload: bool = False):
+    def __init__(self, handles, t_max: int, device, preload: bool = False,
+                 stats: dict | None = None):
         self.handles = handles
         self.t_max = t_max
         self.device = device
         self.starts, self.lengths = span_bounds(handles, t_max)
         self.labels = np.array([h[4] for h in handles], dtype=np.float32)
         self.d = int(handles[0][0].spec.dim) if handles else 0
+        # Optional per-position rescaling, applied to every token row so the
+        # sequence learners see numbers of the same size as the vector ones.
+        self.stats = stats
         self._flat = None
         if preload:
             self._preload()
@@ -149,7 +153,11 @@ class SpanLoader:
         T = int(lens.max())
         src, dest = batch_gather_indices(self.starts[idx], lens, T)
         flat = np.zeros((len(idx) * T, self.d), dtype=np.float32)
-        flat[dest] = self._rows(src)
+        rows = self._rows(src)
+        if self.stats is not None:
+            rows = (rows.astype(np.float32) - self.stats["mean"]) / self.stats["std"] \
+                if self.stats["center"] else rows.astype(np.float32) / self.stats["std"]
+        flat[dest] = rows
         mask = np.zeros(len(idx) * T, dtype=np.float32)
         mask[dest] = 1.0
         x = torch.from_numpy(flat.reshape(len(idx), T, self.d)).to(self.device)

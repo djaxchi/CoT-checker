@@ -47,7 +47,12 @@ TRAIN_STEM="${TRAIN_STEM:-probe_train_full}"
 EPOCHS="${EPOCHS:-30}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 HP_SEARCH_CAP="${HP_SEARCH_CAP:-100000}"
-RESCALE="${RESCALE:-none}"
+# Default protocol since 2026-08-28: the layer we read has no normalisation
+# after it, so raw numbers swing by ~22 and pin the probe's scores to 0 and 1.
+# Measured effect on the leaderboard: Spearman 0.953 against the un-rescaled
+# run, mean |change| 0.011 -- the ranking is unchanged, but the weakest
+# representations recover ~2-3 points and their seed spread halves.
+RESCALE="${RESCALE:-zscore}"
 # Derived sparse SAE codes, for the sae_* representations. Empty for dense cells.
 SAE_DIR="${SAE_DIR:-}"
 N_GPUS="${N_GPUS:-4}"

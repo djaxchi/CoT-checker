@@ -333,12 +333,20 @@ def main() -> None:
     if sparse_seq:
         if args.sae_dir is None:
             raise SystemExit(f"--sae_dir is required for {args.rep}")
-        def _tok(stem):
+        def _tok(stem, st=None):
             f = args.sae_dir / f"{args.rep}__{stem}.npz"
             if not f.exists():
                 raise SystemExit(f"missing {f}; run the SAE derive for this split")
-            return SparseTokenSplit(f, t_max=args.t_max, device=device)
-        tr, va, te = _tok(args.train_stem), _tok(args.val_stem), _tok(args.test_stem)
+            return SparseTokenSplit(f, t_max=args.t_max, device=device, stats=st)
+        tr = _tok(args.train_stem)
+        tok_stats = None
+        if args.rescale == "zscore":
+            tok_stats = rs.fit_sparse(tr.indices, tr.values,
+                                      int(tr.tok_ptr.shape[0] - 1), tr.d)
+            tr = _tok(args.train_stem, tok_stats)
+            print(f"[rescale] {args.rep}: scale-only over tokens; median feature "
+                  f"swing {float(np.median(tok_stats['std'])):.4f}", flush=True)
+        va, te = _tok(args.val_stem, tok_stats), _tok(args.test_stem, tok_stats)
         d = tr.d
         y_train, y_val, y_test = (tr.y.astype(np.int8), va.y.astype(np.int8),
                                   te.y.astype(np.int8))
@@ -355,15 +363,25 @@ def main() -> None:
         y_val = np.array([h[4] for h in val_h], dtype=np.int8)
         y_test = np.array([h[4] for h in test_h], dtype=np.int8)
 
-        probe = SpanLoader(train_h, args.t_max, device, preload=False)
+        seq_stats = None
+        if args.rescale == "zscore":
+            probe0 = SpanLoader(train_h, args.t_max, device, preload=False)
+            sample = np.concatenate([probe0._rows(
+                np.arange(int(probe0.starts[k]), int(probe0.starts[k] + probe0.lengths[k])))
+                for k in range(0, min(len(train_h), 20000), 4)])
+            seq_stats = rs.fit(sample)
+            print(f"[rescale] {args.rep}: {rs.describe(seq_stats, sample[:2000])}", flush=True)
+            del probe0, sample
+        probe = SpanLoader(train_h, args.t_max, device, preload=False, stats=seq_stats)
         want = probe.preload_bytes()
         preload = (args.preload_spans == "yes" or
                    (args.preload_spans == "auto" and want <= args.preload_budget_gb * 1e9))
         print(f"[spans] train needs {want/1e9:.1f} GB in RAM; preload={preload} "
               f"(budget {args.preload_budget_gb} GB)", flush=True)
-        train_loader = SpanLoader(train_h, args.t_max, device, preload=preload)
-        val_loader = SpanLoader(val_h, args.t_max, device, preload=True)
-        test_loader = SpanLoader(test_h, args.t_max, device, preload=True)
+        train_loader = SpanLoader(train_h, args.t_max, device, preload=preload,
+                                  stats=seq_stats)
+        val_loader = SpanLoader(val_h, args.t_max, device, preload=True, stats=seq_stats)
+        test_loader = SpanLoader(test_h, args.t_max, device, preload=True, stats=seq_stats)
         train_fn, val_fn, test_fn = (train_loader.collate, val_loader.collate,
                                      test_loader.collate)
         n_train_all = len(train_h)
@@ -371,12 +389,19 @@ def main() -> None:
         if args.sae_dir is None:
             raise SystemExit(f"--sae_dir is required for {args.rep}; derive it "
                              f"first with scripts/public_sae/derive_sae_rep.py")
-        def _load(stem):
+        def _load(stem, st=None):
             f = args.sae_dir / f"{args.rep}__{stem}.npz"
             if not f.exists():
                 raise SystemExit(f"missing {f}; run the SAE derive for this split")
-            return SparseVecSplit(f, device)
-        tr, va, te = (_load(args.train_stem), _load(args.val_stem), _load(args.test_stem))
+            return SparseVecSplit(f, device, stats=st)
+        tr = _load(args.train_stem)
+        sp_stats = None
+        if args.rescale == "zscore":
+            sp_stats = rs.fit_sparse(tr.indices, tr.values, len(tr), tr.d)
+            tr = _load(args.train_stem, sp_stats)
+            print(f"[rescale] {args.rep}: scale-only (keeps zeros); "
+                  f"median feature swing {float(np.median(sp_stats['std'])):.4f}", flush=True)
+        va, te = _load(args.val_stem, sp_stats), _load(args.test_stem, sp_stats)
         d = tr.d
         y_train, y_val, y_test = (tr.y.astype(np.int8), va.y.astype(np.int8),
                                   te.y.astype(np.int8))
@@ -524,7 +549,8 @@ def main() -> None:
         if seq:
             view = ShardedRepSplit(sub_dir)
             handles, meta = build_handles(view)
-            pb_loader = SpanLoader(handles, args.t_max, device, preload=True)
+            pb_loader = SpanLoader(handles, args.t_max, device, preload=True,
+                                   stats=seq_stats)
             scores = score_all(model, len(handles), pb_loader.collate,
                                eval_plan(len(handles)))
         elif sparse_seq:
@@ -533,7 +559,7 @@ def main() -> None:
             if not f.exists():
                 print(f"[pb] skip {sub}: {f} missing", flush=True)
                 continue
-            sp = SparseTokenSplit(f, t_max=args.t_max, device=device)
+            sp = SparseTokenSplit(f, t_max=args.t_max, device=device, stats=tok_stats)
             meta = [json.loads(l) for l in mf.read_text().splitlines() if l.strip()]
             scores = score_all(model, len(sp), sp.collate, eval_plan(len(sp)))
         elif sparse:
@@ -542,7 +568,7 @@ def main() -> None:
             if not f.exists():
                 print(f"[pb] skip {sub}: {f} missing", flush=True)
                 continue
-            sp = SparseVecSplit(f, device)
+            sp = SparseVecSplit(f, device, stats=sp_stats)
             meta = [json.loads(l) for l in mf.read_text().splitlines() if l.strip()]
             scores = score_all(model, len(sp), sp.collate, eval_plan(len(sp)))
         else:
@@ -586,6 +612,7 @@ def main() -> None:
                "reused_from": str(args.hp_from) if args.hp_from else None},
         "protocol": {"epochs": args.epochs, "patience": args.patience,
                      "bucketed": bool(seq and not args.no_bucket),
+                     "rescale": args.rescale,
                      "batch_size": args.batch_size, "t_max": args.t_max,
                      "dropout": args.dropout,
                      "threshold_grid": args.threshold_grid},

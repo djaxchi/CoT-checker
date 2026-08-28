@@ -205,6 +205,20 @@ def check_inputs(cells: list[dict]) -> dict[str, str]:
             "the same activations; rerun them with the current cell runner:\n  "
             + "\n  ".join(missing))
 
+    # Rescaling changes the numbers entering every probe, so a table mixing
+    # rescaled and un-rescaled cells is not one protocol. Same reasoning as the
+    # capped/uncapped split, and the same refusal.
+    modes = {c.get("protocol", {}).get("rescale", "unrecorded") for c in cells}
+    if len(modes) > 1:
+        by_mode = {}
+        for c in cells:
+            by_mode.setdefault(c.get("protocol", {}).get("rescale", "unrecorded"),
+                               []).append(f"{c['rep']} x {c['learner']} seed {c['seed']}")
+        raise SystemExit(
+            "cells were trained under different rescaling settings, so the table "
+            "would not be one protocol:\n  " + "\n  ".join(
+                f"{m}: {len(v)} cells (e.g. {v[0]})" for m, v in sorted(by_mode.items())))
+
     reference = cells[0]["inputs"]
     problems: list[str] = []
     for c in cells[1:]:
@@ -294,6 +308,8 @@ def main() -> None:
     if not cells:
         raise SystemExit(f"no results.json under {args.run_root}")
     inputs = check_inputs(cells)
+    rescale_mode = sorted({c.get("protocol", {}).get("rescale", "unrecorded")
+                           for c in cells})[0]
     full = [c for c in cells if c["full_train"]]
     capped = [c for c in cells if not c["full_train"]]
 
@@ -331,6 +347,11 @@ def main() -> None:
               "tuned over the same lr x weight-decay grid selected on validation "
               "AUROC, and is trained by the same AdamW + BCE trainer with the same "
               "early-stopping rule. Only the representation and the learner vary.", "",
+              f"Rescaling: {rescale_mode}. With `zscore`, each position's "
+              "training average is subtracted and its swing divided out, so the "
+              "numbers entering the probe sit near 0 and swing by about 1 instead "
+              "of about 22; sparse codes are divided but not centred, to keep "
+              "their zeros. Statistics are fitted on the training split only.", "",
               f"The headline is F1_PB at calib-20: {CALIB_SIZE} held-out "
               f"ProcessBench traces per subset (stratified) pick the first-error "
               f"threshold, which is applied to the rest, averaged over "

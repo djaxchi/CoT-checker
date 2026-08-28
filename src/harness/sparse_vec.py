@@ -44,7 +44,8 @@ def write_csr(path: str | Path, rows: list[tuple[np.ndarray, np.ndarray]],
 class SparseVecSplit:
     """Reader that hands the learner dense batches from a sparse store."""
 
-    def __init__(self, path: str | Path, device=None):
+    def __init__(self, path: str | Path, device=None, stats: dict | None = None):
+        self.stats = stats
         z = np.load(Path(path))
         self.indptr = z["indptr"]
         self.indices = z["indices"]
@@ -71,8 +72,11 @@ class SparseVecSplit:
             np.arange(total, dtype=np.int64) - np.repeat(np.cumsum(counts) - counts, counts))
         rows = np.repeat(np.arange(len(idx), dtype=np.int64), counts)
         x = torch.zeros((len(idx), self.d), dtype=torch.float32)
-        x[torch.from_numpy(rows), torch.from_numpy(self.indices[pos].astype(np.int64))] = \
-            torch.from_numpy(self.values[pos].astype(np.float32))
+        vals = self.values[pos].astype(np.float32)
+        cols = self.indices[pos].astype(np.int64)
+        if self.stats is not None:
+            vals = vals / self.stats["std"][cols]
+        x[torch.from_numpy(rows), torch.from_numpy(cols)] = torch.from_numpy(vals)
         return (x.to(self.device), None,
                 torch.from_numpy(self.y[idx]).to(self.device))
 
@@ -143,7 +147,9 @@ def write_token_csr(path: str | Path, steps: list[list[tuple[np.ndarray, np.ndar
 class SparseTokenSplit:
     """Reader that hands the sequence learners sparse token batches."""
 
-    def __init__(self, path: str | Path, t_max: int = 512, device=None):
+    def __init__(self, path: str | Path, t_max: int = 512, device=None,
+                 stats: dict | None = None):
+        self.stats = stats
         z = np.load(Path(path))
         self.step_ptr = z["step_ptr"]
         self.tok_ptr = z["tok_ptr"]
@@ -184,7 +190,9 @@ class SparseTokenSplit:
         t = lambda a, dt: torch.from_numpy(np.ascontiguousarray(a)).to(dev, dt)  # noqa: E731
         batch = SparseTokenBatch(
             indices=t(self.indices[flat_pos], torch.long),
-            values=t(self.values[flat_pos].astype(np.float32), torch.float32),
+            values=t(self.values[flat_pos].astype(np.float32) /
+                     (self.stats["std"][self.indices[flat_pos]] if self.stats
+                      else 1.0), torch.float32),
             offsets=t(offsets[:-1], torch.long),
             tok_id=t(tok_id, torch.long),
             batch_id=t(batch_id, torch.long), pos=t(pos, torch.long),

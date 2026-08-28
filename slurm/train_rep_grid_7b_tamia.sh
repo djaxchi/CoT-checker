@@ -48,6 +48,8 @@ EPOCHS="${EPOCHS:-30}"
 BATCH_SIZE="${BATCH_SIZE:-256}"
 HP_SEARCH_CAP="${HP_SEARCH_CAP:-100000}"
 RESCALE="${RESCALE:-none}"
+# Derived sparse SAE codes, for the sae_* representations. Empty for dense cells.
+SAE_DIR="${SAE_DIR:-}"
 N_GPUS="${N_GPUS:-4}"
 # Span preloading is a PER-PROCESS budget, but N_GPUS cells run concurrently on
 # one node. Job 429667 died OOM because each of 4 cells independently decided
@@ -95,6 +97,7 @@ out_root    : $OUT_ROOT
 cells       : ${#PAIRS[@]}  seeds: $SEEDS  gpus: $N_GPUS
 preload cap : ${PRELOAD_BUDGET_GB} GB per cell (node mem / $N_GPUS x 0.60)
 rescale     : $RESCALE
+sae_dir     : ${SAE_DIR:-(none, dense cells)}
 train_stem  : $TRAIN_STEM (no cap: the full split)
 ================================================================
 BANNER
@@ -118,7 +121,9 @@ echo "[preflight] cell runner imports cleanly"
 # the same .npy; do it serially up front instead.
 for pair in "${PAIRS[@]}"; do
   rep="${pair%% *}"
-  [[ "$rep" == "step_tokens" ]] && continue
+  # step_tokens reads the store directly; sae_* read pre-derived sparse codes.
+  # Neither goes through the dense vector cache.
+  [[ "$rep" == "step_tokens" || "$rep" == sae_* ]] && continue
   marker="$VEC_CACHE/${rep}__${TRAIN_STEM}_h.npy"
   [[ -f "$marker" ]] && { echo "[cache] $rep present"; continue; }
   echo "[cache] deriving $rep"
@@ -157,6 +162,7 @@ run_cell() {  # rep learner seed gpu [extra args...]
     --train_stem "$TRAIN_STEM" --seed "$seed" \
     --epochs "$EPOCHS" --batch_size "$BATCH_SIZE" \
     --hp_search_cap "$HP_SEARCH_CAP" --rescale "$RESCALE" \
+    ${SAE_DIR:+--sae_dir "$SAE_DIR"} \
     --preload_budget_gb "$PRELOAD_BUDGET_GB" "$@" \
     > "$OUT_ROOT/${tag}.log" 2>&1 &
   PIDS+=("$!"); PID_TAGS+=("$tag")

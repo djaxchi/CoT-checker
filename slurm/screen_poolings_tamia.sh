@@ -65,6 +65,12 @@ for m in length length_poly; do
   python scripts/make_surface_baseline.py --npz "$OUT_DIR/mean.npz" --mode "$m" \
     --out "$OUT_DIR/surface_${m}.npz"
 done
+# representation PLUS length, so "beats the surface baseline" can be distinguished
+# from "reads length more accurately than the surface baseline does"
+for r in ${LEN_REPS:-mean centered}; do
+  [ -f "$OUT_DIR/$r.npz" ] && python scripts/make_surface_baseline.py \
+    --npz "$OUT_DIR/$r.npz" --mode augment --out "$OUT_DIR/${r}_pluslen.npz"
+done
 
 echo
 echo "=== screen ==="

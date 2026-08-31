@@ -16,8 +16,21 @@ the interesting range of the whole grid shrinks accordingly, and every claim abo
 representations has to be stated net of it. That is a result either way, and it is
 cheap.
 
-Emits `length` (log tokens alone) and `length_poly` (log tokens with squared and
-raw terms, so a non-linear length response is not mistaken for its absence).
+Emits `length` (log tokens alone), `length_poly` (with squared and raw terms, so a
+non-linear length response is not mistaken for its absence), and `augment`, which
+concatenates the length features onto a representation.
+
+`augment` is what makes the baseline answer the question rather than merely raise
+it. Comparing three numbers -- surface alone, representation alone, and
+representation plus surface -- separates the cases:
+
+    rep+surface ~= surface          the activations add nothing over length
+    rep ~= rep+surface >> surface   the representation already contains length,
+                                    and more besides
+    rep+surface > both              they carry different things
+
+Without the augmented cell, a representation scoring above the surface baseline
+could still be doing nothing except reading length more accurately.
 """
 
 from __future__ import annotations
@@ -39,7 +52,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--npz", required=True, type=Path,
                    help="Any pooling npz; only its length and label arrays are used.")
-    p.add_argument("--mode", choices=["length", "length_poly"], default="length")
+    p.add_argument("--mode", choices=["length", "length_poly", "augment"],
+                   default="length")
     p.add_argument("--out", required=True, type=Path)
     args = p.parse_args()
 

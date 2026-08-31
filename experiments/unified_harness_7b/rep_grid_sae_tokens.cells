@@ -1,0 +1,14 @@
+# The sparse sequence twin, rerun after the dispatch fix.
+#
+# sae_tokens is both sparse and a sequence, so branch order decides its loader.
+# The ProcessBench block tested `seq` before `sparse_seq`, handed these cells a
+# dense SpanLoader, and all four died at scoring AFTER completing their
+# hyperparameter search. Fixed, with a test pinning the order at both dispatch
+# sites.
+#
+# This is the one sparse cell that never pools away per-token structure, so it is
+# where SAE features would be expected to do best: the pooled twins lose between
+# 0.053 and 0.195, and the loss shrinks the more tokens are pooled.
+
+sae_tokens attn_query
+sae_tokens transformer:d256,l2,f1024,h4

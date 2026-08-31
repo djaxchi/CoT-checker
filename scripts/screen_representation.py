@@ -71,6 +71,21 @@ def auroc(y: np.ndarray, s: np.ndarray) -> float:
     return float((ranks[y == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
+def standardize(x_train):
+    """Per-position mean and swing from TRAIN, so the probe is scale-invariant.
+
+    Without this the screen's fixed learning rate silently means different things
+    for different representations. A 4,096-dim activation block and a single
+    log-length feature cannot share one step size: at lr 1e-3 a one-dimensional
+    probe never escapes its random initialisation, and length scored 0.296 --
+    below chance -- when the feature itself separates the classes at 0.736.
+    """
+    mu = np.asarray(x_train, dtype=np.float64).mean(0)
+    sd = np.asarray(x_train, dtype=np.float64).std(0)
+    sd[sd < 1e-8] = 1.0
+    return mu.astype(np.float32), sd.astype(np.float32)
+
+
 def fit_probe(x, y, epochs: int, lr: float, batch: int, device, seed: int = 0):
     torch.manual_seed(seed)
     n, d = x.shape
@@ -104,11 +119,13 @@ def screen(x_tr, y_tr, x_val, y_val, pb, device, epochs=8, lr=1e-3,
     t0 = time.perf_counter()
     share = signal_share(torch.as_tensor(np.asarray(x_tr[:20000], dtype=np.float32)),
                          torch.as_tensor(np.asarray(y_tr[:20000])))
-    w = fit_probe(x_tr, y_tr, epochs, lr, batch, device, seed)
+    mu, sd = standardize(x_tr)
+    z = lambda a: (np.asarray(a, dtype=np.float32) - mu) / sd            # noqa: E731
+    w = fit_probe(z(x_tr), y_tr, epochs, lr, batch, device, seed)
     res = {
         "signal_share": share,
-        "in_domain_auroc": auroc(y_val, score(w, x_val, device)),
-        "pb_step_auroc": float(np.mean([auroc(yy, score(w, xx, device)) for xx, yy in pb])),
+        "in_domain_auroc": auroc(y_val, score(w, z(x_val), device)),
+        "pb_step_auroc": float(np.mean([auroc(yy, score(w, z(xx), device)) for xx, yy in pb])),
         "n_train": int(len(x_tr)), "dim": int(x_tr.shape[1]),
         "seconds": round(time.perf_counter() - t0, 1),
     }

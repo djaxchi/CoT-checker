@@ -115,3 +115,25 @@ def test_surface_augment_actually_concatenates(tmp_path):
         assert z["x_train"].shape[1] == expect, f"{mode}: {z['x_train'].shape[1]} != {expect}"
         assert z["pb_x_a"].shape[1] == expect
         assert z["x_val"].shape[1] == expect
+
+
+def test_a_single_informative_feature_screens_above_chance():
+    """The screen reported step length at 0.296 PB AUROC -- below chance -- while
+    the feature itself separates the classes at 0.736. Cause: one fixed learning
+    rate cannot serve both a 4,096-dim activation block and a 1-dim scalar, so the
+    one-dimensional probe never escaped its random initialisation and kept a
+    negative weight. Inputs are standardised now; pin that a lone good feature
+    screens correctly."""
+    rng = np.random.default_rng(0)
+    def blk(m, mu0, mu1):
+        y = (rng.random(m) < 0.4).astype(np.float32)
+        L = np.where(y == 1, rng.normal(mu1, mu1 * 0.4, m), rng.normal(mu0, mu0 * 0.4, m))
+        return np.log(np.maximum(L, 2))[:, None].astype(np.float32), y
+    xt, yt = blk(20000, 32.8, 45.3)
+    xv, yv = blk(4000, 32.8, 45.3)
+    xp, yp = blk(4000, 79.7, 118.6)          # the real domain shift, longer steps
+    raw = auroc(yp, xp[:, 0])                # what the feature is worth, no probe
+    r = screen(xt, yt, xv, yv, [(xp, yp)], DEV, epochs=8, lr=1e-3)
+    assert raw > 0.65
+    assert r["pb_step_auroc"] > 0.6, f"1-d probe collapsed: {r['pb_step_auroc']:.3f}"
+    assert abs(r["pb_step_auroc"] - raw) < 0.1

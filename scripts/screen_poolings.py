@@ -30,6 +30,18 @@ sake:
                 but never at token granularity inside a step.
   first_last    concat[first token, last token]. The cheapest possible test of
                 whether a step's endpoints bracket the signal.
+  normpow_a     pool ||h||^a * (h/||h||). Iteration 1 refuted direction-only
+                pooling: mean_l2 (a=0) cost 0.092 against plain mean (a=1), so a
+                token's norm is acting as an importance weight rather than as
+                nuisance. The exponent has never been tuned; if the trend is
+                monotone, a>1 should beat mean.
+  softnorm_t    softmax(||h||/t)-weighted pool. A fixed stand-in for the learned
+                attention query, which is the largest single win in the grid
+                (+0.089): if what it learns is mostly "attend to high-norm
+                tokens", a fixed norm-softmax should capture much of it.
+  typical       weight by cosine to the step's mean direction; atypical is its
+                complement. Does the signal live in the tokens that fit the
+                step's gist, or in the ones that depart from it?
 
 Samples the store rather than reading all of it, because a screen that costs a
 full pass is not a screen.
@@ -59,6 +71,10 @@ def poolings(span: np.ndarray, boundary: np.ndarray) -> dict[str, np.ndarray]:
     mean = span.mean(0)
     unit = span / (np.linalg.norm(span, axis=1, keepdims=True) + EPS)
     dev = np.abs(span - mean).mean(0)
+    norms = np.linalg.norm(span, axis=1, keepdims=True) + EPS
+    def wpool(w):
+        w = np.asarray(w, dtype=np.float32).reshape(-1, 1)
+        return (w * span).sum(0) / (w.sum() + EPS)
     out = {
         "mean": mean,
         "mean_l2": unit.mean(0),
@@ -68,6 +84,17 @@ def poolings(span: np.ndarray, boundary: np.ndarray) -> dict[str, np.ndarray]:
         "quantiles": np.concatenate([np.percentile(span, q, axis=0) for q in (10, 50, 90)]),
         "first_last": np.concatenate([span[0], span[-1]]),
     }
+    for a in (0.5, 1.5, 2.0, 3.0):
+        out[f"normpow_{a}"] = ((norms ** (a - 1.0)) * span).sum(0) / (
+            (norms ** (a - 1.0)).sum() + EPS) if t else mean
+    nz = (norms[:, 0] - norms[:, 0].mean()) / (norms[:, 0].std() + EPS)
+    for tau in (0.5, 2.0):
+        w = np.exp(nz / tau - (nz / tau).max())
+        out[f"softnorm_{tau}"] = wpool(w)
+    md = mean / (np.linalg.norm(mean) + EPS)
+    cos = (span @ md) / norms[:, 0]
+    out["typical"] = wpool(np.clip(cos, 0, None) + EPS)
+    out["atypical"] = wpool(np.clip(1.0 - cos, 0, None) + EPS)
     if t >= 2:
         d = np.diff(span, axis=0)
         out["diffs"] = np.concatenate([d.mean(0), d.std(0)])

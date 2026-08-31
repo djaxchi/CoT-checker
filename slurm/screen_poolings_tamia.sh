@@ -58,6 +58,14 @@ for r in $LEN_REPS; do
   done
 done
 
+# The baseline the grid has never had: what is predictable with no activations
+# at all. Removing length from step_mean costs 56% of its between-class variance,
+# so the leaderboard needs to state how much of itself is reading step length.
+for m in length length_poly; do
+  python scripts/make_surface_baseline.py --npz "$OUT_DIR/mean.npz" --mode "$m" \
+    --out "$OUT_DIR/surface_${m}.npz"
+done
+
 echo
 echo "=== screen ==="
 python scripts/screen_representation.py --npz "$OUT_DIR"/*.npz --out "$OUT_DIR/screen.json"

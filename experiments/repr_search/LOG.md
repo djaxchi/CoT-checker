@@ -95,3 +95,35 @@ the screen measures exactly that transfer. Test by regressing length out of the
 representation (fit on train, applied unchanged to ProcessBench), with the
 opposite control of explicitly *adding* length: if adding it helps in domain and
 hurts transfer, length is a transfer confound worth removing.
+
+---
+
+## Side result — full whitening as the grid protocol (job 433522, 45 cells)
+
+Hypothesis (the user's): correctness is a low-variance direction, so equalising
+every direction's variance should stop variance-ordered methods discriminating
+against it. `zscore` divides each position by its own swing; `whiten` removes the
+correlations too.
+
+| | none | zscore | whiten |
+|---|---|---|---|
+| best cell | 0.540 | 0.540 | **0.494** |
+| mean change vs zscore | | — | **−0.037** |
+| Spearman vs zscore | | — | **+0.681** |
+
+**Whitening loses, and reorders.** It costs 0.037 on average, drops the ceiling by
+0.046, and disagrees with the zscore ranking at Spearman 0.681 — so it is not a
+uniform shift, it changes which representation looks best.
+
+The damage is concentrated in the MLP cells (−0.077 to −0.086) while the linear
+cells are near-flat (−0.034 to +0.010). That fits the mechanism: whitening
+amplifies every low-variance direction including noise (fitted covariance
+condition numbers 2.6e5 to 8.4e6, and 0.05 shrinkage was not enough), and a
+linear probe can partly undo a fixed rotation while an MLP's first layer cannot.
+
+This is the **second** independent negative for the idea: the bottleneck screen
+already put `recon_white` last of eight at 0.694. Equalising variance helps a
+*distance metric* for classification, as the conicity work found; it does not
+help either a *reconstruction target* or a *probe input*.
+
+`zscore` stays the protocol.

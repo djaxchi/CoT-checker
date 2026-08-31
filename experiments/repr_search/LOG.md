@@ -127,3 +127,52 @@ already put `recon_white` last of eight at 0.694. Equalising variance helps a
 help either a *reconstruction target* or a *probe input*.
 
 `zscore` stays the protocol.
+
+## Iteration 4b: the screen was broken, and the surface baseline is the story
+
+Iteration 4's surface baseline came back at 0.2967 PB step AUROC for
+`surface_length_poly` and 0.2961 for `surface_length`, both far below chance,
+while the same job printed the statistics that make that impossible:
+
+```
+train      mean length  correct 32.8   incorrect 45.3
+procbench  mean length  not-first-error 79.7   first-error 118.6
+```
+
+Longer steps are more often wrong in both domains, so a monotone probe on log
+length cannot score under 0.5. Reproduced on matched synthetic data:
+
+```
+AUROC of the raw feature (no probe at all):  train 0.7077   pb 0.7363
+  fitted probe epochs=8   lr=0.001 -> pb 0.2637   weight -0.1773
+  fitted probe epochs=8   lr=0.1   -> pb 0.7363   weight +1.1137
+  fitted probe epochs=60  lr=0.1   -> pb 0.7363   weight +1.1618
+```
+
+The probe never left its random initialisation sign. One learning rate cannot
+serve both a 4,096-dim activation block (per-position swing around 22) and a
+single log-length scalar (swing around 0.3). Fix: standardise inputs from train
+statistics inside the screen, the same lesson `--rescale zscore` taught the grid.
+
+The real number needs no probe at all. AUROC of raw step length as a score, on
+the actual cached vectors:
+
+| split | AUROC of length alone |
+|---|---|
+| PRM800K val (in domain) | 0.6142 |
+| ProcessBench gsm8k | 0.7158 |
+| ProcessBench math | 0.6744 |
+| ProcessBench olympiadbench | 0.7151 |
+| ProcessBench omnimath | 0.7101 |
+| **ProcessBench mean** | **0.7039** |
+
+Base `step_mean` scores 0.7707 on the same screen. So a single scalar, available
+without running the model at all, recovers most of the transfer score, and the
+gap the whole grid is competing over is about 0.067 wide, not 0.27. Every
+representation claim has to be restated net of length. Whether the activations
+carry anything beyond length is what `mean_residual` and `mean_pluslen` answer;
+re-screened in job 433702.
+
+Note also that length is a much weaker cue in domain (0.614) than on
+ProcessBench (0.704). The transfer benchmark is the one where the shortcut pays
+best, which is the opposite of what a robustness benchmark should do.

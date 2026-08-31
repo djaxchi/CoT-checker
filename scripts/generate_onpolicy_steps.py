@@ -15,7 +15,9 @@ steps on blank lines (the PRM800K "\\n\\n" step convention) and emits one *item*
 step in the exact schema ``encode_prm800k_forks.py`` consumes, carrying the
 trajectory's correctness as the step label.
 
-Outputs:
+Outputs (``{stem}`` gains a ``.shardNN`` suffix when --num_shards > 1; generation
+is single-device, so a whole H100 node runs one shard per GPU under
+CUDA_VISIBLE_DEVICES and scripts/onpolicy/build_pb_traces.py merges them):
   {stem}_items.jsonl         per-step items (problem, prefix, candidate_step, label,
                              role="generated", item_uid, fork_id, traj_correct, ...)
                              -> feed to encode_prm800k_forks.py + encode_fork_confidence.py
@@ -38,6 +40,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.encode_prm800k_hidden_states import git_commit, read_jsonl, write_jsonl  # noqa: E402
 from src.eval.math_grade import grade  # noqa: E402
+from src.onpolicy.prompts import generation_prompt  # noqa: E402
 
 _BLANKLINE = re.compile(r"\n\s*\n")
 
@@ -98,10 +101,23 @@ def build_step_items(problem: str, gold: str, solution: str, traj_uid: str,
     return items
 
 
+def shard_problems(problems: list[dict], shard_idx: int, num_shards: int) -> list[dict]:
+    """The shard's slice of the problem list.
+
+    Striding rather than blocking so every shard sees the same mix of easy and
+    hard problems and finishes at roughly the same time; blocks would leave one
+    GPU running long after the others. The slices partition the list exactly,
+    which is what lets the merge refuse duplicate trajectory ids.
+    """
+    if not 0 <= shard_idx < num_shards:
+        raise ValueError(f"shard_idx {shard_idx} outside 0..{num_shards - 1}")
+    return problems[shard_idx::num_shards]
+
+
 def build_prompt(problem: str) -> str:
-    return (f"Problem:\n{problem}\n\n"
-            "Solve the problem step by step. Put each step on its own line, and write "
-            "the final answer inside \\boxed{}.\n\nSolution:\n")
+    """The sampling prompt. Defined in src/onpolicy/prompts.py so the encoder can
+    rebuild the exact context this sampler ran under (--prompt_style generation)."""
+    return generation_prompt(problem)
 
 
 def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, list]:
@@ -122,6 +138,8 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
         if args.temperature > 0:
             gen_kwargs.update(do_sample=True, temperature=args.temperature,
                               top_p=args.top_p)
+            if args.top_k > 0:
+                gen_kwargs["top_k"] = args.top_k
         else:
             gen_kwargs.update(do_sample=False)
         with torch.no_grad():
@@ -164,7 +182,17 @@ def main() -> None:
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--max_new_tokens", type=int, default=1024)
-    p.add_argument("--max_problems", type=int, default=300)
+    p.add_argument("--max_problems", type=int, default=300,
+                   help="Cap applied to the FULL problem list, before sharding, so "
+                        "every shard of a run covers the same problem set.")
+    p.add_argument("--top_k", type=int, default=50,
+                   help="ReProbe's setting is 50. 0 leaves the model's own "
+                        "generation_config value in place.")
+    p.add_argument("--shard_idx", type=int, default=0,
+                   help="Generation is single-device; a whole H100 node runs four "
+                        "shards under CUDA_VISIBLE_DEVICES, which is where the 4x "
+                        "comes from. Output files carry the shard suffix.")
+    p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
                    default="float16",
@@ -174,17 +202,22 @@ def main() -> None:
 
     import torch
 
+    if not 0 <= args.shard_idx < args.num_shards:
+        sys.exit(f"[gen] shard_idx {args.shard_idx} outside 0..{args.num_shards-1}")
+    suffix = "" if args.num_shards == 1 else f".shard{args.shard_idx:02d}"
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    items_path = args.out_dir / f"{args.stem}_items.jsonl"
+    items_path = args.out_dir / f"{args.stem}{suffix}_items.jsonl"
     if items_path.exists() and not args.force:
         sys.exit(f"[gen] Refusing to overwrite {items_path}. Pass --force.")
 
     torch.manual_seed(args.seed)
-    problems = unique_problems(read_jsonl(args.fork_items), args.id_field)
+    all_problems = unique_problems(read_jsonl(args.fork_items), args.id_field)
     if args.max_problems > 0:
-        problems = problems[:args.max_problems]
-    print(f"[gen] {len(problems)} problems x {args.n_samples} samples "
-          f"(T={args.temperature})", flush=True)
+        all_problems = all_problems[:args.max_problems]
+    problems = shard_problems(all_problems, args.shard_idx, args.num_shards)
+    print(f"[gen] shard {args.shard_idx}/{args.num_shards}: {len(problems)} of "
+          f"{len(all_problems)} problems x {args.n_samples} samples "
+          f"(T={args.temperature}, top_p={args.top_p}, top_k={args.top_k})", flush=True)
 
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16,
                  "float32": torch.float32}
@@ -207,19 +240,22 @@ def main() -> None:
     step_items, trajectories = generate_solutions(problems, tokenizer, model, device, args)
 
     write_jsonl(items_path, step_items)
-    write_jsonl(args.out_dir / f"{args.stem}_trajectories.jsonl", trajectories)
+    write_jsonl(args.out_dir / f"{args.stem}{suffix}_trajectories.jsonl", trajectories)
     n_corr = sum(t["correct"] for t in trajectories)
     n_grad = sum(t["gradeable"] for t in trajectories)
     manifest = {
         "run_name": args.run_name, "model": args.model_name_or_path,
-        "n_problems": len(problems), "n_samples": args.n_samples,
-        "temperature": args.temperature, "max_new_tokens": args.max_new_tokens,
+        "n_problems": len(problems), "n_problems_all_shards": len(all_problems),
+        "shard_idx": args.shard_idx, "num_shards": args.num_shards,
+        "n_samples": args.n_samples, "prompt_style": "generation",
+        "temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
+        "max_new_tokens": args.max_new_tokens,
         "n_trajectories": len(trajectories), "n_gradeable": n_grad,
         "n_correct": n_corr, "n_incorrect": n_grad - n_corr,
         "n_step_items": len(step_items),
         "created_at": datetime.now(timezone.utc).isoformat(), "code_commit": git_commit(),
     }
-    (args.out_dir / f"{args.stem}_generation_manifest.json").write_text(
+    (args.out_dir / f"{args.stem}{suffix}_generation_manifest.json").write_text(
         json.dumps(manifest, indent=2))
     print(f"[gen] trajectories={len(trajectories)} gradeable={n_grad} "
           f"correct={n_corr} incorrect={n_grad-n_corr}  steps={len(step_items)}")

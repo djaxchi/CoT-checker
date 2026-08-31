@@ -26,7 +26,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.encode_prm800k_hidden_states import build_prompt_prefix  # noqa: E402
+from src.onpolicy.prompts import STYLES, build_prefix  # noqa: E402
 from src.repstore.store import TOKEN_SEQ, RepSpec  # noqa: E402
 
 
@@ -60,13 +60,13 @@ def flatten(traces: list[dict], subset: str) -> list[dict]:
 
 def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
                   max_seq_len, batch_size, pad_id, shard_idx, num_shards, backbone,
-                  span_only=False):
+                  span_only=False, prompt_style="verifier"):
     flat = flatten(load_traces(raw_file), subset)
     shard = [r for r in flat if r["global_index"] % num_shards == shard_idx]
 
     toks = []
     for ex in shard:
-        prefix_ids = tokenizer(build_prompt_prefix(ex["problem"], ex["prefix"]),
+        prefix_ids = tokenizer(build_prefix(prompt_style, ex["problem"], ex["prefix"]),
                                add_special_tokens=True, truncation=False)["input_ids"]
         step_ids = tokenizer(ex["current_step"], add_special_tokens=False, truncation=False)["input_ids"]
         ids = prefix_ids + step_ids
@@ -117,7 +117,8 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
             row = {
                 "id": ex["id"], "step_idx": ex["step_idx"], "label": ex["label"],
                 "n_steps": ex["n_steps"], "pb_subset": subset,
-                "n_tokens": nt, "step_start_idx": start, "pre_step_boundary_idx": start - 1,
+                "prompt_style": prompt_style, "n_tokens": nt,
+                "step_start_idx": start, "pre_step_boundary_idx": start - 1,
                 "global_index": ex["global_index"],
             }
             if span_only:
@@ -137,6 +138,7 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
             f.write(json.dumps(m) + "\n")
     spec = RepSpec(
         name=rep_root.name, kind=TOKEN_SEQ, dim=d, layer=layer, backbone=backbone,
+        prompt_style=prompt_style,
         readout="step_span_with_boundary" if span_only else "token_all_last_layer",
         source_split=subset)
     (out_dir / "spec.json").write_text(spec.to_json())
@@ -160,6 +162,12 @@ def main():
     p.add_argument("--span_only", action="store_true",
                    help="Store only the pre-step boundary row plus the step's own "
                         "tokens (byte-identical to encoding in full then compacting).")
+    p.add_argument("--prompt_style", choices=STYLES, default="verifier",
+                   help="Context each step is read under. 'verifier' is the template "
+                        "the off-policy grid used and is the one that keeps the "
+                        "on-policy comparison controlled; 'generation' rebuilds the "
+                        "context an on-policy sampler actually ran under, giving the "
+                        "generative states rather than a re-read.")
     args = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -176,7 +184,8 @@ def main():
         subset, raw = spec.split(":", 1)
         encode_subset(Path(raw), subset, args.rep_root, tok, model, device, args.layer,
                       args.max_seq_len, args.batch_size, pad_id, args.shard_idx, args.num_shards,
-                      Path(args.model_name_or_path).name, args.span_only)
+                      Path(args.model_name_or_path).name, args.span_only,
+                      args.prompt_style)
 
 
 if __name__ == "__main__":

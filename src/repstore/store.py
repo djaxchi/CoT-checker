@@ -49,6 +49,11 @@ class RepSpec:
     backbone: str        # e.g. "Qwen2.5-7B"
     readout: str         # e.g. "last", "delta", "step_tokens", "step_states"
     source_split: str = ""
+    # Which context the step was encoded under. "verifier" is the template the
+    # whole off-policy grid used; "generation" reconstructs the context an
+    # on-policy sampler actually ran under (src/onpolicy/prompts.py). Defaulted
+    # so specs written before the on-policy arm read back unchanged.
+    prompt_style: str = "verifier"
     reduce_default: str = "mean"   # default seq->vector reduction for vector learners
     git_commit: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())

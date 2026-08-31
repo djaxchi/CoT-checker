@@ -229,3 +229,81 @@ measured against 0.7307, not against a length-inflated 0.767.
 Caveat: the residual, withlen and surface files were skipped in this pass because
 neither deriver copied the length arrays into its output. Fixed and tested; those
 rows land in the next pass.
+
+## Iteration 6: multi-layer stacking, and a discrepancy that blocks reading it
+
+Layer 26 finished encoding, so the one hypothesis that ever bought a large gain
+in this project (multi-layer stacking, about +0.05 AUC on Qwen2.5) is testable on
+Qwen3. Layer 26 alone was screened alongside the stack so a gain could be
+attributed to reading two layers rather than to 26 being the better single layer.
+
+The screen liked it:
+
+| representation | PB step AUROC | in-domain |
+|---|---|---|
+| dir_L26L35 | **0.7771** | 0.8653 |
+| mean_L26L35 | 0.7700 | 0.8644 |
+| mean_l2_L26L35 | 0.7679 | 0.8651 |
+| atypical_L26L35 | 0.7662 | 0.8627 |
+| dir_L26only | 0.7619 | 0.8618 |
+| dir | 0.7603 | 0.8573 |
+| mean | 0.7575 | 0.8561 |
+| mean_L26only | 0.7531 | 0.8614 |
+
+Every stack beats both its own layers, which is the shape the hypothesis
+predicts, and dir_L26L35 at 0.7771 is the best number the screen has produced.
+
+The stratified script, run on the same files in the same job, does not agree:
+
+| representation | screen PB | stratified PB | gap | dim |
+|---|---|---|---|---|
+| dir_L26L35 | 0.7771 | 0.7563 | **-0.0208** | 8192 |
+| mean_L26L35 | 0.7700 | 0.7502 | -0.0198 | 8192 |
+| mean_l2_L26L35 | 0.7679 | 0.7466 | -0.0213 | 8192 |
+| dir_L26only | 0.7619 | 0.7655 | +0.0036 | 4096 |
+| dir | 0.7603 | 0.7673 | +0.0070 | 4096 |
+| mean | 0.7575 | 0.7619 | +0.0044 | 4096 |
+
+Both fit the same probe with the same standardisation, epochs, learning rate,
+batch and seed. The only difference was 50,000 training rows against 60,000. The
+gap is about +0.005 at 4,096 dims and about -0.021 at 8,192, so it tracks width,
+not sampling. That is what an undertrained probe looks like: at a fixed epoch
+count a wider representation sits further from convergence.
+
+Under the stratified column stacking LOSES: dir_L26L35 at 0.7142 within strata
+against plain dir at 0.7307. So the two columns do not merely differ in level,
+they disagree about the hypothesis.
+
+Stacking doubles the width, which is exactly the axis the discrepancy tracks, so
+the stacking result cannot be read at all until the budget is swept. No verdict
+recorded. Job 433791 runs epochs {8, 25, 60} against lr {1e-3, 1e-2} on eight
+representations spanning 4,096 to 12,288 dims. The outcome to look for is not the
+best cell but whether the ORDER is the same in every cell.
+
+Also fixed: stratified_auroc now uses the screen's n_train, with a test that both
+scripts keep matching n_train, epochs and lr defaults.
+
+### The derived representations, now that they carry their lengths
+
+The rows skipped last pass, at 50 bins:
+
+| representation | PB plain | PB within-length | cost |
+|---|---|---|---|
+| mean_pluslen | 0.7915 | 0.7332 | 0.0583 |
+| mean_withlen | 0.7755 | 0.7291 | 0.0464 |
+| dir | 0.7673 | 0.7307 | 0.0366 |
+| mean | 0.7619 | 0.7252 | 0.0367 |
+| mean_residual | 0.7347 | **0.7256** | **0.0091** |
+| surface_length | 0.7039 | 0.5097 | 0.1941 |
+
+Two things worth keeping. Bolting length onto `mean` buys 0.0296 plain
+(0.7619 -> 0.7915) and 0.0080 within strata (0.7252 -> 0.7332), so about
+three quarters of what the length feature adds to the plain score is the
+shortcut rather than new information.
+
+And `mean_residual`, which has length regressed out of every position, scores
+0.7256 within strata against plain `mean`'s 0.7252, while paying only 0.0091 to
+stratification against everyone else's 0.037. So removing length costs nothing
+once length is not scoreable, and it is the only representation that is already
+close to length-free. Its plain score of 0.7347 is the honest one; the other
+rows are carrying about 0.03 of length that stratification removes.

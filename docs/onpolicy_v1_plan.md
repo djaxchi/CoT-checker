@@ -1,6 +1,10 @@
 # onpolicy_v1: does the representation leaderboard transfer to on-policy use?
 
-Status: Stage 0 implemented and tested (2026-08-31), Stage 1 ready to submit.
+Status (2026-08-31): Stage 0 done. **Stage 1 ran and passed every gate** (job
+433635, 21 minutes). Stage 2's first judge bake-off ran (job 433640) and came
+back too weak to use, which forked the labelling question; see "Stage 2: what
+happened" below. Two follow-ups are queued: the same judges with reasoning
+enabled (433685) and a rollout labeller gated on human fork annotations (433686).
 Design frozen for Stage 0 implementation (2026-08-31). Stages 1-3 are the
 minimal arm and each carries a kill gate; Stages 4-6 are the full-scale arm and are
 not started until Stage 3 reports. Context and the settled parts of the setting are
@@ -207,10 +211,84 @@ BoN comparability. Gates, in order of what would kill the arm:
   separate from any other and every T2 correlation is measuring noise. If headroom
   is thin, raise N or move to harder problems before spending anything else.
 
-### Stage 2: judge bake-off and certification (1 job, ~1-2h)
+### Stage 1: what happened (job 433635, 21 minutes, GO)
 
-As described above. Output: agreement table, chosen judge, and the noise ceiling
-that every subsequent first-error number is reported against.
+300 PRM800K test problems x 10 samples at T=1.0, four shards.
+
+```
+trajectories 3,000   gradeable 2,995 (0.998)   trajectory accuracy 0.372
+steps per solution   median 7, mean 9.0        single-step 0.041
+step length          median 32 tokens, mean 49.4
+  off-policy ref     median 33 tokens, mean 37.9
+pass@1 0.372    self-consistency 0.563    oracle@10 0.710
+```
+
+Two of these matter more than the rest.
+
+**The step-length confound is much smaller than the handoff feared.** Measured in
+tokens rather than words, the medians are 32 on-policy against 33 off-policy. The
+"~24 words against 38.8 tokens" that looked like a distribution shift was a unit
+mismatch. The means still differ (49.4 against 37.9), so the on-policy
+distribution has a heavier right tail, and the length-matched rerun stays in the
+protocol, but it is now a robustness check rather than a threat.
+
+**T2 has room.** Oracle@10 is 0.710 against 0.372 for a single sample and 0.563
+for self-consistency. A reranker has 0.147 to win over the baseline it actually
+has to beat, which is enough for verifiers to separate. Had this been near zero,
+every T2 correlation would have been measuring sampling noise.
+
+### Stage 2: what happened, and the fork it forced
+
+The first bake-off (job 433640) scored three local judges on 400 human-labelled
+ProcessBench traces, at their natural prevalence, all answering the same
+questions, with the degenerate strategies scored underneath them.
+
+```
+judge                 F1_PB  Acc_err  Acc_cor   exact  parsefail
+qwen25_32b            0.435    0.294    0.834   0.522      0.000
+qwen3_8b_base         0.421    0.294    0.740   0.482      0.002
+qwen25_7b_instruct    0.009    0.004    0.994   0.422      0.000
+
+always_no_error       0.000    0.000    1.000   0.422
+always_last_step      0.000    0.048    0.000   0.028
+always_first_step     0.000    0.130    0.000   0.075
+```
+
+Read against the leaderboard rather than in isolation: **the best representation
+cell scores 0.566 on this same metric**, so a linear-probe-scale verifier on
+internal states beats an 8B and a 32B model asked the question in words. That is
+worth reporting on its own, with the caveat that these are base models answering
+on their first generated token, and not an R1-class judge.
+
+For this arm it is a problem: labels at Acc_error 0.294 are noisier than the
+signal they would be used to measure. Qwen2.5-7B-Instruct is worse than a
+problem, it is degenerate, answering "no error" on 99.4% of traces. Its exact
+match of 0.422 is precisely the always-no-error baseline's, which is why that row
+is in the table.
+
+Neither judge shows the position bias the baselines were there to catch: both
+point 0.45 of the way through a trace where the errors sit at 0.38, so they are
+reading something, just not enough of it.
+
+Two follow-ups, run as controlled changes rather than a redesign:
+
+1. **Reasoning before the verdict** (job 433685). All three answered on the first
+   generated token. The same judges get an ordered check of the steps and then a
+   final answer line, on the same 400 traces.
+2. **A rollout labeller** (job 433686), which needs no judge at all. From each
+   prefix, sample K continuations and grade them against the known answer; the
+   first step after which the model cannot recover is the first error. This is
+   Math-Shepherd's hard estimation and it is on-policy by construction.
+
+The rollout labeller measures something different from what a human annotator
+marks: a human marks a step that is *wrong*, a rollout marks a step after which
+the model cannot *recover*, and those come apart both ways. So it is gated on
+human annotations before its labels are used, by a paired test on PRM800K matched
+forks: one prefix, one step humans rated +1, one they rated -1, roll out from
+both, and ask whether the value is lower after the step humans called wrong.
+Chance is 0.500; the gate is 0.600. This is the certification PRM800K *can*
+support, and it dodges the errors-come-last artifact that makes whole-trace
+PRM800K localisation meaningless.
 
 ### Stage 3: encode and screen (1 job, ~1h, then minutes)
 

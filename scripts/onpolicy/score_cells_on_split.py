@@ -119,9 +119,20 @@ def train_stem_of(res: dict, override: str | None) -> str:
 
 def cell_stats(res: dict, prm_store: Path, vec_cache: Path | None,
                cache_dir: Path | None, cache: dict,
-               train_stem_override: str | None = None) -> dict | None:
+               train_stem_override: str | None = None,
+               assume_rescale: str | None = None) -> dict | None:
     """Rescaling statistics for one cell, refit from the store it trained on."""
-    mode = res["protocol"]["rescale"]
+    mode = res["protocol"].get("rescale") or assume_rescale
+    if mode is None:
+        # Two grids ran before the field existed. Guessing would rescale the
+        # scores by statistics the cell never saw, and nothing downstream would
+        # look wrong, so this refuses. The evidence is in the cell's log and
+        # scripts/backfill_rescale_field.py writes it in.
+        raise SystemExit(
+            "this cell predates protocol.rescale. Run "
+            "scripts/backfill_rescale_field.py --run_root <grid> --rescale "
+            "<none|zscore> --require_log_evidence first, or pass "
+            "--assume_rescale to state it explicitly for this run.")
     if mode == "none":
         return None
     rep = res["rep"]
@@ -202,6 +213,10 @@ def main() -> None:
                    help="Training store, for refitting rescaling statistics. "
                         "Defaults to the path each cell recorded.")
     p.add_argument("--vec_cache_dir", type=Path, default=None)
+    p.add_argument("--assume_rescale", choices=["none", "zscore", "whiten"],
+                   default=None,
+                   help="Rescaling for cells that predate protocol.rescale. State "
+                        "it deliberately; it is never inferred.")
     p.add_argument("--train_stem", default=None,
                    help="Override the training split name; by default it is the "
                         "single 'train' stem among the cell's recorded inputs.")
@@ -242,7 +257,7 @@ def main() -> None:
             continue
         prm_store = args.prm_store or Path(res["prm_store"])
         stats = cell_stats(res, prm_store, args.vec_cache_dir, args.stats_cache_dir,
-                           stats_cache, args.train_stem)
+                           stats_cache, args.train_stem, args.assume_rescale)
         t0 = time.perf_counter()
         scores, y, meta = score_cell(cell, res, args.split_dir, stats, device,
                                      args.batch_size, args.t_max)
@@ -262,7 +277,7 @@ def main() -> None:
             "cell": cell.name, "rep": rep, "learner": res["learner"],
             "seed": res["seed"], "split": args.split_name,
             "split_fingerprint": split_fp, "n_steps": int(len(scores)),
-            "rescale": res["protocol"]["rescale"],
+            "rescale": res["protocol"].get("rescale") or args.assume_rescale,
             "val_threshold": t_val,
             "step_auroc": float(auroc_numpy(y, scores)),
             "F1_PB_at_val_threshold": float(m_val["F1_PB"]),

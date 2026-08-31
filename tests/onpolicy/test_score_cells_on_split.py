@@ -101,3 +101,23 @@ def test_summary_reports_rank_material_and_flags_the_f1_caveat(store, tmp_path):
               "oracle_F1_PB", "split_fingerprint", "n_traces"):
         assert k in row
     assert "NOT comparable" in r.stdout
+
+
+def test_a_cell_without_a_recorded_rescale_is_refused_not_guessed(store, tmp_path):
+    """Two grids ran before protocol.rescale existed. Guessing it would rescale
+    the scores by statistics the cell never saw and nothing would look wrong."""
+    import json
+    prm, pb = store
+    cell = train_cell(prm, pb, tmp_path / "cell_norescale", "last_token", "linear", "zscore")
+    res = json.loads((cell / "results.json").read_text())
+    del res["protocol"]["rescale"]
+    (cell / "results.json").write_text(json.dumps(res))
+    r = score([cell], pb / "gsm8k", "norescale", prm)
+    assert r.returncode != 0
+    assert "backfill_rescale_field" in (r.stdout + r.stderr)
+    r2 = score([cell], pb / "gsm8k", "stated", prm, extra=("--assume_rescale", "zscore"))
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    own = [json.loads(l) for l in (cell / "pb_step_scores_gsm8k.jsonl").read_text().splitlines()]
+    new = [json.loads(l) for l in (cell / "pb_step_scores_stated.jsonl").read_text().splitlines()]
+    for a, b in zip(own, new):
+        assert a["scores"] == pytest.approx(b["scores"], abs=1e-6)

@@ -14,7 +14,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from screen_representation import auroc, screen  # noqa: E402
 
@@ -86,3 +87,31 @@ def test_signal_share_needs_no_training():
 def test_screen_is_fast_enough_to_be_a_filter():
     r = screen(*make(0.6, n=50000, seed=5), DEV, epochs=8, lr=3e-3)
     assert r["seconds"] < 30, "a screen slower than this stops being a screen"
+
+
+def test_surface_augment_actually_concatenates(tmp_path):
+    """The augment mode silently produced length-only vectors once, because a
+    string patch did not match and failed quietly. Pin the widths: augment must be
+    representation + 3 length terms, not 3."""
+    import subprocess
+    import numpy as _np
+    rng = _np.random.default_rng(0)
+    d = 6
+    def blk(m, lo, hi):
+        L = rng.integers(lo, hi, m).astype(_np.float32)
+        y = (rng.random(m) < 0.5).astype(_np.float32)
+        x = rng.normal(0, 1, (m, d)).astype(_np.float32)
+        return x, y, L
+    xt, yt, lt = blk(400, 20, 50); xv, yv, lv = blk(120, 20, 50); xp, yp, lp = blk(120, 60, 100)
+    src = tmp_path / "m.npz"
+    _np.savez(src, x_train=xt, y_train=yt, x_val=xv, y_val=yv, len_train=lt,
+              len_val=lv, pb_x_a=xp, pb_y_a=yp, pb_len_a=lp)
+    script = ROOT / "scripts" / "make_surface_baseline.py"
+    for mode, expect in (("length", 1), ("length_poly", 3), ("augment", d + 3)):
+        out = tmp_path / f"{mode}.npz"
+        subprocess.run([sys.executable, str(script), "--npz", str(src), "--mode",
+                        mode, "--out", str(out)], check=True, capture_output=True)
+        z = _np.load(out)
+        assert z["x_train"].shape[1] == expect, f"{mode}: {z['x_train'].shape[1]} != {expect}"
+        assert z["pb_x_a"].shape[1] == expect
+        assert z["x_val"].shape[1] == expect

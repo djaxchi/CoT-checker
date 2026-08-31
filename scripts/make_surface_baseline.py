@@ -61,10 +61,20 @@ def main() -> None:
     if "len_train" not in z:
         raise SystemExit(f"{args.npz} has no length arrays")
     subs = sorted({k[5:] for k in z if k.startswith("pb_x_")})
-    out = {"x_train": feats(z["len_train"], args.mode), "y_train": z["y_train"],
-           "x_val": feats(z["len_val"], args.mode), "y_val": z["y_val"]}
+    out = {"y_train": z["y_train"], "y_val": z["y_val"]}
+    if args.mode == "augment":
+        def cat(x, lg):
+            return np.concatenate([x.astype(np.float32), feats(lg, "length_poly")], 1)
+        out["x_train"] = cat(z["x_train"], z["len_train"])
+        out["x_val"] = cat(z["x_val"], z["len_val"])
+        for s in subs:
+            out[f"pb_x_{s}"] = cat(z[f"pb_x_{s}"], z[f"pb_len_{s}"])
+    else:
+        out["x_train"] = feats(z["len_train"], args.mode)
+        out["x_val"] = feats(z["len_val"], args.mode)
+        for s in subs:
+            out[f"pb_x_{s}"] = feats(z[f"pb_len_{s}"], args.mode)
     for s in subs:
-        out[f"pb_x_{s}"] = feats(z[f"pb_len_{s}"], args.mode)
         out[f"pb_y_{s}"] = z[f"pb_y_{s}"]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(args.out, **out)

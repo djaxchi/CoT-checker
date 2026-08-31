@@ -102,3 +102,20 @@ def test_relative_position_exposes_a_late_biased_judge():
     rows = [{"id": f"t{i}", "first_error": 4, "parse_ok": True} for i in range(4)]
     mp = certify(rows, traces)["mean_relative_position"]
     assert mp["predicted"] == 1.0 and mp["true"] == 0.25
+
+
+def test_with_reasoning_the_last_answer_line_is_the_verdict():
+    """A judge that reasons first may say "answer" on the way; the verdict is
+    the line it ends on, and reading the first one would take a hypothesis for a
+    conclusion."""
+    reply = ("Step 1 looks fine.\n"
+             "Step 2's answer of 12 does not follow from step 1.\n"
+             "Answer: 2")
+    assert parse_answer(reply, 4) == 1
+
+
+def test_the_reasoning_prompt_asks_for_an_ordered_check_and_a_final_line():
+    p = build_prompt("p?", ["a", "b"], outcome=False, cot=True)
+    assert "Check the steps in order" in p
+    assert p.rstrip().endswith("Check:")
+    assert "Answer:" in p

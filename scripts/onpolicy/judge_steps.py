@@ -70,6 +70,24 @@ INSTRUCTIONS = (
     "Answer: <number of the first wrong step, or -1 if every step is correct>"
 )
 
+# The same task, with room to work before committing. Zheng et al.'s judges reason
+# before they answer; asking for the verdict on the first token makes the judge
+# guess from surface features, which is the failure the always-last-step baseline
+# is designed to catch.
+INSTRUCTIONS_COT = (
+    "You are given a math problem and a candidate solution split into numbered "
+    "steps.\n"
+    "Check the steps in order. For each one, say briefly whether it follows from "
+    "the steps before it and whether its arithmetic and reasoning are right. Stop "
+    "at the first step that is wrong.\n"
+    "A step is wrong if it states something false, uses a wrong value, or draws a "
+    "conclusion its own previous steps do not support. A step that is merely "
+    "unnecessary is not wrong.\n"
+    "Steps are numbered starting at 1. Keep the check short.\n"
+    "Finish with exactly this line:\n"
+    "Answer: <number of the first wrong step, or -1 if every step is correct>"
+)
+
 
 def render_trace(problem: str, steps: list[str], outcome: bool | None = None,
                  gold: str | None = None) -> str:
@@ -95,15 +113,17 @@ def trace_outcome(tr: dict) -> bool | None:
 
 
 def build_prompt(problem: str, steps: list[str], outcome: bool | None = None,
-                 gold: str | None = None, tokenizer=None, chat: bool = False) -> str:
+                 gold: str | None = None, tokenizer=None, chat: bool = False,
+                 cot: bool = False) -> str:
     """The judge's input. Chat models get the template they were tuned with; a
-    base model gets the same text plus the answer prefix to continue."""
-    user = f"{INSTRUCTIONS}\n\n{render_trace(problem, steps, outcome, gold)}"
+    base model gets the same text plus the cue it should continue from."""
+    head = INSTRUCTIONS_COT if cot else INSTRUCTIONS
+    user = f"{head}\n\n{render_trace(problem, steps, outcome, gold)}"
     if chat and tokenizer is not None and getattr(tokenizer, "chat_template", None):
         return tokenizer.apply_chat_template(
             [{"role": "user", "content": user}], tokenize=False,
             add_generation_prompt=True)
-    return f"{user}\nAnswer:"
+    return f"{user}\nCheck:" if cot else f"{user}\nAnswer:"
 
 
 _INT = re.compile(r"-?\d+")
@@ -117,8 +137,11 @@ def parse_answer(text: str, n_steps: int) -> int | None:
     prompt numbers from 1, so a 0 means the model used a different convention and
     guessing which would put every label off by one.
     """
-    head = text.strip().splitlines()
-    for line in head:
+    lines = text.strip().splitlines()
+    # Last answer line, not the first: with reasoning enabled the model may
+    # mention the word on the way to its verdict, and the verdict is the one it
+    # ends on.
+    for line in reversed(lines):
         if "answer" in line.lower():
             m = _INT.findall(line)
             if m:
@@ -219,7 +242,7 @@ def judge_traces(traces, tokenizer, model, device, args) -> list[dict]:
             tr["problem"], tr["steps"],
             trace_outcome(tr) if args.tell_outcome else None,
             (tr.get("gold") or tr.get("ground_truth_answer")) if args.show_gold else None,
-            tokenizer, args.chat)
+            tokenizer, args.chat, args.cot)
         enc = tokenizer(prompt, return_tensors="pt")
         if enc["input_ids"].shape[1] > args.max_prompt_tokens:
             # Truncating would cut the last steps and the answer cue off the end,
@@ -279,6 +302,10 @@ def main() -> None:
     p.add_argument("--show_gold", action="store_true",
                    help="Also show the ground-truth answer. Not available on the "
                         "certification set, so a judge run this way is uncertified.")
+    p.add_argument("--cot", action="store_true",
+                   help="Let the judge check the steps in order before committing "
+                        "to an index, and read the verdict off its last Answer "
+                        "line. Needs a larger --max_new_tokens.")
     p.add_argument("--chat", action="store_true",
                    help="Use the tokenizer's chat template (instruct models).")
     p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
@@ -328,7 +355,9 @@ def main() -> None:
     if args.certify:
         rep = certify(rows, traces)
         rep.update({"model": args.model_name_or_path, "n_votes": args.n_votes,
-                    "chat": args.chat, "tell_outcome": args.tell_outcome,
+                    "chat": args.chat, "cot": args.cot,
+                    "max_new_tokens": args.max_new_tokens,
+                    "tell_outcome": args.tell_outcome,
                     "show_gold": args.show_gold, "traces": str(args.traces),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "code_commit": git_commit()})

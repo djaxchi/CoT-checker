@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=02:30:00
 #SBATCH --output=%x-%j.out
 
 # Stage 2: pick the judge by measuring it, not by arguing about it.
@@ -72,15 +72,27 @@ python scripts/onpolicy/build_judge_certification_set.py \
 # 32B does not fit one H100 at bfloat16, and running them one at a time keeps the
 # per-process memory budget from being divided by a concurrency that a 32B load
 # would blow through anyway.
+# The first run of this (job 433640) put all three judges between 0.42 and 0.44
+# F1_PB, against 0.566 for the best representation cell on the same metric, with
+# the instruct model degenerate (it answered "no error" on 99.4% of traces). All
+# three answered on the first generated token. So the second pass adds the
+# ordered check before the verdict, as a controlled ablation on the same 400
+# traces: same judges, same questions, one thing changed.
 JUDGES=(
   "qwen3_8b_base:Qwen/Qwen3-8B-Base:"
   "qwen25_32b:Qwen/Qwen2.5-32B:"
   "qwen25_7b_instruct:Qwen/Qwen2.5-7B-Instruct:--chat"
+  "qwen3_8b_base_cot:Qwen/Qwen3-8B-Base:--cot --max_new_tokens 512"
+  "qwen25_32b_cot:Qwen/Qwen2.5-32B:--cot --max_new_tokens 512"
+  "qwen25_7b_instruct_cot:Qwen/Qwen2.5-7B-Instruct:--chat --cot --max_new_tokens 512"
 )
 
 for entry in "${JUDGES[@]}"; do
   name="${entry%%:*}"; rest="${entry#*:}"
   model="${rest%%:*}"; flags="${rest#*:}"
+  if [[ -f "$JUDGE_DIR/cert_${name}_report.json" && "${REDO:-0}" != "1" ]]; then
+    echo "[skip] $name: already certified (REDO=1 to rerun)" | tee -a "$LOG_FILE"; continue
+  fi
   snap="$HF_CACHE/hub/models--$(echo "$model" | sed 's|/|--|g')/snapshots"
   if [[ ! -d "$snap" || -z "$(ls -A "$snap" 2>/dev/null)" ]]; then
     echo "[skip] $name: no local snapshot for $model" | tee -a "$LOG_FILE"; continue

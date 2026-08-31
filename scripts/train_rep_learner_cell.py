@@ -283,11 +283,15 @@ def main() -> None:
     p.add_argument("--preload_budget_gb", type=float, default=300.0,
                    help="RAM budget for span preloading (whole-node allocations "
                         "make a few hundred GB available).")
-    p.add_argument("--rescale", choices=["none", "zscore"], default="none",
+    p.add_argument("--rescale", choices=["none", "zscore", "whiten"], default="none",
                    help="zscore: subtract each position's training average and "
                         "divide by its swing, so the numbers entering the probe "
                         "sit near 0 and swing by ~1 instead of ~22. Sparse codes "
-                        "are divided but not centred, to keep their zeros.")
+                        "are divided but not centred, to keep their zeros. "
+                        "whiten also removes correlations between positions, so "
+                        "every direction ends up with equal variance and a "
+                        "variance-ordered bottleneck stops discriminating against "
+                        "the low-variance correctness direction.")
     p.add_argument("--no_bucket", action="store_true",
                    help="Disable length-bucketed batching for sequence learners. "
                         "Bucketing only changes which items share a batch, never "
@@ -299,6 +303,9 @@ def main() -> None:
     seq = is_sequence(args.learner)
     sparse = args.rep in REP_SPARSE
     sparse_seq = args.rep == REP_SPARSE_SEQ
+    if args.rescale == "whiten" and (sparse or sparse_seq):
+        raise SystemExit("whiten is a dense rotation and would fill in every zero "
+                         "of a sparse code; use zscore for the sae_* reps")
     if sparse and seq:
         raise SystemExit(f"{args.rep} is a fixed vector; use a vector learner")
     if sparse_seq and not seq:
@@ -420,19 +427,26 @@ def main() -> None:
                                       args.vec_cache_dir, sort=False,
                                       fingerprint=inputs[f"prm/{args.test_stem}"])
         d = Xtr.shape[1]
-        stats = None
+        stats = tfm = None
         if args.rescale == "zscore":
             stats = rs.fit(Xtr)
             print(f"[rescale] {args.rep}: {rs.describe(stats, np.asarray(Xtr[:2000]))}",
                   flush=True)
+        elif args.rescale == "whiten":
+            stats = rs.fit_whiten(Xtr)
+            print(f"[rescale] {args.rep}: whiten on {stats['rows']:,} rows, "
+                  f"shrinkage {stats['shrinkage']}, covariance condition "
+                  f"{stats['cond']:.3g}", flush=True)
+        if stats is not None:
+            tfm = rs.to_torch(stats, device)
 
         def mkvec(X, y):
-            if stats is None:
+            if tfm is None:
                 return lambda idx: collate_vec(X, y, idx, device)
             def f(idx):
-                xb = torch.from_numpy(rs.apply(X[idx], stats)).to(device)
+                xb = torch.from_numpy(np.asarray(X[idx], dtype=np.float32)).to(device)
                 yb = torch.from_numpy(np.asarray(y[idx], dtype=np.float32)).to(device)
-                return xb, None, yb
+                return rs.apply_torch(xb, tfm), None, yb
             return f
         train_fn, val_fn, test_fn = mkvec(Xtr, y_train), mkvec(Xva, y_val), mkvec(Xte, y_test)
         n_train_all = Xtr.shape[0]

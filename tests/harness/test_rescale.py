@@ -88,3 +88,31 @@ def test_saving_and_loading_round_trips(tmp_path):
     rs.save(tmp_path / "s.npz", stats)
     back = rs.load(tmp_path / "s.npz")
     np.testing.assert_allclose(rs.apply(x, stats), rs.apply(x, back))
+
+
+def test_whitening_equalises_the_variance_of_every_direction():
+    """The point of whitening here: a bottleneck that allocates by variance stops
+    discriminating against the low-variance correctness direction."""
+    rng = np.random.default_rng(0)
+    A = rng.normal(0, 1, (32, 32)); A[:, 0] *= 0.01      # one deliberately tiny direction
+    x = (rng.normal(0, 1, (8000, 32)) @ A).astype(np.float32)
+    before = x.var(0).max() / x.var(0).min()
+    w = rs.fit_whiten(x, shrinkage=0.05)
+    out = ((x - w["mean"]) @ w["W"].T)
+    after = out.var(0).max() / out.var(0).min()
+    assert before > 1e3 and after < 5.0
+
+
+def test_whitening_survives_a_rank_deficient_direction():
+    x = np.random.default_rng(1).normal(0, 1, (500, 16)).astype(np.float32)
+    x[:, 5] = x[:, 4]                                    # perfectly collinear
+    w = rs.fit_whiten(x)
+    assert np.isfinite(w["W"]).all()
+
+
+def test_torch_transform_matches_the_numpy_one():
+    rng = np.random.default_rng(2)
+    x = rng.normal(3, 9, (200, 24)).astype(np.float32)
+    st = rs.fit(x)
+    got = rs.apply_torch(torch.from_numpy(x), rs.to_torch(st, torch.device("cpu")))
+    np.testing.assert_allclose(got.numpy(), rs.apply(x, st), rtol=1e-5, atol=1e-5)

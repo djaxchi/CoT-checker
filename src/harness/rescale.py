@@ -26,6 +26,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import torch
 
 EPS = 1e-6
 
@@ -98,3 +99,65 @@ def fit_sparse(indices: np.ndarray, values: np.ndarray, n_rows: int, d: int) -> 
     std[std < EPS] = 1.0
     return {"mean": np.zeros(d, np.float32), "std": std, "center": False,
             "rows": int(n_rows)}
+
+
+# ---------------------------------------------------------------------------
+# Full whitening
+# ---------------------------------------------------------------------------
+# zscore divides each position by its own swing and ignores how positions move
+# together. Whitening removes those correlations too, so every direction ends up
+# with equal variance. That matters here because the correctness signal is a
+# low-variance direction: a bottleneck that allocates capacity by variance
+# discards it, and after whitening there is no variance ordering left to
+# discriminate against it.
+#
+# It is not free. Whitening amplifies every low-variance direction, noise
+# included, so it raises the signal's share of the budget without raising its
+# share of the signal. Shrinkage toward the diagonal keeps that from running away
+# on directions the sample barely constrains.
+
+def fit_whiten(x, sample: int = 200_000, seed: int = 0, shrinkage: float = 0.05) -> dict:
+    """Mean and a whitening matrix W with W @ cov @ W.T ~ I.
+
+    `shrinkage` mixes the covariance toward its diagonal before inverting, which
+    stops directions the sample barely pins down from being blown up.
+    """
+    n = x.shape[0]
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n) if n <= sample else np.sort(rng.choice(n, sample, replace=False))
+    chunk = np.asarray(x[idx], dtype=np.float64)
+    mean = chunk.mean(0)
+    c = chunk - mean
+    cov = (c.T @ c) / max(len(c) - 1, 1)
+    if shrinkage > 0:
+        cov = (1 - shrinkage) * cov + shrinkage * np.diag(np.diag(cov))
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.maximum(vals, EPS)
+    W = (vecs * (vals ** -0.5)) @ vecs.T          # symmetric inverse square root
+    return {"mean": mean.astype(np.float32), "W": W.astype(np.float32),
+            "std": np.ones(x.shape[1], np.float32), "center": True,
+            "kind": "whiten", "rows": int(len(idx)), "shrinkage": float(shrinkage),
+            "cond": float(vals.max() / vals.min())}
+
+
+def to_torch(stats: dict, device):
+    """Move a fitted transform onto the device once, for use inside collate.
+
+    Whitening is a 4,096 x 4,096 matmul per batch, which is trivial on a GPU and
+    slow in numpy, so the transform lives where the batch already is.
+    """
+    out = {"kind": stats.get("kind", "zscore"), "center": stats["center"],
+           "mean": torch.from_numpy(stats["mean"]).to(device),
+           "std": torch.from_numpy(stats["std"]).to(device)}
+    if stats.get("kind") == "whiten":
+        out["W"] = torch.from_numpy(stats["W"]).to(device)
+    return out
+
+
+def apply_torch(x, t: dict):
+    """Apply a transform prepared by `to_torch` to a batch already on device."""
+    if t["center"]:
+        x = x - t["mean"]
+    if t["kind"] == "whiten":
+        return x @ t["W"].T
+    return x / t["std"]

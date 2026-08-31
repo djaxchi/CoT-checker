@@ -166,9 +166,37 @@ run_sharded labels \
 cat "$OUT"/labels.shard*.jsonl > "$OUT/labels.jsonl"
 wc -l "$OUT/labels.jsonl"
 
+# Drop labels for problems the model could not solve before the trajectory even
+# began: the rule marks the first step after which nothing reaches the answer,
+# and on a problem it never solves that is step 0 regardless of the reasoning.
 python scripts/onpolicy/build_pb_traces.py \
   --trajectories "$RUN_ROOT"/"$STEM".shard*_trajectories.jsonl \
-  --labels "$OUT/labels.jsonl" \
-  --out_dir "$RUN_ROOT" --stem "$STEM" --force | tee -a "$LOG_FILE"
+  --labels "$OUT/labels.jsonl" --min_base_rate "${MIN_BASE_RATE:-0.01}" \
+  --unjudged_correct no_error \
+  --out_dir "$RUN_ROOT" --stem "${STEM}_rollout" --force | tee -a "$LOG_FILE"
+
+python - <<PY | tee -a "$LOG_FILE"
+import json, glob
+import numpy as np
+rows = [json.loads(l) for f in sorted(glob.glob("$OUT/labels.shard*.jsonl"))
+        for l in open(f) if l.strip()]
+inc = [r for r in rows if not r["traj_correct"]]
+aud = [r for r in rows if r["traj_correct"]]
+solv = [r for r in inc if r["base_rate"] > 0]
+print(f"incorrect trajectories {len(inc)}, of which {len(solv)} on problems the "
+      f"model solves at all ({len(solv)/max(1,len(inc)):.3f})")
+if solv:
+    pos = [r["first_error"] / max(1, r["n_steps"] - 1) for r in solv
+           if r["first_error"] >= 0]
+    print(f"  rule fires on {np.mean([r['first_error'] >= 0 for r in solv]):.3f} of them, "
+          f"at {np.mean(pos):.2f} of the way through")
+    print(f"  fires at step 0 on {np.mean([r['first_error'] == 0 for r in solv]):.3f} "
+          f"(a degenerate labeller would sit near 1.0)")
+if aud:
+    a = [r for r in aud if r["base_rate"] > 0]
+    print(f"audited correct trajectories {len(aud)} ({len(a)} solvable); the rule "
+          f"would have fired on {np.mean([r['rule_fired_at'] >= 0 for r in a]):.3f} "
+          f"of the solvable ones, which is the false-alarm rate")
+PY
 
 echo "[$(date)] onpolicy_rollout done"

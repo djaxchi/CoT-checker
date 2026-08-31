@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.encode_processbench_token_store import flatten  # noqa: E402
-from scripts.onpolicy.build_pb_traces import build, resolve_label  # noqa: E402
+from scripts.onpolicy.build_pb_traces import build, read_labels, resolve_label  # noqa: E402
 
 SOL = "Step one.\n\nStep two.\n\nSo \\boxed{4}."
 
@@ -144,3 +144,24 @@ def test_an_unjudged_incorrect_trajectory_is_still_dropped():
                            unjudged_correct="no_error")
     assert traces == []
     assert tally["unjudged"] == 1
+
+
+def test_a_label_on_a_problem_the_model_never_solves_is_dropped(tmp_path):
+    """The rollout rule marks the first step after which nothing reaches the
+    answer. On a problem the model never solves, that is step 0 every time, for
+    reasons that have nothing to do with the step."""
+    f = tmp_path / "labels.jsonl"
+    f.write_text("\n".join(json.dumps(r) for r in [
+        {"traj_uid": "a", "first_error": 0, "base_rate": 0.0},
+        {"traj_uid": "b", "first_error": 2, "base_rate": 0.25},
+    ]) + "\n")
+    labels, tally = read_labels([f], min_base_rate=0.01)
+    assert labels == {"b": 2}
+    assert tally["dropped_unsolvable"] == 1
+
+
+def test_judge_labels_have_no_base_rate_and_survive_the_filter(tmp_path):
+    f = tmp_path / "labels.jsonl"
+    f.write_text(json.dumps({"traj_uid": "a", "first_error": 1}) + "\n")
+    labels, _ = read_labels([f], min_base_rate=0.5)
+    assert labels == {"a": 1}

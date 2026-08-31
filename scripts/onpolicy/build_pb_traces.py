@@ -50,18 +50,34 @@ from scripts.generate_onpolicy_steps import split_into_steps  # noqa: E402
 NO_ERROR = -1
 
 
-def read_labels(paths: list[Path]) -> dict[str, int]:
-    """traj_uid -> first-error step index, or -1. Judge output, one row per trace."""
+def read_labels(paths: list[Path], min_base_rate: float = 0.0
+                ) -> tuple[dict[str, int], Counter]:
+    """traj_uid -> first-error step index, or -1, from a labeller's output.
+
+    `min_base_rate` drops rollout labels for problems the model could not solve
+    before the trajectory even started. A rollout labeller marks the first step
+    after which no continuation reaches the answer, so on a problem it never
+    solves, every step qualifies and the rule fires at step 0 for reasons that
+    have nothing to do with the step. Those trajectories carry no information
+    about where the reasoning went wrong and are dropped rather than labelled.
+    Judge output carries no base_rate and is unaffected.
+    """
     out: dict[str, int] = {}
+    tally: Counter = Counter()
     for p in paths:
         for row in read_jsonl(p):
             uid = row.get("traj_uid") or row.get("id")
             if uid is None:
                 raise ValueError(f"{p}: label row without traj_uid/id: {row}")
+            base = row.get("base_rate")
+            if base is not None and float(base) < min_base_rate:
+                tally["dropped_unsolvable"] += 1
+                continue
             if uid in out and out[uid] != int(row["first_error"]):
                 raise ValueError(f"{p}: conflicting labels for {uid}")
             out[uid] = int(row["first_error"])
-    return out
+            tally["labels_read"] += 1
+    return out, tally
 
 
 def resolve_label(judged: int | None, correct: bool, n_steps: int,
@@ -186,6 +202,12 @@ def main() -> None:
                         "'no_error' takes the grader's verdict, which is how a "
                         "budgeted judge run still yields a full evaluation set; "
                         "every such trace is marked label_source=grader.")
+    p.add_argument("--min_base_rate", type=float, default=0.0,
+                   help="Drop rollout labels whose pre-trajectory solve rate is "
+                        "below this. A problem the model never solves makes every "
+                        "step look unrecoverable, so the label says nothing about "
+                        "the reasoning. Set above 0 for rollout labels; judge "
+                        "labels have no base rate and are unaffected.")
     p.add_argument("--min_steps", type=int, default=2,
                    help="A one-step solution carries no localisation signal.")
     p.add_argument("--for_judge", type=Path, default=None,
@@ -226,7 +248,7 @@ def main() -> None:
               f"({n_wrong} incorrect + {len(jt)-n_wrong} correct audited) "
               f"-> {args.for_judge}")
 
-    labels = read_labels(list(args.labels))
+    labels, label_tally = read_labels(list(args.labels), args.min_base_rate)
     traces, outcomes, tally = build(trajectories, labels, args.correct_traj_policy,
                                     args.incorrect_no_error_policy, args.min_steps,
                                     args.unjudged_correct)
@@ -248,6 +270,8 @@ def main() -> None:
                      "min_steps": args.min_steps},
         "label_sources": dict(Counter(t["label_source"] for t in traces)),
         "counts": dict(sorted(tally.items())),
+        "label_file_counts": dict(sorted(label_tally.items())),
+        "min_base_rate": args.min_base_rate,
         "n_traces": len(traces), "n_outcomes": len(outcomes),
         "n_problems": len({o["problem_id"] for o in outcomes}),
         "trajectory_accuracy": (n_correct / len(outcomes)) if outcomes else 0.0,

@@ -77,3 +77,33 @@ def test_derived_npz_keep_their_length_arrays(tmp_path):
         got = np.load(out)
         for k in ("len_train", "len_val", "pb_len_gsm8k"):
             assert k in got.files, f"{script} --mode {mode} dropped {k}"
+
+
+def test_stratified_and_screen_fit_the_same_probe_on_the_same_rows(tmp_path):
+    """These two scripts print a PB column each and are read side by side. They
+    disagreed by 0.02 on the 8,192-dim stacked representations because one used
+    50,000 training rows and the other 60,000. Pin that the defaults match, so a
+    future divergence fails here instead of in a results table."""
+    import argparse
+    import importlib
+
+    def defaults(mod_path):
+        src = (Path(__file__).resolve().parents[2] / "scripts" / mod_path).read_text()
+        tree = __import__("ast").parse(src)
+        got = {}
+        for node in __import__("ast").walk(tree):
+            if (isinstance(node, __import__("ast").Call)
+                    and getattr(node.func, "attr", "") == "add_argument"):
+                name = node.args[0].value.lstrip("-")
+                for kw in node.keywords:
+                    if kw.arg == "default":
+                        try:
+                            got[name] = __import__("ast").literal_eval(kw.value)
+                        except ValueError:
+                            pass
+        return got
+
+    a, b = defaults("screen_representation.py"), defaults("stratified_auroc.py")
+    for k in ("n_train", "epochs", "lr"):
+        assert a[k] == b[k], (f"{k}: screen uses {a[k]}, stratified uses {b[k]}; "
+                              f"their PB columns are not comparable")

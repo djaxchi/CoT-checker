@@ -69,6 +69,10 @@ def main() -> None:
     p.add_argument("--epochs", type=int, default=8)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch", type=int, default=1024)
+    p.add_argument("--n_train", type=int, default=50000,
+                   help="Match screen_representation.py exactly. The two scripts "
+                        "fit the same probe, so any difference in rows, epochs or "
+                        "lr makes their PB columns silently incomparable.")
     p.add_argument("--out", type=Path)
     args = p.parse_args()
 
@@ -82,10 +86,11 @@ def main() -> None:
         if f"pb_len_{subs[0]}" not in z.files:
             print(f"{path.stem:<26} no length arrays, skipped")
             continue
-        mu, sd = standardize(z["x_train"])
+        n = min(args.n_train, len(z["y_train"]))
+        xtr, ytr = z["x_train"][:n], z["y_train"][:n]
+        mu, sd = standardize(xtr)
         zs = lambda a: (np.asarray(a, dtype=np.float32) - mu) / sd   # noqa: E731
-        w = fit_probe(zs(z["x_train"]), z["y_train"], args.epochs, args.lr,
-                      args.batch, dev)
+        w = fit_probe(zs(xtr), ytr, args.epochs, args.lr, args.batch, dev)
         plain, strat = [], []
         for s in subs:
             sc = score(w, zs(z[f"pb_x_{s}"]), dev)

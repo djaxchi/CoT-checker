@@ -1,15 +1,22 @@
 #!/bin/bash
-#SBATCH --job-name=onpolicy_encode
+#SBATCH --job-name=onpolicy_transfer
 #SBATCH --account=aip-azouaq
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=03:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=%x-%j.out
 
-# Stage 3: encode the on-policy traces at layer 35 into a span store, under BOTH
-# contexts, because they are two different experiments.
+# Stages 3 and 4: encode the on-policy traces at layer 35 under BOTH contexts,
+# then point the already-trained grid at them and ask whether the ranking holds.
+#
+# No cell is retrained. The nineteen dense cells are on disk with their weights,
+# and evaluate_processbench takes any store split whose meta carries id /
+# step_idx / label / n_steps, so the same nineteen verifiers are pointed at
+# on-policy text and the text distribution is the only thing that changed.
+#
+# The two contexts are two different experiments.
 #
 #   verifier    the template the whole off-policy grid was encoded under. Reading
 #               on-policy text through it changes exactly one thing against the
@@ -113,5 +120,35 @@ for style in "$STYLES".split():
           f"fingerprint {split_fingerprint(d)}")
 PY
 
+echo
+echo "=== score the trained cells on each context ==="
+GRID="${GRID:-$SCRATCH/cot_mech/qwen3_8b_v1/runs/rep_grid_q3}"
+PRM_STORE="${PRM_STORE:-$SCRATCH/cot_mech/qwen3_8b_v1/repstore/step_spans}"
+VEC_CACHE="${VEC_CACHE:-$SCRATCH/cot_mech/qwen3_8b_v1/cache}"
+# rep_grid_q3 predates protocol.rescale; the setting is stated rather than
+# inferred, and the scorer refuses to guess it.
+ASSUME_RESCALE="${ASSUME_RESCALE:-none}"
+
+for style in $STYLES; do
+  python scripts/onpolicy/score_cells_on_split.py \
+    --cells "$GRID" --glob "*__seed4*" \
+    --split_dir "$REP_ROOT/$style" --split_name "onpolicy_$style" \
+    --prm_store "$PRM_STORE" --vec_cache_dir "$VEC_CACHE" \
+    --stats_cache_dir "$RUN_ROOT/rescale_stats" \
+    --assume_rescale "$ASSUME_RESCALE" \
+    --summary "$RUN_ROOT/scores_onpolicy_${style}.json" 2>&1 | tee -a "$LOG_FILE"
+done
+
+echo
+echo "=== does the ranking survive? ==="
+for style in $STYLES; do
+  echo "--- $style ---"
+  python scripts/analysis/onpolicy_rank_transfer.py \
+    --grid_root "$GRID" --onpolicy_name "onpolicy_$style" \
+    --length_meta_on "$REP_ROOT/$style" \
+    --length_meta_off "$SCRATCH/cot_mech/qwen3_8b_v1/repstore/pb_step_spans/gsm8k" \
+    --out "$RUN_ROOT/rank_transfer_${style}.json" 2>&1 | tee -a "$LOG_FILE"
+done
+
 du -sh "$REP_ROOT"/* 2>/dev/null | tee -a "$LOG_FILE"
-echo "[$(date)] onpolicy_encode done"
+echo "[$(date)] onpolicy_transfer done"

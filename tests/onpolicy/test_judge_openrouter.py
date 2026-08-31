@@ -21,6 +21,7 @@ from scripts.onpolicy import judge_steps as local  # noqa: E402
 
 
 class Args:
+    retry_empty = False
     tell_outcome = True
     show_gold = False
     cot = False
@@ -62,7 +63,10 @@ def test_a_reasoning_model_that_never_answers_is_a_parse_failure(monkeypatch):
     monkeypatch.setattr(api, "call", lambda *a, **k: {
         "choices": [{"message": {"content": "", "reasoning": "Step 2 is wrong..."}}],
         "usage": {"cost": 0.002}})
-    row = api.judge_one(TRACE, "m", "k", Args())
+
+    class A(Args):
+        retry_empty = False
+    row = api.judge_one(TRACE, "m", "k", A())
     assert row["parse_ok"] is False
     assert row["first_error"] == api.NO_ERROR
 
@@ -177,3 +181,35 @@ def test_dry_run_calls_nothing_and_shows_the_prompt(tmp_path, monkeypatch, capsy
     assert calls["n"] == 0
     assert not out.exists()
     assert "prompt tokens total" in capsys.readouterr().out
+
+
+def test_an_empty_answer_is_retried_once_with_a_bigger_budget(monkeypatch):
+    """A reasoning model returning nothing has run out of budget, not refused.
+    The first partial run lost 15.9% of its traces this way."""
+    seen = []
+
+    def fake_call(prompt, model, key, args):
+        seen.append(args.max_tokens)
+        content = "" if len(seen) == 1 else "Answer: 2"
+        return {"choices": [{"message": {"content": content, "reasoning": "..."}}],
+                "usage": {"cost": 0.001}}
+
+    monkeypatch.setattr(api, "call", fake_call)
+
+    class A(Args):
+        max_tokens = 1000
+        retry_empty = True
+    row = api.judge_one(TRACE, "m", "k", A())
+    assert seen == [1000, 2000]
+    assert row["parse_ok"] is True and row["first_error"] == 1
+    assert row["usage"]["cost"] == pytest.approx(0.002)   # both attempts are paid
+
+
+def test_a_still_empty_reply_after_the_retry_is_a_parse_failure(monkeypatch):
+    monkeypatch.setattr(api, "call", lambda *a, **k: {
+        "choices": [{"message": {"content": "   ", "reasoning": "..."}}],
+        "usage": {"cost": 0.001}})
+
+    class A(Args):
+        retry_empty = True
+    assert api.judge_one(TRACE, "m", "k", A())["parse_ok"] is False

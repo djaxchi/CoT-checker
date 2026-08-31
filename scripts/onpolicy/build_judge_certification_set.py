@@ -17,6 +17,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from itertools import zip_longest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -47,7 +48,8 @@ def main() -> None:
     p.add_argument("--out", required=True, type=Path)
     args = p.parse_args()
 
-    out, tally = [], Counter()
+    per_subset: dict[str, list[dict]] = {}
+    tally = Counter()
     for sub in args.subsets:
         f = args.pb_dir / f"processbench_{sub}.jsonl"
         if not f.exists():
@@ -59,9 +61,17 @@ def main() -> None:
         picked = sample_subset(keep, args.n_per_subset, args.seed)
         for t in picked:
             t["pb_subset"] = sub
-            out.append(t)
+        per_subset[sub] = picked
         tally[f"{sub}_n"] = len(picked)
         tally[f"{sub}_error"] = sum(1 for t in picked if int(t["label"]) != -1)
+
+    # Interleaved, not concatenated. A judge run that stops early, or one capped
+    # by a budget, reads a prefix of this file, and a prefix of the concatenated
+    # form is all GSM8K. The first partial run scored 0.807 on 63 traces that
+    # were GSM8K to the last one, which is the easiest of the four and not an
+    # estimate of anything we would report.
+    out = [t for row in zip_longest(*per_subset.values())
+           for t in row if t is not None]
     write_jsonl(args.out, out)
     manifest = {"counts": dict(sorted(tally.items())), "n": len(out),
                 "n_error": sum(1 for t in out if int(t["label"]) != -1),

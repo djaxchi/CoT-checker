@@ -109,13 +109,23 @@ def judge_one(tr: dict, model: str, key: str, args) -> dict:
         resp = call(prompt, model, key, args)
         msg = resp["choices"][0]["message"]
         text = (msg.get("content") or "")
-        if not text.strip() and msg.get("reasoning"):
-            # A reasoning model that spent its whole budget thinking returns an
-            # empty answer. Reading the verdict out of the reasoning trace would
-            # score a different thing than the local judges were scored on, so
-            # this counts as a parse failure instead.
-            text = ""
-        votes.append(parse_answer(text, len(tr["steps"])) if text else None)
+        if not text.strip() and args.retry_empty:
+            # A reasoning model that spends its whole budget thinking returns an
+            # empty answer. That is a budget problem, not a refusal, and the
+            # first partial run lost 15.9% of its traces to it. Reading the
+            # verdict out of the reasoning trace instead would score a different
+            # task than the local judges were scored on, so this pays for one
+            # bigger attempt and counts a still-empty reply as a parse failure.
+            u = resp.get("usage") or {}
+            usage_total["prompt"] += int(u.get("prompt_tokens") or 0)
+            usage_total["completion"] += int(u.get("completion_tokens") or 0)
+            usage_total["cost"] += float(u.get("cost") or 0.0)
+            bigger = argparse.Namespace(**vars(args))
+            bigger.max_tokens = args.max_tokens * 2
+            resp = call(prompt, model, key, bigger)
+            msg = resp["choices"][0]["message"]
+            text = (msg.get("content") or "")
+        votes.append(parse_answer(text, len(tr["steps"])) if text.strip() else None)
         raw = raw or text[:300]
         u = resp.get("usage") or {}
         usage_total["prompt"] += int(u.get("prompt_tokens") or 0)
@@ -148,7 +158,15 @@ def main() -> None:
     p.add_argument("--show_gold", action="store_true")
     p.add_argument("--n_votes", type=int, default=1)
     p.add_argument("--temperature", type=float, default=0.0)
-    p.add_argument("--max_tokens", type=int, default=2048)
+    p.add_argument("--max_tokens", type=int, default=8192,
+                   help="A reasoning model's thinking counts against this. At "
+                        "4096 the first run lost 15.9% of traces to empty "
+                        "answers.")
+    p.add_argument("--retry_empty", dest="retry_empty", action="store_true",
+                   default=True,
+                   help="Pay for one attempt at double the budget when the model "
+                        "returns nothing but reasoning.")
+    p.add_argument("--no_retry_empty", dest="retry_empty", action="store_false")
     p.add_argument("--reasoning_effort", choices=["low", "medium", "high"], default=None)
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--retries", type=int, default=4)

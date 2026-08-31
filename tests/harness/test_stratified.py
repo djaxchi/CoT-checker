@@ -47,3 +47,33 @@ def test_bins_with_one_class_are_dropped_not_counted_as_half():
     y = np.array([1, 1, 0, 0]); ln = np.array([1.0, 2.0, 3.0, 4.0])
     # bins [1,1] and [0,0] carry no comparable pair; only a 1-bin split has any
     assert np.isnan(stratified_auroc(y, np.array([1.0, 1.0, 0.0, 0.0]), ln, 2))
+
+
+def test_derived_npz_keep_their_length_arrays(tmp_path):
+    """The first stratified pass skipped every residual/withlen/surface file for
+    want of length arrays. Both derivers must carry them through."""
+    import subprocess
+
+    rng = np.random.default_rng(0)
+    src = tmp_path / "src.npz"
+    d = {"x_train": rng.normal(size=(200, 8)).astype(np.float32),
+         "x_val": rng.normal(size=(50, 8)).astype(np.float32),
+         "y_train": (rng.random(200) < 0.4).astype(np.float32),
+         "y_val": (rng.random(50) < 0.4).astype(np.float32),
+         "len_train": rng.integers(5, 90, 200).astype(np.float32),
+         "len_val": rng.integers(5, 90, 50).astype(np.float32),
+         "pb_x_gsm8k": rng.normal(size=(60, 8)).astype(np.float32),
+         "pb_y_gsm8k": (rng.random(60) < 0.3).astype(np.float32),
+         "pb_len_gsm8k": rng.integers(20, 200, 60).astype(np.float32)}
+    np.savez(src, **d)
+    root = Path(__file__).resolve().parents[2]
+    for script, mode in [("residualize_length.py", "residual"),
+                         ("residualize_length.py", "withlen"),
+                         ("make_surface_baseline.py", "length"),
+                         ("make_surface_baseline.py", "augment")]:
+        out = tmp_path / f"{script}_{mode}.npz"
+        subprocess.run([sys.executable, str(root / "scripts" / script), "--npz", str(src),
+                        "--mode", mode, "--out", str(out)], check=True, capture_output=True)
+        got = np.load(out)
+        for k in ("len_train", "len_val", "pb_len_gsm8k"):
+            assert k in got.files, f"{script} --mode {mode} dropped {k}"

@@ -176,3 +176,56 @@ re-screened in job 433702.
 Note also that length is a much weaker cue in domain (0.614) than on
 ProcessBench (0.704). The transfer benchmark is the one where the shortcut pays
 best, which is the opposite of what a robustness benchmark should do.
+
+## Iteration 5: length is a shortcut on the benchmark, but the representations are not taking it
+
+Iteration 4b left an open question: if a token count scores 0.7039 and the best
+representation 0.7700, is the grid mostly ranking length? Scoring inside
+equal-count length bins answers it. Inside a bin the steps are the same length,
+so length carries nothing and what survives is the representation's own.
+
+Bin count is not free, so the length control runs through the identical
+procedure: it goes 0.7039 plain, 0.5359 at 10 bins, 0.5097 at 50. At 50 bins
+length is gone.
+
+| representation | PB plain | PB within-length (50 bins) | cost |
+|---|---|---|---|
+| dir | 0.7673 | **0.7307** | 0.0366 |
+| atypical | 0.7633 | 0.7287 | 0.0347 |
+| mean_l2 | 0.7646 | 0.7268 | 0.0378 |
+| normpow_0.5 | 0.7629 | 0.7260 | 0.0370 |
+| mean | 0.7619 | 0.7252 | 0.0367 |
+| typical | 0.7614 | 0.7248 | 0.0366 |
+| centered | 0.7622 | 0.7216 | 0.0406 |
+| diffs | 0.7600 | 0.7106 | 0.0494 |
+| quantiles | 0.7478 | 0.7040 | 0.0438 |
+| dev | 0.7332 | 0.6978 | 0.0354 |
+| first_last | 0.7477 | 0.6964 | 0.0512 |
+| softnorm_0.5 | 0.6952 | 0.6660 | 0.0292 |
+| **[control] length itself** | **0.7039** | **0.5097** | **0.1941** |
+
+The representations lose about 0.037 while the length baseline loses 0.194. So
+the activations are not riding the shortcut: their separation is almost entirely
+length-independent, and the margin over length is much larger than the plain
+numbers suggest.
+
+    plain          dir 0.7673 vs length 0.7039   gap 0.063
+    within-length  dir 0.7307 vs length 0.5097   gap 0.221
+
+This is the opposite of the worry that motivated the baseline, and it is a better
+result than the plain leaderboard could show. It also says what the plain
+ProcessBench number is worth as a ranking signal: roughly 0.20 of every
+representation's 0.76 is a token count that every row gets equally, which
+compresses the visible spread between representations by about a third. The
+within-length column separates `dir` from `first_last` by 0.034 where the plain
+column separates them by 0.020.
+
+Two things follow for the search. `dir` and `atypical`, the two poolings that
+discard magnitude, lead the within-length column, which is consistent with the
+project's earlier "direction not magnitude" result and is the first evidence for
+it that survives pooling. And the honest headroom for a new representation is
+measured against 0.7307, not against a length-inflated 0.767.
+
+Caveat: the residual, withlen and surface files were skipped in this pass because
+neither deriver copied the length arrays into its output. Fixed and tested; those
+rows land in the next pass.

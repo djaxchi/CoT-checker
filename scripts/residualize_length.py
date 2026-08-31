@@ -74,6 +74,9 @@ def main() -> None:
             out[f"pb_x_{s}"] = apply_withlen(z[f"pb_x_{s}"], z[f"pb_len_{s}"])
     for s in subs:
         out[f"pb_y_{s}"] = z[f"pb_y_{s}"]
+        out[f"pb_len_{s}"] = z[f"pb_len_{s}"]
+    # keep the lengths so the output can still be scored within length strata
+    out["len_train"], out["len_val"] = z["len_train"], z["len_val"]
 
     # How much of the representation was length, and how far apart the domains are
     var_removed = float("nan")

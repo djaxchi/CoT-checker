@@ -76,6 +76,9 @@ def main() -> None:
             out[f"pb_x_{s}"] = feats(z[f"pb_len_{s}"], args.mode)
     for s in subs:
         out[f"pb_y_{s}"] = z[f"pb_y_{s}"]
+        out[f"pb_len_{s}"] = z[f"pb_len_{s}"]
+    # keep the lengths so the output can still be scored within length strata
+    out["len_train"], out["len_val"] = z["len_train"], z["len_val"]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez(args.out, **out)
 

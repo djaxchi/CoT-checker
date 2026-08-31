@@ -31,8 +31,9 @@ def run(trajs, labels, **kw):
     kw.setdefault("correct_policy", "trust_outcome")
     kw.setdefault("no_error_policy", "drop")
     kw.setdefault("min_steps", 2)
+    kw.setdefault("unjudged_correct", "drop")
     return build(trajs, labels, kw["correct_policy"], kw["no_error_policy"],
-                 kw["min_steps"])
+                 kw["min_steps"], kw["unjudged_correct"])
 
 
 def test_first_error_label_is_carried_not_the_outcome_label():
@@ -121,3 +122,25 @@ def test_only_incorrect_trajectories_plus_an_audit_sample_go_to_the_judge():
     assert sum(1 for t in out if t["traj_correct"]) == 3
     assert all(len(t["steps"]) >= 2 for t in out)
     assert {"id", "problem", "steps", "traj_correct", "gold"} <= set(out[0])
+
+
+def test_a_correct_trajectory_can_join_without_a_judge_and_is_marked_as_such():
+    """A paid judge has a budget, and a correct trajectory already has a label
+    from the grader. The assumption it carries is that no wrong step was later
+    repaired, so the provenance is recorded per trace."""
+    trajs = [traj("onpolicy::p1::g0", correct=True),
+             traj("onpolicy::p2::g0", correct=False)]
+    traces, _, tally = run(trajs, {"onpolicy::p2::g0": 1}, unjudged_correct="no_error")
+    by_id = {t["id"]: t for t in traces}
+    assert by_id["onpolicy::p1::g0"]["label"] == -1
+    assert by_id["onpolicy::p1::g0"]["label_source"] == "grader"
+    assert by_id["onpolicy::p2::g0"]["label_source"] == "judge"
+    assert tally["unjudged_correct_from_grader"] == 1
+
+
+def test_an_unjudged_incorrect_trajectory_is_still_dropped():
+    """Its first error has no source at all, so it cannot enter the set."""
+    traces, _, tally = run([traj("onpolicy::p1::g0", correct=False)], {},
+                           unjudged_correct="no_error")
+    assert traces == []
+    assert tally["unjudged"] == 1

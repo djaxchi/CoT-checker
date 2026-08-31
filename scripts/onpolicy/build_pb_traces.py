@@ -65,9 +65,19 @@ def read_labels(paths: list[Path]) -> dict[str, int]:
 
 
 def resolve_label(judged: int | None, correct: bool, n_steps: int,
-                  correct_policy: str, no_error_policy: str) -> tuple[int | None, str]:
+                  correct_policy: str, no_error_policy: str,
+                  unjudged_correct: str = "drop") -> tuple[int | None, str]:
     """(label, tag). label None means drop the trace. tag counts into the manifest."""
     if judged is None:
+        # A trajectory that reached the right answer already has a label from the
+        # grader, so it can join the evaluation set without a judge ever seeing
+        # it. That is not free of assumption: a correct final answer can follow a
+        # wrong step the model later repaired, and those traces would be scored
+        # as clean. The audited sample measures how often that happens, and the
+        # label source is recorded per trace so the analysis can be run with and
+        # without them.
+        if correct and unjudged_correct == "no_error":
+            return NO_ERROR, "unjudged_correct_from_grader"
         return None, "unjudged"
     if judged != NO_ERROR and not 0 <= judged < n_steps:
         return None, "label_out_of_range"
@@ -88,7 +98,8 @@ def resolve_label(judged: int | None, correct: bool, n_steps: int,
 
 
 def build(trajectories: list[dict], labels: dict[str, int], correct_policy: str,
-          no_error_policy: str, min_steps: int) -> tuple[list[dict], list[dict], Counter]:
+          no_error_policy: str, min_steps: int, unjudged_correct: str = "drop"
+          ) -> tuple[list[dict], list[dict], Counter]:
     traces, outcomes, tally = [], [], Counter()
     for tr in trajectories:
         uid = tr["traj_uid"]
@@ -101,7 +112,7 @@ def build(trajectories: list[dict], labels: dict[str, int], correct_policy: str,
             tally["too_few_steps"] += 1
             continue
         label, tag = resolve_label(labels.get(uid), bool(tr["correct"]), len(steps),
-                                   correct_policy, no_error_policy)
+                                   correct_policy, no_error_policy, unjudged_correct)
         tally[tag] += 1
         outcomes.append({
             "id": uid, "problem_id": tr["fork_id"], "correct": bool(tr["correct"]),
@@ -114,13 +125,14 @@ def build(trajectories: list[dict], labels: dict[str, int], correct_policy: str,
             "id": uid, "problem": tr["problem"], "steps": steps, "label": int(label),
             "problem_id": tr["fork_id"], "traj_correct": bool(tr["correct"]),
             "n_steps": len(steps),
+            "label_source": "grader" if tag.startswith("unjudged_correct") else "judge",
         })
         tally["kept"] += 1
     return traces, outcomes, tally
 
 
 def judge_traces(trajectories: list[dict], min_steps: int, correct_sample: int,
-                 seed: int = 0) -> list[dict]:
+                 seed: int = 0, max_incorrect: int = 0) -> list[dict]:
     """The traces to send to a judge, before any labels exist.
 
     Only incorrect trajectories need a verdict: a correct one takes -1 from the
@@ -143,6 +155,9 @@ def judge_traces(trajectories: list[dict], min_steps: int, correct_sample: int,
                "problem_id": tr["fork_id"], "n_steps": len(steps)}
         (right if tr["correct"] else wrong).append(row)
     rng.shuffle(right)
+    rng.shuffle(wrong)
+    if max_incorrect > 0:
+        wrong = wrong[:max_incorrect]
     return wrong + right[:correct_sample]
 
 
@@ -166,6 +181,11 @@ def main() -> None:
                    default="drop",
                    help="What to do when the judge finds no error in a trajectory "
                         "that reached the wrong answer.")
+    p.add_argument("--unjudged_correct", choices=["drop", "no_error"], default="drop",
+                   help="What to do with correct trajectories no judge saw. "
+                        "'no_error' takes the grader's verdict, which is how a "
+                        "budgeted judge run still yields a full evaluation set; "
+                        "every such trace is marked label_source=grader.")
     p.add_argument("--min_steps", type=int, default=2,
                    help="A one-step solution carries no localisation signal.")
     p.add_argument("--for_judge", type=Path, default=None,
@@ -173,6 +193,11 @@ def main() -> None:
                         "labels exist: every incorrect trajectory plus a sample "
                         "of correct ones for the false-alarm measurement.")
     p.add_argument("--judge_correct_sample", type=int, default=200)
+    p.add_argument("--judge_max_incorrect", type=int, default=0,
+                   help="Cap the incorrect trajectories sent to the judge, drawn "
+                        "at random under --seed. A paid judge has a budget; the "
+                        "correct trajectories not sent still enter the eval set "
+                        "with the grader's -1.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
@@ -194,7 +219,7 @@ def main() -> None:
 
     if args.for_judge:
         jt = judge_traces(trajectories, args.min_steps, args.judge_correct_sample,
-                          args.seed)
+                          args.seed, args.judge_max_incorrect)
         write_jsonl(args.for_judge, jt)
         n_wrong = sum(1 for t in jt if not t["traj_correct"])
         print(f"[pb_traces] {len(jt)} traces for the judge "
@@ -203,7 +228,8 @@ def main() -> None:
 
     labels = read_labels(list(args.labels))
     traces, outcomes, tally = build(trajectories, labels, args.correct_traj_policy,
-                                    args.incorrect_no_error_policy, args.min_steps)
+                                    args.incorrect_no_error_policy, args.min_steps,
+                                    args.unjudged_correct)
 
     if labels:
         write_jsonl(traces_path, traces)
@@ -218,7 +244,9 @@ def main() -> None:
         "label_files": [str(f) for f in args.labels],
         "policies": {"correct_traj": args.correct_traj_policy,
                      "incorrect_no_error": args.incorrect_no_error_policy,
+                     "unjudged_correct": args.unjudged_correct,
                      "min_steps": args.min_steps},
+        "label_sources": dict(Counter(t["label_source"] for t in traces)),
         "counts": dict(sorted(tally.items())),
         "n_traces": len(traces), "n_outcomes": len(outcomes),
         "n_problems": len({o["problem_id"] for o in outcomes}),

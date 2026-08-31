@@ -119,6 +119,33 @@ def build(trajectories: list[dict], labels: dict[str, int], correct_policy: str,
     return traces, outcomes, tally
 
 
+def judge_traces(trajectories: list[dict], min_steps: int, correct_sample: int,
+                 seed: int = 0) -> list[dict]:
+    """The traces to send to a judge, before any labels exist.
+
+    Only incorrect trajectories need a verdict: a correct one takes -1 from the
+    grader under the default policy, and asking a judge about it buys nothing but
+    cost. A sample of correct ones goes anyway, because how often the judge
+    invents an error in work that reached the right answer is its false-alarm
+    rate on the distribution this arm cares about, and it needs no human labels.
+    """
+    import random
+    rng = random.Random(seed)
+    wrong, right = [], []
+    for tr in trajectories:
+        if not tr.get("gradeable"):
+            continue
+        steps = split_into_steps(tr["solution"])
+        if len(steps) < min_steps:
+            continue
+        row = {"id": tr["traj_uid"], "problem": tr["problem"], "steps": steps,
+               "traj_correct": bool(tr["correct"]), "gold": tr.get("gold"),
+               "problem_id": tr["fork_id"], "n_steps": len(steps)}
+        (right if tr["correct"] else wrong).append(row)
+    rng.shuffle(right)
+    return wrong + right[:correct_sample]
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -141,6 +168,12 @@ def main() -> None:
                         "that reached the wrong answer.")
     p.add_argument("--min_steps", type=int, default=2,
                    help="A one-step solution carries no localisation signal.")
+    p.add_argument("--for_judge", type=Path, default=None,
+                   help="Also write the traces a judge should read, before any "
+                        "labels exist: every incorrect trajectory plus a sample "
+                        "of correct ones for the false-alarm measurement.")
+    p.add_argument("--judge_correct_sample", type=int, default=200)
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
 
@@ -158,6 +191,15 @@ def main() -> None:
                          f"shards must partition the problem list")
             seen.add(tr["traj_uid"])
             trajectories.append(tr)
+
+    if args.for_judge:
+        jt = judge_traces(trajectories, args.min_steps, args.judge_correct_sample,
+                          args.seed)
+        write_jsonl(args.for_judge, jt)
+        n_wrong = sum(1 for t in jt if not t["traj_correct"])
+        print(f"[pb_traces] {len(jt)} traces for the judge "
+              f"({n_wrong} incorrect + {len(jt)-n_wrong} correct audited) "
+              f"-> {args.for_judge}")
 
     labels = read_labels(list(args.labels))
     traces, outcomes, tally = build(trajectories, labels, args.correct_traj_policy,

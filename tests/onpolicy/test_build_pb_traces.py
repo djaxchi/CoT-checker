@@ -107,3 +107,17 @@ def test_resolve_label_is_total_over_the_policies():
                     label, tag = resolve_label(judged, correct, 3, cp, np_)
                     assert isinstance(tag, str) and tag
                     assert label is None or label == -1 or 0 <= label < 3
+
+
+def test_only_incorrect_trajectories_plus_an_audit_sample_go_to_the_judge():
+    """A correct trajectory takes -1 from the grader, so asking a judge about it
+    buys nothing but cost. A sample goes anyway to measure false alarms."""
+    from scripts.onpolicy.build_pb_traces import judge_traces
+    trajs = ([traj(f"onpolicy::p{i}::g0", correct=False) for i in range(5)] +
+             [traj(f"onpolicy::q{i}::g0", correct=True) for i in range(20)] +
+             [traj("onpolicy::short::g0", correct=False, solution="one line")])
+    out = judge_traces(trajs, min_steps=2, correct_sample=3)
+    assert sum(1 for t in out if not t["traj_correct"]) == 5
+    assert sum(1 for t in out if t["traj_correct"]) == 3
+    assert all(len(t["steps"]) >= 2 for t in out)
+    assert {"id", "problem", "steps", "traj_correct", "gold"} <= set(out[0])

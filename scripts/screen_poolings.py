@@ -110,7 +110,7 @@ def collect(split_dir: Path, names: list[str], limit: int | None, seed: int,
         raise FileNotFoundError(f"no shard_* under {split_dir}")
     rng = np.random.default_rng(seed)
     acc: dict[str, list] = {n: [] for n in names}
-    ys, metas = [], []
+    ys, metas, lens = [], [], []
     per_shard = None if limit is None else max(1, limit // len(shard_dirs))
     for sd in shard_dirs:
         rs = RepSplit(sd)
@@ -130,13 +130,14 @@ def collect(split_dir: Path, names: list[str], limit: int | None, seed: int,
             p = poolings(span, bnd)
             for n in names:
                 acc[n].append(p[n].astype(np.float32))
+            lens.append(int(b - a))
             ys.append(1 if (pb and m["label"] == m["step_idx"]) else
                       (int(rs.y[k]) if not pb else 0))
             if pb:
                 metas.append(m)
         del rs
     return ({n: np.stack(v) for n, v in acc.items()},
-            np.array(ys, dtype=np.float32))
+            np.array(ys, dtype=np.float32), np.array(lens, dtype=np.float32))
 
 
 def main() -> None:
@@ -157,11 +158,11 @@ def main() -> None:
 
     t0 = time.perf_counter()
     print(f"[pool] poolings: {', '.join(args.names)}", flush=True)
-    tr, ytr = collect(args.prm_store / args.train_stem, args.names, args.n_train,
-                      args.seed, pb=False)
+    tr, ytr, ltr = collect(args.prm_store / args.train_stem, args.names,
+                           args.n_train, args.seed, pb=False)
     print(f"[pool] train {len(ytr):,} ({time.perf_counter()-t0:.0f}s)", flush=True)
-    va, yva = collect(args.prm_store / args.val_stem, args.names, None, args.seed,
-                      pb=False)
+    va, yva, lva = collect(args.prm_store / args.val_stem, args.names, None,
+                           args.seed, pb=False)
     pbs = {}
     for sub in args.pb_subsets:
         d = args.pb_store / sub
@@ -172,10 +173,12 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     for n in args.names:
-        blob = {"x_train": tr[n], "y_train": ytr, "x_val": va[n], "y_val": yva}
-        for sub, (xx, yy) in pbs.items():
+        blob = {"x_train": tr[n], "y_train": ytr, "x_val": va[n], "y_val": yva,
+                "len_train": ltr, "len_val": lva}
+        for sub, (xx, yy, ll) in pbs.items():
             blob[f"pb_x_{sub}"] = xx[n]
             blob[f"pb_y_{sub}"] = yy
+            blob[f"pb_len_{sub}"] = ll
         np.savez(args.out_dir / f"{n}.npz", **blob)
         print(f"[pool] {n:<12} dim {tr[n].shape[1]:>6}  -> {args.out_dir/f'{n}.npz'}",
               flush=True)

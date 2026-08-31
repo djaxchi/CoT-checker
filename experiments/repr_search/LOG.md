@@ -47,3 +47,51 @@ parameter nobody has tuned: pool `||h||^a * (h/||h||)`, where a=0 is `mean_l2`
 (bad) and a=1 is `mean`. If the trend is monotone in a, a>1 should be better.
 That also gives a cheap fixed approximation of what learned pooling — the biggest
 single win in the grid, +0.089 — might be doing.
+
+---
+
+## Iteration 2 — norm-exponent sweep and fixed attention stand-ins (job 433586)
+
+Hypothesis: iteration 1 showed a=0 (`mean_l2`) costs 0.092 against a=1 (`mean`),
+so the norm is an importance weight; extrapolating, a>1 should be better. Also:
+if the learned attention query's +0.089 is mostly "attend to high-norm tokens", a
+fixed norm-softmax should recover much of it.
+
+| pooling | PB step AUROC |
+|---|---|
+| centered | 0.7534 |
+| normpow a=0.5 | 0.7476 |
+| quantiles | 0.7475 |
+| **mean (a=1.0)** | **0.7462** |
+| typical | 0.7459 |
+| normpow a=1.5 | 0.7445 |
+| normpow a=2.0 | 0.7428 |
+| atypical | 0.7408 |
+| normpow a=3.0 | 0.7389 |
+| softnorm t=2.0 | 0.7275 |
+| softnorm t=0.5 | 0.6804 |
+| mean_l2 (a=0.0) | 0.6542 |
+
+**The exponent is not monotone and `mean` is already at its optimum.** The curve
+climbs steeply from a=0 to a≈0.5, is flat between 0.5 and 1.0 (0.7476 vs 0.7462,
+inside the noise floor), then declines steadily. Extrapolating past a=1 was wrong.
+
+**The more useful result is the softnorm failure.** An explicit norm-based
+attention scores 0.728 and 0.680, well below plain mean. So whatever the learned
+attention query is doing to earn +0.089, **it is not primarily attending to
+high-norm tokens.** Nor to typicality: weighting by cosine to the step's gist, or
+against it, both land on the baseline. The learned query must be selecting on
+*content* — a specific direction — which no fixed rule reproduces.
+
+**Where this leaves fixed pooling.** Sixteen rules over two iterations; none beats
+`mean` outside the noise floor. The pooling axis looks exhausted for
+label-free rules.
+
+**Next.** Stop varying the pooling and target the transfer gap directly. A
+measured fact nobody has used: PRM800K steps average 38.8 tokens while
+ProcessBench steps run 56 to 94. If the representation encodes step length, the
+probe learns a length-dependent boundary that misfires on the longer domain — and
+the screen measures exactly that transfer. Test by regressing length out of the
+representation (fit on train, applied unchanged to ProcessBench), with the
+opposite control of explicitly *adding* length: if adding it helps in domain and
+hurts transfer, length is a transfer confound worth removing.

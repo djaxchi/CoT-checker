@@ -46,6 +46,18 @@ python scripts/screen_poolings.py \
   --pb_store "$RUN_ROOT/repstore/pb_step_spans" \
   --out_dir "$OUT_DIR" --n_train "$N_TRAIN" --n_pb "$N_PB"
 
+# Length variants of the leading poolings. PRM800K steps average 38.8 tokens and
+# ProcessBench steps run 56 to 94, so a representation that encodes length gives
+# the probe a boundary fitted to the short domain and evaluated on the long one.
+LEN_REPS="${LEN_REPS:-mean centered quantiles}"
+for r in $LEN_REPS; do
+  [ -f "$OUT_DIR/$r.npz" ] || continue
+  for m in residual withlen; do
+    python scripts/residualize_length.py --npz "$OUT_DIR/$r.npz" --mode "$m" \
+      --out "$OUT_DIR/${r}_${m}.npz"
+  done
+done
+
 echo
 echo "=== screen ==="
 python scripts/screen_representation.py --npz "$OUT_DIR"/*.npz --out "$OUT_DIR/screen.json"

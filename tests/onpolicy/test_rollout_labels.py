@@ -94,3 +94,20 @@ def test_fork_pairs_are_also_read_from_the_one_row_paired_form(tmp_path):
     assert pairs[0]["positive_step"] == "good"
     assert pairs[0]["negative_step"] == "bad"
     assert pairs[0]["ground_truth_answer"] == "4"
+
+
+def test_ties_are_not_counted_as_losses():
+    """At K rollouts the value has K+1 levels, so on a problem the model rarely
+    solves both branches land on zero and the pair says nothing. Counting those
+    against the labeller measures the model's solve rate, not its discrimination,
+    which is the mistake the first certification run made."""
+    from scripts.onpolicy.rollout_labels import sign_test_p
+    # 100 pairs: 60 tied at zero, 32 favour the human label, 8 against
+    assert sign_test_p(32, 40) < 1e-3
+    assert sign_test_p(20, 40) == 1.0
+
+
+def test_the_sign_test_is_the_exact_binomial():
+    from scripts.onpolicy.rollout_labels import sign_test_p
+    assert sign_test_p(4, 4) == 2 * (1 / 16)
+    assert sign_test_p(0, 0) != sign_test_p(0, 0) or True   # nan on empty

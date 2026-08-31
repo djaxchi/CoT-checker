@@ -42,6 +42,7 @@ import argparse
 import json
 import sys
 import time
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -166,12 +167,30 @@ def label_trajectories(trajs: list[dict], model, tok, device, args) -> list[dict
     return rows
 
 
+def sign_test_p(wins: int, n: int) -> float:
+    """Two-sided exact binomial p at 0.5, over the pairs the rollouts separate."""
+    if n == 0:
+        return float("nan")
+    def tail(k):
+        return sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n
+    return min(1.0, 2 * tail(max(wins, n - wins)))
+
+
 def certify_forks(pairs: list[dict], model, tok, device, args) -> dict:
     """Paired test: is the value lower after the step humans rated -1?
 
     Both steps of a pair share a prefix and a problem, so nothing but the step
-    differs. Reported as a win rate over pairs and as an AUROC over the pooled
-    values, which is the same statistic the probes are scored with.
+    differs.
+
+    **Ties are their own category, not losses.** At K rollouts the value takes
+    K+1 levels, and on a problem the model rarely solves from either branch both
+    values land on zero and the pair says nothing. Counting those against the
+    labeller measures the model's solve rate, not its discrimination. The first
+    run made exactly this mistake: at K=4, 61.5% of 200 forks tied, so an overall
+    win rate of 0.295 sat next to a win rate of 0.766 among the 77 pairs that
+    were actually decided. The verdict is the decided rate with a binomial test,
+    reported alongside how many pairs were decided at all, which is the power of
+    the run rather than a property of the labeller.
     """
     rows, t0 = [], time.perf_counter()
     for i, pr in enumerate(pairs):
@@ -185,14 +204,20 @@ def certify_forks(pairs: list[dict], model, tok, device, args) -> dict:
     vp = np.array([r["v_pos"] for r in rows])
     vn = np.array([r["v_neg"] for r in rows])
     decided = vp != vn
+    n_dec = int(decided.sum())
+    wins = int((vn[decided] < vp[decided]).sum())
+    both_zero = int(((vp == 0) & (vn == 0)).sum())
     y = np.concatenate([np.zeros(len(vp)), np.ones(len(vn))])      # 1 = human said wrong
     s = np.concatenate([-vp, -vn])                                  # lower value = more suspicious
     return {
         "n_pairs": len(rows),
-        "win_rate": float((vn < vp).mean()),
-        "win_rate_among_decided": float((vn[decided] < vp[decided]).mean())
-        if decided.any() else float("nan"),
+        "n_decided": n_dec,
+        "decided_fraction": float(n_dec / max(1, len(rows))),
+        "win_rate_among_decided": float(wins / n_dec) if n_dec else float("nan"),
+        "sign_test_p": sign_test_p(wins, n_dec),
+        "win_rate_all_pairs": float((vn < vp).mean()),
         "ties": float((~decided).mean()),
+        "ties_both_zero": float(both_zero / max(1, len(rows))),
         "auroc": auroc(y, s),
         "mean_value_positive": float(vp.mean()), "mean_value_negative": float(vn.mean()),
         "rows": rows,
@@ -297,10 +322,12 @@ def main() -> None:
                     "temperature": args.temperature, "source": str(args.certify_forks),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "code_commit": git_commit()})
-        print(f"\npairs {rep['n_pairs']}   ties {rep['ties']:.3f}")
-        print(f"the human-rated wrong step has the lower value in "
-              f"{rep['win_rate']:.3f} of pairs "
-              f"({rep['win_rate_among_decided']:.3f} of those the rollouts separate)")
+        print(f"\npairs {rep['n_pairs']}   decided {rep['n_decided']} "
+              f"({rep['decided_fraction']:.3f})   ties {rep['ties']:.3f} "
+              f"(both zero {rep['ties_both_zero']:.3f})")
+        print(f"among the decided pairs the human-rated wrong step has the lower "
+              f"value in {rep['win_rate_among_decided']:.3f} "
+              f"(sign test p = {rep['sign_test_p']:.2e})")
         print(f"AUROC {rep['auroc']:.3f}   mean value  +1 step {rep['mean_value_positive']:.3f}"
               f"   -1 step {rep['mean_value_negative']:.3f}")
         if args.report:

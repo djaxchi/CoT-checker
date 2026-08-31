@@ -39,16 +39,25 @@ FORKS="${FORKS:-/scratch/d/dchikhi/cot-checker/transition_operator/forks.jsonl}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-8B-Base}"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
 STEM="${STEM:-onpolicy_stage1}"
-K_ROLLOUTS="${K_ROLLOUTS:-4}"
-MAX_FORKS="${MAX_FORKS:-200}"
+K_ROLLOUTS="${K_ROLLOUTS:-16}"
+MAX_FORKS="${MAX_FORKS:-300}"
 MAX_TRACES="${MAX_TRACES:-0}"
 N_CORRECT_AUDIT="${N_CORRECT_AUDIT:-200}"
 RULE="${RULE:-zero}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 OUT="$RUN_ROOT/rollout"
-# The labeller has to separate a human-rated wrong step from a right one at the
-# same fork by this much, or its labels are noise dressed as supervision.
+# Two conditions, because the first run (job 433686) showed they are different
+# questions. Among the forks the rollouts separate at all, the human-rated wrong
+# step must have the lower value at least MIN_WIN_RATE of the time: that is the
+# labeller's discrimination. And enough forks must be decided for the first
+# number to mean anything: that is the run's power, set by K and by how often the
+# model can solve the problem from either branch, not by the labeller.
+#
+# At K=4 the first run tied on 61.5% of 200 forks, nearly all at zero against
+# zero, and scored 0.766 among the 77 it decided (sign test p ~ 3e-7). The signal
+# was there and the resolution was not, so K goes to 16.
 MIN_WIN_RATE="${MIN_WIN_RATE:-0.60}"
+MIN_DECIDED="${MIN_DECIDED:-0.35}"
 
 export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
@@ -66,7 +75,8 @@ cat <<BANNER
 job        : ${SLURM_JOB_NAME:-onpolicy_rollout}  id: ${SLURM_JOB_ID:-N/A}
 git_commit : $(git rev-parse HEAD 2>/dev/null || echo unknown)
 model      : $MODEL_NAME_OR_PATH (offline)
-phase 1    : $MAX_FORKS matched forks, K=$K_ROLLOUTS   gate: win rate >= $MIN_WIN_RATE
+phase 1    : $MAX_FORKS matched forks, K=$K_ROLLOUTS
+             gate: decided >= $MIN_DECIDED and win rate among decided >= $MIN_WIN_RATE
 phase 2    : $RUN_ROOT/$STEM.shard*_trajectories.jsonl, rule=$RULE
 out        : $OUT
 ================================================================
@@ -105,29 +115,44 @@ import glob, json
 import numpy as np
 rows = [json.loads(l) for f in sorted(glob.glob("$OUT/cert.shard*.jsonl"))
         for l in open(f) if l.strip()]
+import sys
+sys.path.insert(0, "$PROJECT_ROOT")
+from scripts.onpolicy.rollout_labels import sign_test_p
 vp = np.array([r["v_pos"] for r in rows]); vn = np.array([r["v_neg"] for r in rows])
 dec = vp != vn
-win = float((vn < vp).mean())
+n_dec = int(dec.sum()); wins = int((vn[dec] < vp[dec]).sum())
 summary = {
-    "n_pairs": len(rows), "win_rate": win,
-    "win_rate_among_decided": float((vn[dec] < vp[dec]).mean()) if dec.any() else float("nan"),
+    "n_pairs": len(rows), "n_decided": n_dec,
+    "decided_fraction": n_dec / max(1, len(rows)),
+    "win_rate_among_decided": (wins / n_dec) if n_dec else float("nan"),
+    "sign_test_p": sign_test_p(wins, n_dec),
+    "win_rate_all_pairs": float((vn < vp).mean()),
     "ties": float((~dec).mean()),
+    "ties_both_zero": float(((vp == 0) & (vn == 0)).mean()),
     "mean_value_positive": float(vp.mean()), "mean_value_negative": float(vn.mean()),
 }
 json.dump(summary, open("$OUT/cert_summary.json", "w"), indent=2)
 print(json.dumps(summary, indent=2))
 print()
-print(f"The step humans rated WRONG has the lower rollout value in {win:.3f} of "
-      f"{len(rows)} matched forks ({summary['win_rate_among_decided']:.3f} of the "
-      f"{int(dec.sum())} the rollouts separate at all; {summary['ties']:.3f} tie).")
-print("Chance is 0.500. A labeller at chance here is not reading correctness.")
+print(f"{len(rows)} matched forks, {n_dec} decided by the rollouts "
+      f"({summary['decided_fraction']:.3f}); {summary['ties_both_zero']:.3f} tied "
+      f"at zero against zero, which says the model cannot solve those problems "
+      f"from either branch and not that the labeller failed.")
+print(f"Among the decided, the step humans rated WRONG has the lower value "
+      f"{summary['win_rate_among_decided']:.3f} of the time "
+      f"(sign test p = {summary['sign_test_p']:.2e}). Chance is 0.500.")
 PY
 
-GATE=$(python -c "import json;print(1 if json.load(open('$OUT/cert_summary.json'))['win_rate'] >= $MIN_WIN_RATE else 0)")
+GATE=$(python -c "
+import json
+s = json.load(open('$OUT/cert_summary.json'))
+ok = s['win_rate_among_decided'] >= $MIN_WIN_RATE and s['decided_fraction'] >= $MIN_DECIDED
+print(1 if ok else 0)")
 if [[ "$GATE" != "1" ]]; then
-  echo "[GATE FAILED] the rollout labeller does not separate human-rated wrong"
-  echo "              steps from right ones at the same fork. Not generating"
-  echo "              labels from it. The judge arm stands as the alternative."
+  echo "[GATE FAILED] see cert_summary.json. A low win rate among decided pairs"
+  echo "              means the labeller is not reading correctness. A low"
+  echo "              decided fraction means this run had no resolution: raise"
+  echo "              K_ROLLOUTS rather than concluding anything."
   exit 3
 fi
 

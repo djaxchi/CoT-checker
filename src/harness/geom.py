@@ -18,6 +18,17 @@ import numpy as np
 
 N_GEOM = 20
 
+# The 20 features in the order geom_feats emits them, so an ablation can name
+# what it removed instead of reporting a column index.
+GEOM_NAMES = (
+    "cone_cos_mean", "cone_cos_std", "cone_cos_p10", "cone_cos_p50", "cone_cos_p90",
+    "turn_cos_mean", "turn_cos_std", "turn_cos_p50",
+    "cos_stepdir_boundary", "cos_first_boundary", "cos_last_boundary", "cos_first_last",
+    "cone_tightness_ratio",
+    "lognorm_mean", "lognorm_std", "lognorm_p10", "lognorm_p90",
+    "log_norm_mean_vec", "log_norm_boundary", "log_norm_ratio",
+)
+
 EPS = 1e-8
 
 

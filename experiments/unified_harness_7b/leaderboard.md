@@ -3,6 +3,8 @@
 Which part of a reasoning step's activations carries its correctness, and how much
 of the answer is the detector rather than the representation?
 
+https://claude.ai/code/artifact/71c785e4-c08a-4e14-affe-4d9f0cb35c54
+
 Every row is a **pair**: a representation (which rows of the forward pass survive
 into the vector the learner sees) and a learner (what reads it). Everything else
 is pinned. Two neighbouring cells differ in exactly one coordinate, which is what
@@ -98,9 +100,38 @@ ProcessBench first-error F1_PB at calib-20, four-subset mean, mean +- sd over 3 
 | `step_tokens` | 4096 | — | — | — | 0.558 ± 0.004 | 0.554 ± 0.021 | 0.531 ± 0.020 | **0.566 ± 0.026** |
 | `step_stats` | 20480 | 0.511 ± 0.005 | 0.540 ± 0.006 | 0.535 ± 0.002 | — | — | — | — |
 | `boundary_stats` | 24576 | 0.509 ± 0.002 | 0.540 ± 0.003 | 0.536 ± 0.009 | — | — | — | — |
+| `lengthfree_geom` | 4116 | 0.510 ± 0.004 | 0.523 ± 0.007 | 0.518 ± 0.013 | — | — | — | — |
 | `step_mean` | 4096 | 0.469 ± 0.009 | 0.495 ± 0.006 | 0.481 ± 0.011 | — | — | — | — |
 | `step_delta` | 4096 | 0.395 ± 0.006 | 0.440 ± 0.006 | 0.436 ± 0.013 | — | — | — | — |
 | `last_token` | 4096 | 0.419 ± 0.009 | 0.422 ± 0.036 | 0.422 ± 0.025 | — | — | — | — |
+
+### `lengthfree_geom` (added 2026-09-01)
+
+Step mean with step length regressed out of every position, plus 20 scale-free
+geometry features describing the shape of the step's token cloud. The length map
+is fitted on train and applied unchanged to validation, test and ProcessBench;
+the length column itself is dropped, so no token count reaches the learner.
+
+It is the best representation at its width: +0.026 to +0.030 over the
+dimension-matched `step_mean` at every learner, larger than the seed spread in
+every cell, and it closes about 60% of the gap from `step_mean` to `step_stats`
+with a fifth of the dimensions. Sequence representations stay ahead.
+
+The reason it works is visible in the in-domain column, where it TIES `step_mean`
+(0.892 vs 0.890 at mlp:h1024). It buys transfer without buying source-domain fit,
+which is what removing a domain-shifted shortcut looks like and is not what
+adding capacity looks like. Step length scores 0.7039 ProcessBench step AUROC by
+itself while PRM800K steps average 38.8 tokens against ProcessBench's 79.7 and
+118.6, so a probe that reads length is fitted short and tested long.
+
+Neither ingredient works alone. Under a ridge probe on the screen sample, plain
+mean scores 0.7470, mean with length removed 0.7282 (worse), the 20 geometry
+features alone 0.5182 (near chance), and the two together 0.7897.
+
+Caveat: the gain is in ranking, not calibration. At the val-selected threshold it
+scores 0.347 ± 0.027 at linear against `step_mean`'s 0.403 ± 0.019, in a column
+whose seed spreads run 0.027 to 0.052 because a PRM800K-selected threshold does
+not transfer.
 
 In-domain PRM800K test AUROC:
 

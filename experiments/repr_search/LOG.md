@@ -609,3 +609,59 @@ If it holds, the mechanism sentence for the whole result becomes concrete: the
 pooled step direction is a noisy readout of correctness, the noise is largest
 when the step's tokens disagree with each other, and cone tightness tells the
 probe how much to trust the direction it just read.
+
+## Iteration 13: the suppressor reading is confirmed, and it is mostly about length
+
+All three predicted numbers hold. Content-only probe on ProcessBench: 0.7219.
+
+| feature | corr(f, y) | corr(f, score) | partial(f, y given score) | corr(f, log len) |
+|---|---|---|---|---|
+| cone_tightness_ratio | **+0.0062** | **+0.2640** | **-0.0516** | -0.3872 |
+| cone_cos_mean | +0.0071 | +0.2749 | -0.0531 | -0.3833 |
+| cone_cos_p10 | -0.0006 | +0.2379 | -0.0526 | -0.3525 |
+| cos_stepdir_boundary | +0.0053 | +0.3151 | **-0.0648** | -0.4066 |
+| lognorm_std | -0.0177 | -0.3291 | +0.0548 | +0.1969 |
+| cos_first_boundary | +0.0075 | +0.0823 | -0.0098 | +0.0536 |
+
+`cone_tightness_ratio` correlates with the label at **+0.0062**, which is nothing,
+correlates with the content probe's score at **+0.2640**, and its partial
+correlation with the label once that score is removed is **-0.0516**, eight times
+larger in magnitude and of the opposite sign. That is a textbook suppressor, sign
+flip included, and it explains the puzzle exactly: a feature can be worth +0.046
+to a probe while being worth nothing as a detector.
+
+Note the two dead features from the ablation behave correctly here too:
+`cos_first_boundary` has the weakest tie to the score (+0.0823) and the smallest
+partial (-0.0098). The two analyses agree on which features are inert without
+being told about each other.
+
+**But the last column changes the story, and the within-length accounting settles
+it.** Every cone feature correlates with log token count at -0.25 to -0.41. The
+content had length removed LINEARLY, so a feature correlated with length at -0.39
+can restore part of what was removed. Lining up the three representations:
+
+| representation | val-sel PB | within-length |
+|---|---|---|
+| mean_residual (content, length removed) | 0.7282 | 0.7306 |
+| mean_residual + bare log length | 0.7853 | 0.7312 |
+| mean_residual + 20 geometry features | **0.7897** | **0.7377** |
+
+The geometry block is worth +0.0615 unstratified and only **+0.0071** inside
+length strata. So roughly seven eighths of what the geometry buys is length
+information returning in a scale-free-looking form, and the suppressor it performs
+is largely the suppression of length-related variance in the content readout.
+
+The earlier framing in iteration 12, that cone tightness tells the probe how much
+to trust the direction it just read, is too generous and is retracted. The
+accurate version: the content probe's score is contaminated by a length-related
+component that survives linear length removal, cone tightness is a good proxy for
+that component, and including it lets the probe cancel what remains.
+
+**What survives as a genuine result.** Geometry still beats bare length by +0.0044
+unstratified and by +0.0065 within strata, where length carries nothing by
+construction (the control sits at 0.5097). And `mean_residual_geom_nolen` remains
+the highest within-length score in the entire search at 0.7377. So there is a
+real, small, length-free component, and the representation is still the best
+measured, but its margin over simply appending log length is about 0.005, not
+0.06. Anyone reading the grid's +0.026 F1 gain should know that a single extra
+column recovers most of it.

@@ -447,3 +447,103 @@ representations (0.7282) and the BEST within-length score of all of them
 representation whose plain and stratified numbers nearly coincide. If the goal is
 a detector that is not reading step length, it is currently the best one, and the
 plain leaderboard ranks it thirteenth.
+
+## Iteration 10: the winner holds on the real metric
+
+`lengthfree_geom` ran the full grid under the frozen protocol: 18 cells, the full
+513,810-step PRM800K train split, three seeds, the same lr x weight-decay search
+and trainer, `step_mean` rerun inside the same job so the comparison is paired
+rather than read across runs. All seven input fingerprints matched.
+
+**F1_PB at calib-20, four-subset mean:**
+
+| representation | dim | linear | mlp:h1024 | mlp:h1024x2 |
+|---|---|---|---|---|
+| `lengthfree_geom` | 4116 | 0.510 ± 0.004 | **0.523 ± 0.007** | 0.518 ± 0.013 |
+| `step_mean` | 4096 | 0.480 ± 0.007 | 0.497 ± 0.005 | 0.490 ± 0.012 |
+
+The gain is +0.026 to +0.030 at every learner and exceeds the seed spread in
+every cell. Oracle threshold agrees: 0.565 / 0.569 / 0.563 against 0.541 / 0.546 /
+0.537. The screen predicted this correctly, which is the second confirmation of
+its calibration.
+
+**The mechanism check passes.** In-domain PRM800K AUROC is 0.872 / 0.892 / 0.894
+against 0.869 / 0.890 / 0.891, which is a tie. The representation buys transfer
+without buying in-domain fit. That is exactly what removing a domain-shifted
+shortcut should look like, and it would not look like this if the 20 geometry
+features were simply adding capacity.
+
+**A reproducibility check came free.** This job's `step_mean` mlp:h1024 cell scored
+0.497 ± 0.005; the v2 leaderboard's independent run scored 0.495 ± 0.006.
+
+**Where it sits honestly.** It does not beat the top cell. Against the v2 board:
+
+| representation | dim | best cell |
+|---|---|---|
+| `step_tokens` x transformer d512 | 4096 seq | 0.566 ± 0.026 |
+| `step_stats` | 20480 | 0.540 ± 0.006 |
+| `boundary_stats` | 24576 | 0.540 ± 0.003 |
+| **`lengthfree_geom`** | **4116** | **0.523 ± 0.007** |
+| `step_mean` | 4096 | 0.495 ± 0.006 |
+
+So it is the best representation at its width, and closes about 60% of the gap
+from `step_mean` to `step_stats` using a fifth of the dimensions. Sequence
+representations read by a pooling learner remain ahead, and `step_tokens` x
+attn_query reaches 0.558 with 8,193 parameters, which is still the most
+efficient row on the board.
+
+**One column disagrees and should not be buried.** At the val-selected threshold
+`lengthfree_geom` linear scores 0.347 ± 0.027 against `step_mean`'s 0.403 ± 0.019.
+That column carries spreads of 0.027 to 0.052 across three seeds, against 0.004
+to 0.013 at calib-20, because a threshold picked on PRM800K does not transfer to
+ProcessBench. calib-20 exists for that reason. It is still a real caveat: the
+representation improves the ranking, not the calibration.
+
+## Iteration 11: trace-relative coordinates and between-step dynamics, both refuted
+
+The prediction was in-domain down, transfer up. The opposite happened, cleanly.
+
+| representation | dim | val-sel PB | in-domain | within-length |
+|---|---|---|---|---|
+| `winner` (recomputed on these rows) | 4116 | **0.7885** | 0.8575 | 0.7310 |
+| `winner_dyn` | 4126 | 0.7749 | 0.9076 | 0.7129 |
+| `winner_trace` | 8212 | 0.7560 | 0.8784 | 0.7004 |
+| `winner_trace_dyn` | 8222 | 0.7523 | **0.9101** | 0.6915 |
+| `mean` | 4096 | 0.7467 | 0.8540 | 0.7130 |
+| `trace_centered_causal` | 4096 | 0.6957 | 0.8194 | 0.7015 |
+| `trace_centered_all` | 4096 | 0.5899 | 0.8254 | 0.5968 |
+| `trace_z` | 4096 | 0.5788 | 0.8186 | 0.5974 |
+| `dyn` | 10 | 0.5107 | 0.8248 | 0.4870 |
+| `pos` (control) | 2 | **0.3649** | 0.5846 | 0.4198 |
+
+Nothing trace-relative helps, and everything trace-relative hurts. Every variant
+loses to `winner` in 1000 out of 1000 paired resamples.
+
+**The in-domain column explains it.** `winner_trace_dyn` posts 0.9101 in domain,
+the highest number this project has ever recorded, and 0.7523 on transfer. The
+trace-relative features are strongly informative in domain and actively harmful
+out of it, which is the signature of a feature whose MEANING differs between the
+two datasets.
+
+The likely reason is a labelling asymmetry nobody had to invent: in PRM800K a
+solution can contain many incorrect steps scattered anywhere, while ProcessBench
+is built so that every step before the first error is correct. So "this step
+relative to its siblings" is computed against a mixed reference in training and
+against an almost-entirely-correct reference at test time. The same arithmetic
+means two different things. This is worth stating because GeoReason
+(arXiv:2605.13772) reports its trace-normalised teacher transfers stably while
+its distilled student "collapses under shift"; our result says the normalisation
+itself is a transfer liability when the trace composition differs, which is a
+concrete mechanism for that collapse.
+
+`dyn` at 0.5107 also settles the between-step dynamics question. Speed relative
+to the trace, directional persistence, acceleration and typicality carry
+essentially nothing about step correctness out of domain, despite in-domain 0.8248.
+
+**The control earned its place.** `pos`, which is nothing but relative position
+and trace length, scores 0.5846 in domain and **0.3649** on ProcessBench, far
+BELOW chance. Position is not merely a useless shortcut here, it is an actively
+inverted one: what a probe learns about where errors sit in a PRM800K solution is
+wrong about where they sit in a ProcessBench solution. Any representation that
+encodes position pays for it on transfer, and this is the first time the search
+has been able to say that with a number.

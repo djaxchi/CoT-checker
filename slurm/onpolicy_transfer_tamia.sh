@@ -67,14 +67,16 @@ SNAP="$HF_CACHE/hub/models--$(echo "$MODEL_NAME_OR_PATH" | sed 's|/|--|g')/snaps
 [[ -d "$SNAP" && -n "$(ls -A "$SNAP" 2>/dev/null)" ]] || {
   echo "[FATAL] no local snapshot for $MODEL_NAME_OR_PATH; download on the login node" >&2
   exit 2; }
-if [[ ! -f "$TRACES" ]]; then
-  echo "[build] $TRACES missing; building the unlabelled set from the trajectories"
-  python scripts/onpolicy/build_pb_traces.py \
-    --trajectories "$RUN_ROOT"/"$STEM".shard*_trajectories.jsonl \
-    --out_dir "$RUN_ROOT" --stem "$STEM" \
-    --unlabelled "$TRACES" --force
+# The traces file is built after the environment exists, since building it
+# imports numpy. Job 434710 died three seconds in doing this before the venv.
+# What has to be true now is that the generation run is on disk.
+shopt -s nullglob
+TRAJ=("$RUN_ROOT"/"$STEM".shard*_trajectories.jsonl)
+shopt -u nullglob
+if [[ ! -f "$TRACES" && ${#TRAJ[@]} -eq 0 ]]; then
+  echo "[FATAL] neither $TRACES nor any $STEM.shard*_trajectories.jsonl under $RUN_ROOT" >&2
+  exit 2
 fi
-[[ -f "$TRACES" ]] || { echo "[FATAL] could not build $TRACES" >&2; exit 2; }
 
 cd "$PROJECT_ROOT"
 cat <<BANNER
@@ -82,7 +84,7 @@ cat <<BANNER
 job        : ${SLURM_JOB_NAME:-onpolicy_encode}  id: ${SLURM_JOB_ID:-N/A}
 git_commit : $(git rev-parse HEAD 2>/dev/null || echo unknown)
 model      : $MODEL_NAME_OR_PATH (offline)
-traces     : $TRACES  ($(wc -l <"$TRACES") traces)
+traces     : $TRACES
 rep_root   : $REP_ROOT  (span-only, layer $LAYER)
 styles     : $STYLES
 shards     : $NUM_SHARDS on ${SLURM_GPUS_ON_NODE:-4} GPUs   batch: $BATCH_SIZE
@@ -92,7 +94,17 @@ BANNER
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
-pip install --no-index torch transformers numpy
+pip install --no-index torch transformers numpy sympy
+
+if [[ ! -f "$TRACES" ]]; then
+  echo "[build] $TRACES missing; building the unlabelled set from the trajectories"
+  python scripts/onpolicy/build_pb_traces.py \
+    --trajectories "${TRAJ[@]}" \
+    --out_dir "$RUN_ROOT" --stem "$STEM" \
+    --unlabelled "$TRACES" --force 2>&1 | tee -a "$LOG_FILE"
+fi
+[[ -f "$TRACES" ]] || { echo "[FATAL] could not build $TRACES" >&2; exit 2; }
+echo "[traces] $(wc -l <"$TRACES") traces to encode"
 
 for style in $STYLES; do
   echo "[style] $style" | tee -a "$LOG_FILE"

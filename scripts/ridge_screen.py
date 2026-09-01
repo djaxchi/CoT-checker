@@ -66,6 +66,48 @@ def ridge_path(x: np.ndarray, y: np.ndarray, lambdas) -> dict[float, np.ndarray]
     return {lam: evecs @ (bp / (evals + lam)) for lam in lambdas}
 
 
+def _bootstrap(rows, n_boot: int, ref_name: str | None) -> None:
+    """Resample ProcessBench steps, the same resamples for every representation.
+
+    Pairing matters more than the interval here. The representations are scored
+    on identical rows, so their errors are strongly correlated, and an unpaired
+    comparison of two overlapping intervals would understate how reliably one
+    beats the other.
+    """
+    if not rows:
+        return
+    subs = list(rows[0]["_scores"])
+    rng = np.random.default_rng(0)
+    idx = [[rng.integers(0, len(rows[0]["_scores"][s][1]),
+                         len(rows[0]["_scores"][s][1])) for s in subs]
+           for _ in range(n_boot)]
+    draws = {}
+    for r in rows:
+        vals = []
+        for pick in idx:
+            vals.append(float(np.mean([
+                auroc(r["_scores"][s][1][p], r["_scores"][s][0][p])
+                for s, p in zip(subs, pick)])))
+        draws[r["name"]] = np.array(vals)
+        lo, hi = np.percentile(draws[r["name"]], [2.5, 97.5])
+        r["ci95"] = [float(lo), float(hi)]
+
+    print(f"\n95% intervals from {n_boot} paired resamples of the ProcessBench steps:")
+    for r in rows:
+        print(f"  {r['name']:<26}{r['val_selected_pb']:>8.4f}  "
+              f"[{r['ci95'][0]:.4f}, {r['ci95'][1]:.4f}]")
+    if ref_name and ref_name in draws:
+        print(f"\npaired against {ref_name}, on the same resamples:")
+        for r in rows:
+            if r["name"] == ref_name:
+                continue
+            d = draws[r["name"]] - draws[ref_name]
+            r["vs_ref_median"] = float(np.median(d))
+            r["vs_ref_win_rate"] = float((d > 0).mean())
+            print(f"  {r['name']:<26} median gain {np.median(d):>+8.4f}   "
+                  f"wins {100*(d > 0).mean():>5.1f}% of resamples")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--npz", nargs="+", required=True, type=Path)
@@ -76,6 +118,14 @@ def main() -> None:
     p.add_argument("--lambdas", nargs="+", type=float,
                    default=[1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7])
     p.add_argument("--n_bins", type=int, default=50)
+    p.add_argument("--bootstrap", type=int, default=0,
+                   help="Resamples for a confidence interval on the ProcessBench "
+                        "column, and for a paired comparison against --ref. "
+                        "Differences of 0.01 have been treated as meaningful in "
+                        "this search without ever being priced.")
+    p.add_argument("--ref", type=str, default=None,
+                   help="Representation to compare every other against, on the "
+                        "SAME resamples, so the comparison is paired.")
     p.add_argument("--out", type=Path)
     args = p.parse_args()
 
@@ -113,11 +163,15 @@ def main() -> None:
              "val_selected_pb": best["pb"], "oracle_pb": oracle,
              "in_domain": best["in_domain"], "within_length": wl,
              "lambda": best["lambda"]}
+        if args.bootstrap:
+            r["_scores"] = {s: (zs(z[f"pb_x_{s}"]) @ w, z[f"pb_y_{s}"]) for s in subs}
         rows.append(r)
         print(f"{r['name']:<24}{r['val_selected_pb']:>11.4f}{r['oracle_pb']:>10.4f}"
               f"{r['in_domain']:>8.4f}{r['within_length']:>11.4f}"
               f"{r['lambda']:>9.0e}{r['dim']:>7d}", flush=True)
 
+    if args.bootstrap:
+        _bootstrap(rows, args.bootstrap, args.ref)
     rows.sort(key=lambda r: -r["val_selected_pb"])
     print(f"\nranked by the val-selected column, which never sees ProcessBench:")
     for r in rows:
@@ -128,6 +182,8 @@ def main() -> None:
         for e in w["path"]:
             print(f"  lambda {e['lambda']:>8.0e}   in-domain {e['in_domain']:.4f}"
                   f"   processbench {e['pb']:.4f}")
+    for r in rows:
+        r.pop("_scores", None)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(rows, indent=2))

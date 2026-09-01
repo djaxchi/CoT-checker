@@ -81,3 +81,28 @@ def test_one_eigendecomposition_serves_the_whole_path():
     for lam in lams:
         want = np.linalg.solve(x.T @ x + lam * np.eye(x.shape[1]), x.T @ t)
         np.testing.assert_allclose(got[lam], want, rtol=1e-6, atol=1e-8)
+
+
+def test_paired_bootstrap_beats_unpaired_at_detecting_a_small_real_gain():
+    """The search has been treating 0.01 differences as meaningful without ever
+    pricing them. Representations are scored on identical rows, so their errors
+    are correlated and the comparison must be paired: an unpaired reading of two
+    overlapping intervals hides a difference that is present in every resample."""
+    from ridge_screen import _bootstrap
+
+    rng = np.random.default_rng(0)
+    n = 1500
+    y = (rng.random(n) < 0.2).astype(np.float32)
+    base = y + rng.normal(0, 1.0, n)          # shared, correlated component
+    rows = [
+        {"name": "a", "val_selected_pb": 0.0, "_scores": {"s": (base, y)}},
+        {"name": "b", "val_selected_pb": 0.0,
+         "_scores": {"s": (base + 0.06 * y, y)}},   # strictly better on every row
+    ]
+    _bootstrap(rows, 300, "a")
+    b = next(r for r in rows if r["name"] == "b")
+    assert b["vs_ref_median"] > 0
+    assert b["vs_ref_win_rate"] > 0.95, "a uniformly better score lost resamples"
+    lo_a, hi_a = next(r for r in rows if r["name"] == "a")["ci95"]
+    assert lo_a < hi_a
+    assert hi_a > b["ci95"][0], "intervals should overlap; the pairing is the point"

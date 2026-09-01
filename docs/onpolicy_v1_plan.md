@@ -270,6 +270,57 @@ Neither judge shows the position bias the baselines were there to catch: both
 point 0.45 of the way through a trace where the errors sit at 0.38, so they are
 reading something, just not enough of it.
 
+**The full local table** (job 433685 added the reasoning arms). Reasoning has
+opposite effects depending on whether the model was instruction-tuned:
+
+```
+                        F1_PB  Acc_err  Acc_cor  parsefail
+qwen25_7b_instruct_cot  0.481    0.346    0.787      0.000
+qwen25_32b              0.435    0.294    0.834      0.000
+qwen3_8b_base           0.421    0.294    0.740      0.002
+qwen3_8b_base_cot       0.312    0.186    0.964      0.002
+qwen25_32b_cot          0.236    0.134    0.982      0.000
+qwen25_7b_instruct      0.009    0.004    0.994      0.000
+always_no_error         0.000    0.000    1.000
+```
+
+It rescued the instruct model, which was degenerate without it, and hurt both
+base models, which became more conservative rather than more accurate
+(Acc_correct to 0.98, Acc_error to 0.13) and drifted later into the trace.
+Pairwise agreement between these judges runs 0.47 to 0.81, which is the S3
+lesson again: two judges agreeing is evidence and two disagreeing is a caveat.
+The best of them still sits below the 0.566 of the representation it would be
+supervising.
+
+**DeepSeek-R1 over the API settles it** (the user's suggestion: compute nodes
+have no network, but the labelling does not have to happen on them). Stratified
+across all four subsets, 126 traces, no parse failures:
+
+```
+                        F1_PB  Acc_err  Acc_cor   exact
+deepseek-r1 (API)       0.785    0.789    0.782   0.786
+always_no_error         0.000    0.000    1.000   0.437
+
+  gsm8k          n=57   0.913
+  math           n=24   0.697
+  olympiadbench  n=23   0.615
+  omnimath       n=22   0.609
+```
+
+It points 0.39 of the way through a trace where the true errors sit at 0.39, so
+it carries none of the late-drift the local judges show. At 0.785 against 0.566
+for the best representation, its labels are cleaner than the signal they will be
+used to measure, which is the condition this arm needed and did not have.
+
+Two lessons paid for on the way, both now enforced in code. The certification set
+was written one subset after another, so the first stopped run scored 0.807 on 63
+traces that were GSM8K to the last one; the file is interleaved now, and the
+subset table above shows how much that mattered. And 15.9% of the first run's
+traces came back empty because R1 spent its whole 4,096-token budget reasoning;
+those were being scored as "no error", penalising the judge for a budget setting.
+An empty reply now buys one retry at double the budget, and only the failures pay
+for the bigger ceiling.
+
 Two follow-ups, run as controlled changes rather than a redesign:
 
 1. **Reasoning before the verdict** (job 433685). All three answered on the first

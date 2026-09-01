@@ -1,0 +1,34 @@
+# The representation search's winner, crossed with the vector learners.
+#
+# lengthfree_geom = step mean with step length regressed out of every position,
+# plus 20 scale-free geometry features describing the shape of the step's token
+# cloud. 4,116 dimensions on Qwen3-8B-Base.
+#
+# Why this cell list exists. Under a deterministic ridge probe on the screen's
+# sample, measured against the same probe on the same rows:
+#
+#   step mean                          0.7470
+#   step mean, length removed          0.7282   removing length ALONE costs
+#   the 20 geometry features alone     0.5182   they are useless ALONE
+#   both together                      0.7897   and win 1000/1000 paired resamples
+#
+# The gain is an interaction, not two additions. Length is a cue that works in
+# training (PRM800K steps average 38.8 tokens) and misleads at test time
+# (ProcessBench steps run 79.7 and 118.6), so removing it and handing back only
+# the scale-free part of what it stood in for beats both keeping it and dropping
+# it. It is also the best representation inside length strata (0.7377), where a
+# token count scores 0.5097, so it is not winning on the shortcut.
+#
+# The screen predicted the full metric at Spearman 0.934 over 31 cells, which is
+# a good enough reason to spend grid time here and not a substitute for it. This
+# run is what decides whether the result holds on calib-20 F1.
+#
+# step_mean is included at the same three learners so the comparison is paired
+# within this job rather than read across runs.
+
+lengthfree_geom linear
+lengthfree_geom mlp:h1024
+lengthfree_geom mlp:h1024x2
+step_mean linear
+step_mean mlp:h1024
+step_mean mlp:h1024x2

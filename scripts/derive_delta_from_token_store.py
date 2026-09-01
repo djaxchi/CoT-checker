@@ -33,6 +33,9 @@ sys.path.insert(0, str(ROOT))
 from src.repstore.store import RepSplit  # noqa: E402
 
 
+from src.harness.geom import N_GEOM, geom_feats  # noqa: E402
+
+
 def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
     """Compute one item's vector for the given readout. h is the shard mmap.
     [off_a, off_b) is the item's row range; start_abs/last_abs are the step-token
@@ -42,6 +45,11 @@ def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
     span = np.asarray(h[start_abs:last_abs + 1], dtype=np.float32)  # step tokens only
     if readout == "mean":
         return span.mean(0)
+    if readout == "mean_geom":
+        boundary = np.asarray(h[start_abs - 1], dtype=np.float32)
+        return np.concatenate([span.mean(0),
+                               geom_feats(span, boundary, with_len=False),
+                               [np.log(max(span.shape[0], 1))]])
     if readout == "max":
         return span.max(0)
     if readout == "multistat":
@@ -64,6 +72,11 @@ def _reduce_item(h, off_a, off_b, start_abs, last_abs, readout):
 
 
 def _out_dim(readout: str, d: int) -> int:
+    if readout == "mean_geom":
+        # mean + 20 scale-free geometry features + log token count. The length
+        # column is not part of the representation: the cell regresses it out of
+        # the mean and then drops it. See src/harness/lengthfree.py.
+        return d + N_GEOM + 1
     if readout == "multistat":
         return 5 * d
     if readout == "boundary_stats":

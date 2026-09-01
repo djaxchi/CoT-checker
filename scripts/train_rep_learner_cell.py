@@ -64,6 +64,7 @@ from src.harness.learners import (  # noqa: E402
     build_learner, build_sparse_learner, is_sequence, param_count,
 )
 from src.harness.spanloader import SpanLoader  # noqa: E402
+from src.harness import lengthfree as lfree  # noqa: E402
 from src.harness import rescale as rs  # noqa: E402
 from src.harness.sparse_vec import SparseTokenSplit, SparseVecSplit  # noqa: E402
 from src.repstore import split_fingerprint  # noqa: E402
@@ -77,6 +78,11 @@ REP_READOUT = {
     "step_delta": "delta",
     "step_stats": "multistat",
     "boundary_stats": "boundary_stats",
+    # The search winner: step mean with step length regressed out, plus 20
+    # scale-free geometry features. The readout carries a log-length column that
+    # the cell uses to fit the removal and then drops, so the length is never
+    # part of the representation the learner sees.
+    "lengthfree_geom": "mean_geom",
 }
 # Sparse SAE codes of the same states, mirroring two dense readouts so the
 # sparsity question is a controlled contrast rather than a separate study:
@@ -337,6 +343,7 @@ def main() -> None:
         print(f"[input] {k:28s} {v}", flush=True)
 
     # ---- load the three PRM800K splits in the shape this learner needs -----
+    lstats = None
     if sparse_seq:
         if args.sae_dir is None:
             raise SystemExit(f"--sae_dir is required for {args.rep}")
@@ -426,6 +433,17 @@ def main() -> None:
         Xte, y_test, _ = load_vectors(args.prm_store, args.test_stem, args.rep,
                                       args.vec_cache_dir, sort=False,
                                       fingerprint=inputs[f"prm/{args.test_stem}"])
+        if args.rep == "lengthfree_geom":
+            # Fitted on train and applied unchanged everywhere, exactly as the
+            # rescale statistics are. Materialised rather than applied lazily so
+            # the learner and the rescale below see the final width.
+            lstats = lfree.fit(Xtr)
+            print(f"[lengthfree] {args.rep}: "
+                  f"{lfree.describe(lstats, np.asarray(Xtr[:2000]))}", flush=True)
+            Xtr = lfree.apply(Xtr, lstats)
+            Xva = lfree.apply(Xva, lstats)
+            Xte = lfree.apply(Xte, lstats)
+
         d = Xtr.shape[1]
         stats = tfm = None
         if args.rescale == "zscore":
@@ -589,6 +607,11 @@ def main() -> None:
             Xpb, _, meta = load_vectors(args.pb_store, sub, args.rep,
                                         args.vec_cache_dir, sort=True,
                                         fingerprint=inputs[f"pb/{sub}"])
+            if lstats is not None:
+                # the TRAIN length map, never refitted here: ProcessBench steps
+                # run 80 to 119 tokens against PRM800K's 39, and refitting would
+                # erase the shift this correction exists to survive
+                Xpb = lfree.apply(Xpb, lstats)
             ypb = np.zeros(Xpb.shape[0], dtype=np.int8)
             fn = mkvec(Xpb, ypb)          # same training statistics, never refitted
             scores = score_all(model, Xpb.shape[0], fn, eval_plan(Xpb.shape[0]))

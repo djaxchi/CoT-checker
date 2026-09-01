@@ -307,3 +307,71 @@ stratification against everyone else's 0.037. So removing length costs nothing
 once length is not scoreable, and it is the only representation that is already
 close to length-free. Its plain score of 0.7347 is the honest one; the other
 rows are carrying about 0.03 of length that stratification removes.
+
+## Iteration 7: the screen was ranking its own budget
+
+The width-tracking discrepancy from iteration 6 turned out to be the small half of
+the problem. Sweeping epochs and learning rate over eight representations:
+
+| representation | e8 lr1e-3 | e8 lr1e-2 | e25 lr1e-3 | e25 lr1e-2 | e60 lr1e-3 | e60 lr1e-2 |
+|---|---|---|---|---|---|---|
+| dir | **0.7603** | 0.7288 | 0.7438 | 0.7239 | 0.7267 | 0.7076 |
+| dir_L26only | 0.7619 | 0.7262 | **0.7560** | 0.7390 | 0.7397 | 0.7244 |
+| dir_L26L35 | **0.7771** | 0.7290 | 0.7259 | 0.7164 | 0.7256 | 0.6951 |
+| mean | 0.7575 | 0.7190 | 0.7398 | 0.7165 | 0.7190 | 0.7047 |
+| mean_L26only | 0.7531 | 0.7162 | 0.7475 | 0.7321 | 0.7317 | 0.7197 |
+| mean_L26L35 | 0.7700 | 0.7168 | 0.7203 | 0.7096 | 0.7157 | 0.6941 |
+| quantiles | 0.7628 | 0.7047 | 0.7239 | 0.7028 | 0.6954 | 0.6524 |
+| first_last | 0.7356 | 0.7315 | 0.7226 | 0.7043 | 0.7119 | 0.6867 |
+
+Two things, both bad for everything recorded before this point.
+
+**Transfer decays monotonically with training.** Every single representation
+scores worse the more the probe is fitted. `dir` goes 0.7603 -> 0.7267 from 8 to
+60 epochs at the same learning rate, and raising the learning rate at fixed
+epochs does the same thing. The probe is overfitting PRM800K, and ProcessBench
+pays for it.
+
+**The ranking at the incumbent budget anti-correlates with every other budget.**
+Spearman against epochs 8 / lr 1e-3:
+
+    epochs   8 lr 0.01     -0.143    best: first_last
+    epochs  25 lr 0.001    -0.238    best: dir_L26only
+    epochs  25 lr 0.01     -0.190    best: dir_L26only
+    epochs  60 lr 0.001    -0.071    best: dir_L26only
+    epochs  60 lr 0.01     -0.190    best: dir_L26only
+
+So "which representation is better" was being decided by where an unregularised
+SGD run happened to be stopped, and the answer at the screen's own budget is
+close to the reverse of the answer everywhere else.
+
+**Stacking was an early-stopping artifact.** `dir_L26L35` is the best cell in the
+whole table at 8 epochs (0.7771) and the worst at 60 (0.6951). A wider
+representation is further from convergence at a fixed budget, so it looked good
+for exactly the reason it was going to look bad later. Recorded as refuted. This
+also matches the instinct that concatenating two layers is a bigger vector rather
+than a better idea.
+
+**One real finding survives.** Layer 26 alone beats layer 35 alone at every budget
+except the incumbent one, and the margin grows as the probe converges: at 60
+epochs `dir_L26only` 0.7397 against `dir` 0.7267, and `mean_L26only` 0.7317
+against `mean` 0.7190. That is consistent with the project's earlier Qwen2.5
+result that L20 beat L28, now reproduced on Qwen3 at the corresponding depth.
+
+At the converged budget, within length strata, the whole field sits at 0.63 to
+0.69 against the length control's 0.5097, so the content signal is still real; it
+is the absolute numbers and the ordering that were budget artifacts.
+
+### What replaces the screen
+
+Ridge regression on +/-1 labels, closed form: no epochs, no seed, no learning
+rate, one eigendecomposition serving the whole penalty path. The penalty is the
+interesting knob rather than a nuisance, because its two ends are the two rules
+the conicity study compared: as lambda goes to zero the solution approaches LDA,
+which whitens by the data covariance (the study's 0.82), and as lambda grows it
+approaches the mean-difference direction (the study's 0.63). Sweeping it lets
+each representation be read at its own best point on that path.
+
+Reported as val-selected lambda, chosen on in-domain validation without ever
+looking at ProcessBench, plus an oracle ceiling, with in-domain alongside so the
+overfitting above can be read directly.

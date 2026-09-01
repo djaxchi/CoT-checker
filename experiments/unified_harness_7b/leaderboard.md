@@ -128,6 +128,31 @@ Neither ingredient works alone. Under a ridge probe on the screen sample, plain
 mean scores 0.7470, mean with length removed 0.7282 (worse), the 20 geometry
 features alone 0.5182 (near chance), and the two together 0.7897.
 
+**How much of this is length, stated plainly.** Ablation shows the 20 features are
+one measurement written nine ways plus three dead entries: any single one of about
+eight recovers three quarters of the block, and no leave-one-out exceeds 0.0016.
+The leader, `cone_tightness_ratio` (||mean|| / mean||token||), is a suppressor
+variable: it correlates with the label at +0.0062, with the content probe's score
+at +0.2640, and its partial correlation with the label given that score is -0.0516,
+eight times larger and sign flipped. It is worth +0.046 to a probe and nothing as
+a detector.
+
+What it suppresses is largely length. Every cone feature correlates with log token
+count at -0.25 to -0.41, and the content had length removed only linearly, so
+these features restore a nonlinear remainder:
+
+| representation | val-sel PB | within-length |
+|---|---|---|
+| mean_residual | 0.7282 | 0.7306 |
+| mean_residual + bare log length | 0.7853 | 0.7312 |
+| mean_residual + 20 geometry features | 0.7897 | 0.7377 |
+
+The block is worth +0.0615 unstratified and +0.0071 within length strata. So the
+geometry beats simply appending one log-length column by about 0.005, not 0.06.
+`lengthfree_geom` is still the best within-length representation measured (0.7377
+against a length control at 0.5097) and still wins the grid by +0.026 F1, but the
+margin over a one-column alternative is small and should be reported as such.
+
 Caveat: the gain is in ranking, not calibration. At the val-selected threshold it
 scores 0.347 ± 0.027 at linear against `step_mean`'s 0.403 ± 0.019, in a column
 whose seed spreads run 0.027 to 0.052 because a PRM800K-selected threshold does

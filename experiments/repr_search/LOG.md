@@ -547,3 +547,65 @@ inverted one: what a probe learns about where errors sit in a PRM800K solution i
 wrong about where they sit in a ProcessBench solution. Any representation that
 encodes position pays for it on transfer, and this is the first time the search
 has been able to say that with a number.
+
+## Iteration 12: what the 20 geometry features actually are
+
+The block is worth +0.0614 on top of length-free content (0.7283 -> 0.7897).
+Ablating it one feature at a time, with the penalty selected on validation:
+
+| feature | add-one-in | leave-one-out |
+|---|---|---|
+| cone_tightness_ratio | **+0.0458** | +0.0005 |
+| cone_cos_mean | **+0.0457** | +0.0005 |
+| cone_cos_p50 | +0.0426 | +0.0008 |
+| log_norm_mean_vec | +0.0357 | -0.0001 |
+| cone_cos_p90 | +0.0355 | +0.0007 |
+| cone_cos_p10 | +0.0353 | +0.0005 |
+| turn_cos_mean | +0.0334 | +0.0002 |
+| lognorm_p10 | +0.0278 | -0.0000 |
+| lognorm_mean / lognorm_std | +0.0257 | ~0 |
+| log_norm_ratio | +0.0238 | +0.0000 |
+| cone_cos_std | +0.0220 | -0.0001 |
+| cos_stepdir_boundary | +0.0168 | +0.0001 |
+| cos_last_boundary | +0.0054 | **+0.0016** |
+| lognorm_p90 | +0.0033 | -0.0001 |
+| cos_first_last | +0.0008 | -0.0000 |
+| cos_first_boundary / log_norm_boundary | -0.0000 | -0.0000 |
+
+Two things, and the second is the interesting one.
+
+**The block is one measurement, not twenty.** Any single one of about eight
+features recovers three quarters of the block's value, and NO feature is
+individually necessary: the largest leave-one-out in the table is 0.0016. The two
+leaders, `cone_tightness_ratio` (||mean|| / mean||token||) and `cone_cos_mean`
+(mean cosine of each token to the step's own mean direction), are two ways of
+writing the same quantity and score within 0.0001 of each other. The five cosine
+quantiles and the four norm quantiles are quantiles of two distributions. So the
+honest description of the block is: **how tightly the step's tokens agree in
+direction**, measured nine different ways plus some dead weight.
+
+Three features are dead on both criteria and can be dropped: `cos_first_boundary`,
+`cos_first_last`, `log_norm_boundary`.
+
+**This vindicates the conicity thread, but relocates the claim.** The earlier
+conicity work found correct steps form a tight cone and incorrect ones do not,
+scored the centroid rule at 0.63 against a whitened 0.82, and concluded the gap
+was the metric. The result here is sharper and stranger: cone tightness is worth
++0.046 as the single addition to a content probe, and 0.5182 as a detector on its
+own, 0.4675 inside length strata. It is not a weak detector, it is not a detector
+at all. It is worth a great deal only in the company of the content direction.
+
+That combination has a name in regression. A variable that correlates weakly with
+the outcome and strongly with the other predictors, and earns its place by
+removing variance from them that the outcome does not explain, is a **suppressor**.
+The reading predicts three numbers: near-zero correlation with the label, clear
+correlation with the content probe's score, and a partial correlation given that
+score which is clearly larger than the raw one. Job 434852 measures all three, and
+reports the correlation with log length in the same table so that "cone tightness
+is a nonlinear stand-in for step length" is settled with a number rather than
+inferred from the block scoring 0.5182 where length alone scores 0.7039.
+
+If it holds, the mechanism sentence for the whole result becomes concrete: the
+pooled step direction is a noisy readout of correctness, the noise is largest
+when the step's tokens disagree with each other, and cone tightness tells the
+probe how much to trust the direction it just read.

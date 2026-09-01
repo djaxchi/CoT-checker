@@ -46,10 +46,21 @@ from src.repstore.store import RepSplit  # noqa: E402
 
 
 def load_head(model_id: str, cache: str, device, dtype=torch.float32):
-    """The final norm and the unembedding, without the 36 blocks in front."""
+    """The final norm and the unembedding, without the 36 blocks in front.
+
+    The cache is pointed at through HF_HOME rather than `cache_dir`. Job 434803
+    died in 41 seconds because `cache_dir` is the directory that CONTAINS the
+    `models--org--name` folders, which on this cluster is `$HF_CACHE/hub`, while
+    `$HF_CACHE` is the HF_HOME. Passing the HF_HOME as cache_dir looks correct,
+    passes a `ls` check on the snapshot path, and then fails offline with
+    LocalEntryNotFoundError. Setting HF_HOME leaves the layout to the library.
+    """
+    import os
+    os.environ.setdefault("HF_HOME", str(cache))
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
     from transformers import AutoModelForCausalLM
     m = AutoModelForCausalLM.from_pretrained(
-        model_id, cache_dir=cache, torch_dtype=torch.bfloat16,
+        model_id, torch_dtype=torch.bfloat16,
         local_files_only=True, low_cpu_mem_usage=True)
     norm_w = m.model.norm.weight.detach().to(device, dtype).clone()
     eps = float(getattr(m.model.norm, "variance_epsilon", 1e-6))

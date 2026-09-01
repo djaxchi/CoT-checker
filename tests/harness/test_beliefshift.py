@@ -108,3 +108,23 @@ def test_logit_lens_is_invariant_to_scaling_the_state():
     a = logits_of(h, nw, 1e-6, w)
     b = logits_of(9.0 * h, nw, 1e-6, w)
     torch.testing.assert_close(a, b, rtol=1e-3, atol=1e-3)
+
+
+def test_the_head_loader_uses_hf_home_and_not_a_cache_dir_argument():
+    """Job 434803 died in 41 seconds of GPU allocation: cache_dir is the folder
+    that CONTAINS models--org--name, which here is $HF_CACHE/hub, while $HF_CACHE
+    is the HF_HOME. Passing the HF_HOME as cache_dir looks right, survives an ls
+    on the snapshot path, then fails offline. Pin the fix."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "scripts"
+           / "belief_shift_reps.py").read_text()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "attr", "") == "from_pretrained"):
+            kw = {k.arg for k in node.keywords}
+            assert "cache_dir" not in kw, "cache_dir is the wrong lever here"
+            assert "local_files_only" in kw, "an offline node must fail, not hang"
+    assert 'os.environ.setdefault("HF_HOME"' in src

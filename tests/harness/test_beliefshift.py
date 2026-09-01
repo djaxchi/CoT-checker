@@ -69,3 +69,42 @@ def test_entropy_uses_the_full_distribution_not_the_top_k():
     """A flat distribution must score a higher entropy than a peaked one."""
     flat, peaked = _logits(seed=8, scale=0.01), _logits(seed=8, peak=3)
     assert belief_feats(flat, flat)[-1] > belief_feats(peaked, peaked)[-1]
+
+
+def test_logit_lens_matches_a_reference_rmsnorm_then_unembed():
+    """The deriver reimplements RMSNorm rather than calling the model, so it has
+    to agree with the definition or every belief number is off."""
+    import sys
+    from pathlib import Path
+
+    import torch
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    from belief_shift_reps import logits_of
+
+    torch.manual_seed(0)
+    d, v, eps = 16, 40, 1e-6
+    h = torch.randn(5, d)
+    nw = torch.rand(d) + 0.5
+    w = torch.randn(v, d)
+    want = (h / torch.sqrt(h.pow(2).mean(-1, keepdim=True) + eps) * nw) @ w.T
+    torch.testing.assert_close(logits_of(h, nw, eps, w), want, rtol=1e-5, atol=1e-5)
+
+
+def test_logit_lens_is_invariant_to_scaling_the_state():
+    """RMSNorm divides the scale out, so two states differing only in magnitude
+    must give the same distribution. This is what makes the belief features
+    immune to the raw activation swing that broke the first screen."""
+    import sys
+    from pathlib import Path
+
+    import torch
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    from belief_shift_reps import logits_of
+
+    torch.manual_seed(1)
+    h, nw, w = torch.randn(3, 16), torch.rand(16) + 0.5, torch.randn(40, 16)
+    a = logits_of(h, nw, 1e-6, w)
+    b = logits_of(9.0 * h, nw, 1e-6, w)
+    torch.testing.assert_close(a, b, rtol=1e-3, atol=1e-3)

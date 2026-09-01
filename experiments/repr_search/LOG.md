@@ -375,3 +375,75 @@ each representation be read at its own best point on that path.
 Reported as val-selected lambda, chosen on in-domain validation without ever
 looking at ProcessBench, plus an oracle ceiling, with in-domain alongside so the
 overfitting above can be read directly.
+
+## Iteration 8: relational representations, read with the ridge probe
+
+First results from a probe with no budget in it. The path is well behaved: for
+almost every representation the validation-selected penalty is also the one that
+maximises ProcessBench, so val-selected and oracle agree to the fourth decimal.
+In-domain and transfer now rise and fall together along the penalty path rather
+than trading off, which is what the SGD screen's decay was hiding.
+
+| representation | val-sel PB | in-domain | within-length | dim |
+|---|---|---|---|---|
+| dir_geom_layer | **0.7776** | 0.8616 | 0.7335 | 4129 |
+| dir_geom | 0.7757 | 0.8612 | 0.7332 | 4117 |
+| contribution_geom | 0.7670 | 0.8524 | 0.7191 | 4117 |
+| dir_L26only | 0.7563 | 0.8633 | 0.7259 | 4096 |
+| dir | 0.7522 | 0.8592 | 0.7241 | 4096 |
+| mean_L26only | 0.7503 | 0.8632 | 0.7210 | 4096 |
+| mean | 0.7470 | 0.8583 | 0.7194 | 4096 |
+| contribution | 0.7406 | 0.8479 | 0.7106 | 4096 |
+| contribution_dir | 0.7379 | 0.8474 | 0.7081 | 4096 |
+| mean_residual | 0.7282 | 0.8423 | **0.7306** | 4096 |
+| surface_length | 0.7039 | 0.6142 | 0.5097 | 1 |
+| geom | 0.7000 | 0.6468 | 0.5596 | 21 |
+| geom_layer | 0.6987 | 0.6692 | 0.5737 | 33 |
+| layer_angle | 0.6376 | 0.6422 | 0.5468 | 12 |
+| geom_nolen | 0.5182 | 0.6069 | 0.4675 | 20 |
+| boundary | 0.5035 | 0.7412 | 0.5091 | 4096 |
+
+**Pure geometry is refuted.** `geom` scores 0.7000, which looks respectable until
+`geom_nolen` scores 0.5182, and 0.4675 within length strata, below chance. All of
+`geom`'s apparent signal is the log token count it carries. The conicity
+hypothesis, that correct steps cone tightly and incorrect ones do not, does not
+survive as a transferable step-level signal: cone tightness, turn angles, norm
+spread and the prefix cosine together separate the classes at 0.52 out of domain.
+Worth stating plainly because the geometry was measured directly and without a
+metric, which was the escape hatch the conicity study left open when it blamed
+its 0.63-vs-0.82 gap on the metric.
+
+**The prefix state alone is a strong in-domain predictor that transfers at
+chance.** `boundary`, the model's state just before the step, with none of the
+step's own tokens, scores **0.7412 in domain and 0.5035 on ProcessBench**. So a
+large part of what an in-domain probe reads is not the step at all, it is where
+in the trace the step sits and what came before. That fraction is entirely
+domain-specific and vanishes on transfer. This is the cleanest evidence yet that
+in-domain AUROC on PRM800K overstates step-level detection, and it comes almost
+free: it is one of the two things the store already held.
+
+**Contribution does not beat content.** `contribution` (0.7406) and
+`contribution_dir` (0.7379) both sit slightly BELOW plain `mean` (0.7470) and
+`dir` (0.7522). Subtracting the prefix state removes something the probe was
+using, which is consistent with the `boundary` row: part of the in-domain signal
+lives in the prefix, and the contribution deliberately throws it away. The S4
+framing does not carry over to this benchmark. Refuted.
+
+**Cross-layer revision is weak on its own and adds nothing on top.**
+`layer_angle`, twelve numbers of disagreement between layers 26 and 35, scores
+0.6376 alone, above chance and interesting in isolation. But `dir_geom_layer`
+beats `dir_geom` by 0.0019, which is nothing. How much the late blocks rewrote a
+step is not independent information about whether the step is wrong.
+
+**The remaining question is whether dir_geom's +0.0235 is anything but length.**
+Within strata the gain shrinks to 0.0091, about what bolting bare length on was
+already worth (0.0080 for `mean_pluslen`). Controls launched as job 434230:
+`dir_geom_nolen` and `dir_pluslen`.
+
+**One row deserves attention for the opposite reason.** `mean_residual`, with
+length regressed out of every position, has the WORST plain score of the dense
+representations (0.7282) and the BEST within-length score of all of them
+(0.7306), higher than `dir_geom`'s 0.7332 is above `dir`'s 0.7241. It is the only
+representation whose plain and stratified numbers nearly coincide. If the goal is
+a detector that is not reading step length, it is currently the best one, and the
+plain leaderboard ranks it thirteenth.

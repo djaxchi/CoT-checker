@@ -48,6 +48,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import math
+
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -98,6 +100,56 @@ def auroc(y: np.ndarray, s: np.ndarray) -> float:
     return float((ranks[y == 1].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
+def best_of_n_hits(groups: dict[str, list[dict]], how: str) -> dict[str, float]:
+    """Per problem, did the kept solution reach the right answer.
+
+    Kept per problem rather than averaged, so the comparison against
+    self-consistency can be paired: the two methods are scored on the same 300
+    problems, and an unpaired interval on that difference is needlessly wide.
+    """
+    hits = {}
+    for pid, sols in groups.items():
+        scored = [(aggregate(s["scores"], how), i, s) for i, s in enumerate(sols)]
+        scored.sort(key=lambda t: (t[0], t[1]))
+        hits[pid] = float(scored[0][2]["correct"])
+    return hits
+
+
+def mcnemar(a: dict[str, float], b: dict[str, float]) -> dict:
+    """Paired comparison of two picking rules over the same problems.
+
+    Only the problems where they disagree carry information, which is what makes
+    this tighter than comparing two accuracies computed independently.
+    """
+    shared = set(a) & set(b)
+    a_only = sum(1 for k in shared if a[k] > b[k])
+    b_only = sum(1 for k in shared if b[k] > a[k])
+    n = a_only + b_only
+    if n == 0:
+        return {"n_discordant": 0, "p": float("nan"), "gap": 0.0}
+    p = min(1.0, 2 * sum(math.comb(n, i) for i in range(max(a_only, b_only), n + 1))
+            / 2 ** n)
+    return {"n_discordant": n, "a_wins": a_only, "b_wins": b_only, "p": float(p),
+            "gap": float(np.mean([a[k] for k in shared]) - np.mean([b[k] for k in shared]))}
+
+
+def length_baseline(groups: dict[str, list[dict]]) -> dict:
+    """What a verifier that only counts steps would score.
+
+    Incorrect solutions run longer, so a score that quietly tracks length would
+    post a respectable trajectory AUROC while reading nothing about correctness.
+    This is the row that says whether it did.
+    """
+    y = np.array([0 if s["correct"] else 1 for sols in groups.values() for s in sols])
+    L = np.array([float(len(s["scores"])) for sols in groups.values() for s in sols])
+    by_len = {p: [dict(s, scores=[float(len(s["scores"]))]) for s in v]
+              for p, v in groups.items()}
+    return {"traj_auroc": auroc(y, L),
+            "best_of_n_shortest": best_of_n(by_len, "worst_step"),
+            "mean_steps_correct": float(L[y == 0].mean()) if (y == 0).any() else float("nan"),
+            "mean_steps_incorrect": float(L[y == 1].mean()) if (y == 1).any() else float("nan")}
+
+
 def best_of_n(groups: dict[str, list[dict]], how: str) -> float:
     """Accuracy of keeping the least suspicious solution of each problem.
 
@@ -105,12 +157,8 @@ def best_of_n(groups: dict[str, list[dict]], how: str) -> float:
     but fixed, so two verifiers that tie everywhere score the same rather than
     differing by whichever happened to sort first.
     """
-    hits = []
-    for _pid, sols in groups.items():
-        scored = [(aggregate(s["scores"], how), i, s) for i, s in enumerate(sols)]
-        scored.sort(key=lambda t: (t[0], t[1]))
-        hits.append(float(scored[0][2]["correct"]))
-    return float(np.mean(hits)) if hits else float("nan")
+    hits = best_of_n_hits(groups, how)
+    return float(np.mean(list(hits.values()))) if hits else float("nan")
 
 
 def weighted_vote(groups: dict[str, list[dict]], how: str) -> float:
@@ -131,6 +179,25 @@ def weighted_vote(groups: dict[str, list[dict]], how: str) -> float:
         win = max(tally.items(), key=lambda kv: kv[1])[0]
         hits.append(float(first[win]["correct"]))
     return float(np.mean(hits)) if hits else float("nan")
+
+
+def self_consistency_hits(groups: dict[str, list[dict]]) -> dict[str, float]:
+    hits = {}
+    for pid, sols in groups.items():
+        tally: dict[str, int] = defaultdict(int)
+        first: dict[str, dict] = {}
+        for s in sols:
+            ans = normalize_answer(s.get("pred"))
+            if ans is None:
+                continue
+            tally[ans] += 1
+            first.setdefault(ans, s)
+        if not tally:
+            hits[pid] = 0.0
+            continue
+        win = max(tally.items(), key=lambda kv: kv[1])[0]
+        hits[pid] = float(first[win]["correct"])
+    return hits
 
 
 def self_consistency(groups: dict[str, list[dict]]) -> float:
@@ -206,8 +273,14 @@ def cell_solutions(scores_path: Path, outcomes: dict[str, dict]) -> dict[str, li
     return dict(groups)
 
 
-def evaluate_cell(groups: dict[str, list[dict]]) -> dict:
+def evaluate_cell(groups: dict[str, list[dict]], sc_hits: dict[str, float] | None = None
+                  ) -> dict:
     out: dict = {}
+    if sc_hits is not None:
+        m = mcnemar(best_of_n_hits(groups, "worst_step"), sc_hits)
+        out["vs_self_consistency_gap"] = m["gap"]
+        out["vs_self_consistency_p"] = m["p"]
+        out["vs_self_consistency_discordant"] = m["n_discordant"]
     for how in AGGREGATIONS:
         out[f"best_of_n__{how}"] = best_of_n(groups, how)
         out[f"weighted_vote__{how}"] = weighted_vote(groups, how)
@@ -253,7 +326,8 @@ def main() -> None:
         groups = cell_solutions(sj, outcomes)
         if not groups:
             continue
-        per_cell[(res["rep"], res["learner"])].append(evaluate_cell(groups))
+        per_cell[(res["rep"], res["learner"])].append(
+            evaluate_cell(groups, self_consistency_hits(groups)))
     if not per_cell:
         raise SystemExit("no cells with scores for this split")
 
@@ -266,6 +340,7 @@ def main() -> None:
              "pred": r.get("pred")})
     oracle, chance = oracle_and_chance(base_groups)
     sc = self_consistency(base_groups)
+    lb = length_baseline(base_groups)
 
     def mean_of(k, cell):
         return float(np.mean([r[k] for r in per_cell[cell]]))
@@ -274,22 +349,31 @@ def main() -> None:
           f"{sum(len(v) for v in base_groups.values())} solutions\n")
     print(f"  pick one at random   {chance:.3f}")
     print(f"  self-consistency     {sc:.3f}      <- the baseline to beat")
-    print(f"  any-of-N (oracle)    {oracle:.3f}      <- the ceiling\n")
+    print(f"  any-of-N (oracle)    {oracle:.3f}      <- the ceiling")
+    print(f"\n  length alone: trajectory AUROC {lb['traj_auroc']:.3f}, and keeping the "
+          f"shortest solution scores {lb['best_of_n_shortest']:.3f}")
+    print(f"  (incorrect solutions run {lb['mean_steps_incorrect']:.1f} steps against "
+          f"{lb['mean_steps_correct']:.1f}, so a score that quietly tracked length "
+          f"would land near that AUROC)\n")
 
-    print(f"{'cell':<44}{'BoN worst':>11}{'BoN mean':>10}{'vote':>8}"
-          f"{'traj AUC':>10}{'step AUC':>10}")
+    print(f"{'cell':<44}{'BoN worst':>11}{'vs SC':>8}{'p':>8}"
+          f"{'vote':>8}{'traj AUC':>10}{'step AUC':>10}")
     rows = []
     for k in sorted(keys, key=lambda c: -mean_of("best_of_n__worst_step", c)):
         r = {"rep": k[0], "learner": k[1], "n_seeds": len(per_cell[k]),
              **{m: mean_of(m, k) for m in per_cell[k][0] if m.startswith(
-                 ("best_of_n", "weighted_vote", "traj_auroc", "step_auroc"))}}
+                 ("best_of_n", "weighted_vote", "traj_auroc", "step_auroc",
+                  "vs_self_consistency"))}}
         rows.append(r)
         print(f"{k[0] + ' x ' + k[1]:<44}"
-              f"{r['best_of_n__worst_step']:>11.3f}{r['best_of_n__mean_step']:>10.3f}"
+              f"{r['best_of_n__worst_step']:>11.3f}"
+              f"{r.get('vs_self_consistency_gap', float('nan')):>+8.3f}"
+              f"{r.get('vs_self_consistency_p', float('nan')):>8.3f}"
               f"{r['weighted_vote__worst_step']:>8.3f}"
               f"{r['traj_auroc__worst_step']:>10.3f}{r['step_auroc_outcome']:>10.3f}")
 
-    report = {"baselines": {"random": chance, "self_consistency": sc, "oracle": oracle},
+    report = {"baselines": {"random": chance, "self_consistency": sc, "oracle": oracle,
+                            "length_only": lb},
               "n_problems": len(base_groups), "cells": rows,
               "scores_name": args.scores_name}
 

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -84,3 +85,38 @@ def test_auroc_handles_ties_without_claiming_perfection():
 def test_spearman_recovers_a_known_ordering():
     assert spearman([1, 2, 3, 4], [10, 20, 30, 40]) == 1.0
     assert spearman([1, 2, 3, 4], [40, 30, 20, 10]) == -1.0
+
+
+def test_the_length_baseline_is_reported_because_wrong_solutions_run_longer():
+    """A score that quietly tracked length would post a respectable trajectory
+    AUROC while reading nothing about correctness. This is the row that says
+    whether it did."""
+    from scripts.analysis.onpolicy_downstream import length_baseline
+    groups = {f"p{i}": [sol([0.5] * 3, True), sol([0.5] * 9, False)]
+              for i in range(10)}
+    lb = length_baseline(groups)
+    assert lb["traj_auroc"] == 1.0            # length alone separates perfectly here
+    assert lb["mean_steps_incorrect"] == 9.0
+    assert lb["mean_steps_correct"] == 3.0
+
+
+def test_the_comparison_against_self_consistency_is_paired():
+    """Only the problems where the two rules disagree carry information, which is
+    what makes this tighter than comparing two independent accuracies."""
+    from scripts.analysis.onpolicy_downstream import mcnemar
+    a = {f"p{i}": 1.0 for i in range(20)}
+    b = {f"p{i}": 1.0 for i in range(20)}
+    for i in range(8):                        # a wins 8, b wins 0
+        b[f"p{i}"] = 0.0
+    m = mcnemar(a, b)
+    assert m["n_discordant"] == 8 and m["a_wins"] == 8
+    assert m["p"] < 0.01
+    assert m["gap"] == pytest.approx(0.4)
+
+
+def test_two_identical_rules_are_not_reported_as_different():
+    from scripts.analysis.onpolicy_downstream import mcnemar
+    a = {f"p{i}": float(i % 2) for i in range(20)}
+    m = mcnemar(a, dict(a))
+    assert m["n_discordant"] == 0
+    assert m["gap"] == 0.0

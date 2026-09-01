@@ -213,3 +213,23 @@ def test_a_still_empty_reply_after_the_retry_is_a_parse_failure(monkeypatch):
     class A(Args):
         retry_empty = True
     assert api.judge_one(TRACE, "m", "k", A())["parse_ok"] is False
+
+
+def test_redo_failed_replaces_the_failed_rows_and_keeps_the_rest(tmp_path, monkeypatch):
+    """A parse failure is usually an exhausted token budget, not a refusal, so a
+    row that failed under a tighter setting deserves one more attempt. The file
+    must still end with one row per trace."""
+    traces, out = tmp_path / "tr.jsonl", tmp_path / "out.jsonl"
+    write_traces(traces, 3)
+    out.write_text("\n".join(json.dumps(r) for r in [
+        {"id": "t0", "first_error": 1, "parse_ok": True, "usage": {"cost": 0.01}},
+        {"id": "t1", "first_error": -1, "parse_ok": False, "usage": {"cost": 0.01}},
+    ]) + "\n")
+    calls = run_main(monkeypatch, ["--traces", str(traces), "--out", str(out),
+                                   "--concurrency", "1", "--max_cost_usd", "10",
+                                   "--redo_failed"])
+    assert calls["n"] == 2                      # the failed t1 and the unseen t2
+    rows = {json.loads(l)["id"]: json.loads(l)
+            for l in out.read_text().splitlines() if l.strip()}
+    assert set(rows) == {"t0", "t1", "t2"}
+    assert rows["t1"]["parse_ok"] is True

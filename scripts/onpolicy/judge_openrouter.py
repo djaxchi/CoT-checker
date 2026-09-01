@@ -172,6 +172,11 @@ def main() -> None:
     p.add_argument("--retries", type=int, default=4)
     p.add_argument("--retry_delay", type=float, default=2.0)
     p.add_argument("--timeout", type=float, default=300.0)
+    p.add_argument("--redo_failed", action="store_true",
+                   help="Re-judge rows already in --out that failed to parse. A "
+                        "failure is usually an exhausted token budget rather than "
+                        "a refusal, so it is worth one attempt under a new "
+                        "setting.")
     p.add_argument("--max_traces", type=int, default=0)
     p.add_argument("--max_cost_usd", type=float, default=5.0,
                    help="Stop once the spend passes this. The run is resumable, "
@@ -189,6 +194,15 @@ def main() -> None:
         for r in read_jsonl(args.out):
             done[r["id"]] = r
         print(f"[api] resuming: {len(done)} of {len(traces)} already judged")
+    if args.redo_failed:
+        # A parse failure is usually the model running out of token budget, not
+        # refusing, so a row that failed under a tighter setting is worth one
+        # more attempt under the current one. Rows are rewritten in place at the
+        # end rather than appended, so the file keeps one row per trace.
+        stale = [k for k, r in done.items() if not r.get("parse_ok")]
+        for k in stale:
+            del done[k]
+        print(f"[api] redoing {len(stale)} rows that failed to parse")
     todo = [t for t in traces if t["id"] not in done]
 
     if args.dry_run:
@@ -215,6 +229,11 @@ def main() -> None:
     # Accounting happens in the worker, under the lock, right after the call it
     # paid for. Doing it in the collecting thread lets a fast provider run ahead
     # of the bookkeeping and spend past the cap before anyone notices.
+    if args.redo_failed:                  # rewrite, since rows are being replaced
+        with args.out.open("w") as fh:
+            for r in done.values():
+                fh.write(json.dumps(r) + "\n")
+
     with args.out.open("a") as fh, ThreadPoolExecutor(args.concurrency) as ex:
         n = [0]
 

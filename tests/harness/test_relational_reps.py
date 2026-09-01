@@ -99,3 +99,33 @@ def test_geom_is_small_enough_to_be_the_point():
     assert n == 21, f"geom is {n} features, update the claim it competes with 4,096"
     assert len(layer_feats(_span(9, 1), _span(1, 2)[0],
                            _span(9, 5), _span(1, 6)[0])) == 12
+
+
+def _store(path, lengths, d=8, seed=0):
+    """Minimal two-shard span store, shaped like the real one."""
+    from src.repstore import STEP_SEQ, RepSpec, write_split
+    rng = np.random.default_rng(seed)
+    items = [rng.normal(size=(int(L), d)).astype(np.float32) for L in lengths]
+    meta = [{"step_idx": i, "label": 0, "pre_step_boundary_idx": 0,
+             "step_start_idx": 1} for i in range(len(lengths))]
+    spec = RepSpec(name="s", kind=STEP_SEQ, dim=d, layer=-1, backbone="t", readout="r")
+    (path / "shard_0").mkdir(parents=True)
+    write_split(path / "shard_0", items, [0] * len(items), meta, spec)
+    return path
+
+
+def test_alignment_check_uses_lengths_not_a_uid_field(tmp_path):
+    """ProcessBench meta carries no uid, and the first run of this script died on
+    a KeyError after 279 seconds of work. Token counts are always present and are
+    the stronger fingerprint."""
+    from relational_reps import collect
+
+    a = _store(tmp_path / "a", [3, 5, 4], seed=0)
+    b = _store(tmp_path / "b", [3, 5, 4], seed=1)
+    got, y, lens = collect(a, b, ["geom", "layer_angle"], None, 0, pb=False)
+    assert got["geom"].shape == (3, 21)
+    assert list(lens) == [2, 4, 3]           # span excludes the boundary row
+
+    c = _store(tmp_path / "c", [3, 6, 4], seed=2)
+    with pytest.raises(SystemExit, match="not describe the same steps"):
+        collect(a, c, ["geom"], None, 0, pb=False)

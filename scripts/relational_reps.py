@@ -182,7 +182,11 @@ def collect(dir_a: Path, dir_b: Path | None, names, limit, seed, pb: bool):
         rb = RepSplit(sb) if sb else None
         if rb is not None:
             mb = rb.meta()
-            if len(mb) != len(meta) or mb[0]["uid"] != meta[0]["uid"]:
+            # Compare the per-row token counts rather than an id field: the
+            # ProcessBench meta has no uid, and the length vector is the stronger
+            # check anyway. Two different shards would not reproduce thousands of
+            # identical step lengths in the same order.
+            if len(mb) != len(meta) or not np.array_equal(ra.lengths, rb.lengths):
                 raise SystemExit(
                     f"shard {Path(sa).name} does not describe the same steps in "
                     f"both layers, so every relation would be computed between "

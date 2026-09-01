@@ -52,6 +52,12 @@ def flatten(traces: list[dict], subset: str) -> list[dict]:
                 "id": tr["id"], "step_idx": k, "label": lbl, "n_steps": n,
                 "pb_subset": subset, "problem": tr["problem"],
                 "prefix": "\n\n".join(steps[:k]), "current_step": step,
+                # Carried through for the on-policy arm, where the trajectory's
+                # own outcome is the only supervision that exists and is what the
+                # downstream simulations are scored against. ProcessBench traces
+                # have no such field and get None.
+                "traj_correct": tr.get("traj_correct"),
+                "problem_id": tr.get("problem_id"),
             })
     for gi, r in enumerate(flat):
         r["global_index"] = gi
@@ -117,6 +123,8 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
             row = {
                 "id": ex["id"], "step_idx": ex["step_idx"], "label": ex["label"],
                 "n_steps": ex["n_steps"], "pb_subset": subset,
+                "traj_correct": ex.get("traj_correct"),
+                "problem_id": ex.get("problem_id"),
                 "prompt_style": prompt_style, "n_tokens": nt,
                 "step_start_idx": start, "pre_step_boundary_idx": start - 1,
                 "global_index": ex["global_index"],

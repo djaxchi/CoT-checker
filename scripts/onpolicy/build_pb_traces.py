@@ -210,6 +210,13 @@ def main() -> None:
                         "labels have no base rate and are unaffected.")
     p.add_argument("--min_steps", type=int, default=2,
                    help="A one-step solution carries no localisation signal.")
+    p.add_argument("--unlabelled", type=Path, default=None,
+                   help="Write every gradeable trajectory with a placeholder "
+                        "label of -1. The downstream simulations score against "
+                        "the trajectory outcome and never read the label, so this "
+                        "is the full evaluation set they need and it costs "
+                        "nothing. F1_PB on it would be meaningless, and the rank "
+                        "analysis refuses a split whose labels are all -1.")
     p.add_argument("--for_judge", type=Path, default=None,
                    help="Also write the traces a judge should read, before any "
                         "labels exist: every incorrect trajectory plus a sample "
@@ -238,6 +245,24 @@ def main() -> None:
                          f"shards must partition the problem list")
             seen.add(tr["traj_uid"])
             trajectories.append(tr)
+
+    if args.unlabelled:
+        rows = []
+        for tr in trajectories:
+            if not tr.get("gradeable"):
+                continue
+            steps = split_into_steps(tr["solution"])
+            if len(steps) < args.min_steps:
+                continue
+            rows.append({"id": tr["traj_uid"], "problem": tr["problem"],
+                         "steps": steps, "label": -1, "label_source": "placeholder",
+                         "problem_id": tr["fork_id"],
+                         "traj_correct": bool(tr["correct"]),
+                         "n_steps": len(steps)})
+        write_jsonl(args.unlabelled, rows)
+        n_c = sum(1 for r in rows if r["traj_correct"])
+        print(f"[pb_traces] {len(rows)} unlabelled traces "
+              f"({len(rows)-n_c} incorrect + {n_c} correct) -> {args.unlabelled}")
 
     if args.for_judge:
         jt = judge_traces(trajectories, args.min_steps, args.judge_correct_sample,

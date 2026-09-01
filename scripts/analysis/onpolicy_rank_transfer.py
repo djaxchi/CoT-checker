@@ -165,6 +165,15 @@ def onpolicy_score(cell_dir: Path, name: str, keep_ids: set[str] | None) -> floa
     tr = restrict(f, keep_ids)
     if len(tr) <= CALIB_SIZE:
         return None
+    if all(label == -1 for label, _ in tr):
+        # The unlabelled split carries a placeholder label of -1 everywhere. F1_PB
+        # would come back as a number and mean nothing, since every trace would
+        # look error-free. That split belongs to onpolicy_downstream.py, which
+        # scores against trajectory outcomes and never reads a label.
+        raise SystemExit(
+            f"{f} has no first-error labels (every trace is -1). This is the "
+            f"unlabelled set; run scripts/analysis/onpolicy_downstream.py on it, "
+            f"or point --onpolicy_name at a judged or rollout-labelled split.")
     return calib20_subset(tr)
 
 

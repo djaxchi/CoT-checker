@@ -41,7 +41,11 @@ module load StdEnv/2023 python/3.12 gcc arrow/24.0.0
 
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/onpolicy_v1}"
-TRACES="${TRACES:-$RUN_ROOT/onpolicy_stage1_pb_traces.jsonl}"
+# The unlabelled set: every gradeable trajectory, placeholder label. The
+# downstream simulations score against the trajectory's outcome and never read a
+# step label, so this arm needs no judge and no rollouts and costs nothing.
+TRACES="${TRACES:-$RUN_ROOT/onpolicy_stage1_unlabelled.jsonl}"
+STEM="${STEM:-onpolicy_stage1}"
 REP_ROOT="${REP_ROOT:-$RUN_ROOT/repstore/onpolicy_step_spans}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-8B-Base}"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
@@ -63,9 +67,14 @@ SNAP="$HF_CACHE/hub/models--$(echo "$MODEL_NAME_OR_PATH" | sed 's|/|--|g')/snaps
 [[ -d "$SNAP" && -n "$(ls -A "$SNAP" 2>/dev/null)" ]] || {
   echo "[FATAL] no local snapshot for $MODEL_NAME_OR_PATH; download on the login node" >&2
   exit 2; }
-[[ -f "$TRACES" ]] || {
-  echo "[FATAL] no traces at $TRACES; run build_pb_traces.py with the judge labels first" >&2
-  exit 2; }
+if [[ ! -f "$TRACES" ]]; then
+  echo "[build] $TRACES missing; building the unlabelled set from the trajectories"
+  python scripts/onpolicy/build_pb_traces.py \
+    --trajectories "$RUN_ROOT"/"$STEM".shard*_trajectories.jsonl \
+    --out_dir "$RUN_ROOT" --stem "$STEM" \
+    --unlabelled "$TRACES" --force
+fi
+[[ -f "$TRACES" ]] || { echo "[FATAL] could not build $TRACES" >&2; exit 2; }
 
 cd "$PROJECT_ROOT"
 cat <<BANNER
@@ -140,15 +149,37 @@ for style in $STYLES; do
 done
 
 echo
-echo "=== does the ranking survive? ==="
+echo "=== the off-policy x-axis, recomputed under the leaderboard protocol ==="
+OFFPOLICY_METRIC="${OFFPOLICY_METRIC:-$RUN_ROOT/offpolicy_f1pb.json}"
+[[ -f "$OFFPOLICY_METRIC" ]] || python scripts/onpolicy/export_offpolicy_metric.py \
+  --grid_root "$GRID" --out "$OFFPOLICY_METRIC" 2>&1 | tee -a "$LOG_FILE"
+
+echo
+echo "=== T2: does the benchmark rank predict downstream usefulness? ==="
+# No step labels anywhere in this block. Every number is scored against whether
+# the solution reached the right answer, which the grader already settled.
 for style in $STYLES; do
   echo "--- $style ---"
-  python scripts/analysis/onpolicy_rank_transfer.py \
-    --grid_root "$GRID" --onpolicy_name "onpolicy_$style" \
-    --length_meta_on "$REP_ROOT/$style" \
-    --length_meta_off "$SCRATCH/cot_mech/qwen3_8b_v1/repstore/pb_step_spans/gsm8k" \
-    --out "$RUN_ROOT/rank_transfer_${style}.json" 2>&1 | tee -a "$LOG_FILE"
+  python scripts/analysis/onpolicy_downstream.py \
+    --grid_root "$GRID" --scores_name "onpolicy_$style" \
+    --outcomes "$RUN_ROOT/${STEM}_outcomes.jsonl" \
+    --offpolicy_metric "$OFFPOLICY_METRIC" \
+    --out "$RUN_ROOT/downstream_${style}.json" 2>&1 | tee -a "$LOG_FILE"
 done
+
+# T1's strict form needs first-error labels and runs separately once a judged or
+# rollout-labelled split exists; the rank script refuses the unlabelled one.
+if [[ -f "$RUN_ROOT/${STEM}_rollout_pb_traces.jsonl" ]]; then
+  echo
+  echo "=== T1: does the ranking survive, on the labelled split? ==="
+  for style in $STYLES; do
+    python scripts/analysis/onpolicy_rank_transfer.py \
+      --grid_root "$GRID" --onpolicy_name "onpolicy_labelled_$style" \
+      --length_meta_on "$REP_ROOT/$style" \
+      --length_meta_off "$SCRATCH/cot_mech/qwen3_8b_v1/repstore/pb_step_spans/gsm8k" \
+      --out "$RUN_ROOT/rank_transfer_${style}.json" 2>&1 | tee -a "$LOG_FILE" || true
+  done
+fi
 
 du -sh "$REP_ROOT"/* 2>/dev/null | tee -a "$LOG_FILE"
 echo "[$(date)] onpolicy_transfer done"

@@ -151,3 +151,20 @@ def test_length_matching_keeps_the_overlap_and_notices_when_there_is_none():
     disjoint_off = {f"b{i}": float(i + 500) for i in range(20)}
     _, _, info2 = length_matched_ids(on, disjoint_off)
     assert info2.get("degenerate") is True
+
+
+def test_the_unlabelled_split_is_refused_rather_than_scored(tmp_path):
+    """A placeholder label of -1 everywhere makes every trace look error-free, so
+    F1_PB would come back as a number and mean nothing."""
+    import json
+    import pytest
+    from scripts.analysis.onpolicy_rank_transfer import onpolicy_score
+    d = tmp_path / "cell"
+    d.mkdir()
+    with (d / "pb_step_scores_unlab.jsonl").open("w") as f:
+        for i in range(50):
+            f.write(json.dumps({"id": f"t{i}", "label": -1, "n_steps": 3,
+                                "scores": [0.1, 0.2, 0.3]}) + "\n")
+    with pytest.raises(SystemExit) as e:
+        onpolicy_score(d, "unlab", None)
+    assert "onpolicy_downstream" in str(e.value)

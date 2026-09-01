@@ -665,3 +665,101 @@ real, small, length-free component, and the representation is still the best
 measured, but its margin over simply appending log length is about 0.005, not
 0.06. Anyone reading the grid's +0.026 F1 gain should know that a single extra
 column recovers most of it.
+
+## Iteration 14: the unembedding readout is a null
+
+| representation | val-sel PB | in-domain | within-length | dim |
+|---|---|---|---|---|
+| winner | **0.7897** | 0.8611 | 0.7377 | 4116 |
+| winner_belief | 0.7887 | 0.8611 | 0.7371 | 4127 |
+| mean | 0.7470 | 0.8583 | 0.7194 | 4096 |
+| belief | **0.4683** | 0.5968 | 0.4947 | 11 |
+
+`belief` scores 0.4683 alone, below chance, and adds **-0.0009** on top of the
+winner, losing 1000 of 1000 paired resamples. How far a step moves the model's
+own next-token belief, measured as KL, Jensen-Shannon, entropy change, top-1
+agreement and rank displacement, both along the step and between layers 26 and
+35, carries nothing about whether the step is correct.
+
+The risk was recorded before the run and the result matches it: this project had
+already measured step incorrectness against per-token entropy at -0.20, and
+latent_memory_v0 found the answer-belief readout behaves as an answer shortcut.
+
+Worth one sentence of contrast, because it corrects a tempting rule of thumb.
+`geom_nolen` also scored near chance alone (0.5182) and was worth +0.0615 in
+combination. `belief` scores near chance alone and is worth -0.0009. So "useless
+alone" says nothing about "useless in combination": the geometry was a suppressor
+of variance in the content readout, and the belief features are not even that.
+Only the combination test distinguishes them.
+
+---
+
+# Summary: what works, what does not, and why
+
+## The representation the search produced
+
+`lengthfree_geom` = step mean with step length regressed out of every position,
+plus 20 scale-free geometry features. Confirmed on the full grid under the frozen
+protocol: **F1_PB at calib-20 of 0.523 ± 0.007 against `step_mean`'s 0.497 ± 0.005**
+at mlp:h1024, +0.026 to +0.030 at every learner, larger than the seed spread in
+every cell, with the oracle-threshold column agreeing. In-domain AUROC ties
+(0.892 against 0.890), which is the signature of removing a shortcut rather than
+adding capacity.
+
+Qualified honestly: the geometry block is worth +0.0615 unstratified and +0.0071
+within length strata, so most of it is length returning in another form, and the
+margin over simply appending one log-length column is about 0.005. It is the best
+within-length representation measured (0.7377 against a length control at 0.5097)
+and it loses to `step_tokens` x transformer d512 (0.566) and to `step_stats` at
+five times the width (0.540).
+
+## What does not work, with the number and the reason
+
+| hypothesis | result | why |
+|---|---|---|
+| multi-layer stacking | refuted | best at 8 epochs (0.7771), worst at 60 (0.6951); an early-stopping artifact of a width-dependent budget |
+| step contribution (h_i - h_{i-1}) | 0.7406 vs mean 0.7470 | subtracting the prefix removes signal the probe was using |
+| pure geometry alone | 0.5182, 0.4675 in strata | cone tightness is a suppressor, not a detector |
+| cross-layer revision | +0.0019 on the winner | how much late blocks rewrote a step is not independent of whether it is wrong |
+| trace-relative coordinates | 0.6957 causal, 0.5899 leave-one-out | in-domain rises to 0.9101 while transfer falls: the reference differs between datasets |
+| between-step dynamics | 0.5107 | speed, persistence and acceleration carry nothing out of domain |
+| belief shift (logit lens) | 0.4683, -0.0009 combined | the unembedding readout family is empty here |
+| reconstruction bottlenecks | 0.713 | prior work in this log |
+| whitened reconstruction | 0.694 | prior work in this log |
+| supervised bottlenecks | tie base | signal_share up 41x, transfer unchanged |
+| SAE sparse codes | cap ~0.50 calib-20 | compression of any kind costs |
+
+## The three findings that outlast the leaderboard
+
+**Step length alone scores 0.7039 on ProcessBench**, against the best
+representation's 0.7700, because PRM800K steps average 38.8 tokens and
+ProcessBench steps run 79.7 and 118.6. Every representation claim has to be
+stated net of it, and the within-length column is the honest ranking.
+
+**The prefix state alone scores 0.7412 in domain and 0.5035 on transfer.** A large
+share of what an in-domain probe reads is which problem this is and where in the
+solution we are, and none of it survives. In-domain AUROC on PRM800K overstates
+step-level detection.
+
+**Relative position scores 0.5846 in domain and 0.3649 on ProcessBench**, far below
+chance. Position is not a useless shortcut but an inverted one: what a probe
+learns about where errors sit in PRM800K is wrong about ProcessBench.
+
+## Two methodology fixes that invalidated earlier numbers
+
+The screen could not fit low-dimensional inputs, reporting step length as
+anti-predictive at 0.296 when it scores 0.7039, because one learning rate cannot
+serve a 4096-wide block and a single scalar. And the screen was ranking its own
+training budget: every representation transferred worse the longer it was fitted,
+and the ranking at 8 epochs anti-correlated with the ranking at 60 (Spearman
+-0.07 to -0.24). Both are fixed; the probe is now closed-form ridge with the
+penalty selected on validation, so there is no seed and no epoch count in any
+verdict.
+
+## What is left, and why the loop stops here
+
+The cheap space is exhausted. The two remaining ideas both need new computation
+rather than new arithmetic over the existing store: attention lookback needs a
+fresh encode pass with attention outputs, and step resampling needs K generations
+per step boundary and depends on the on-policy rollouts being built separately.
+Those are projects, not loop iterations.

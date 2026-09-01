@@ -129,9 +129,17 @@ def auroc(y: np.ndarray, s: np.ndarray) -> float:
 # Rollouts
 # ---------------------------------------------------------------------------
 
-def solve_rates(contexts: list[str], gold: str, model, tok, device, args
-                ) -> list[float]:
-    """Solve rate at each context, batched over contexts."""
+def solve_rates(contexts: list[str], gold: str, model, tok, device, args,
+                stop_at_zero: bool = False) -> list[float]:
+    """Solve rate at each context, batched over contexts, in order.
+
+    `stop_at_zero` returns as soon as a context solves nothing. Under the zero
+    rule only the FIRST collapse is the label, so every context after it is paid
+    for and discarded. Without this, labelling a trajectory costs
+    (n_steps + 1) * K generations whatever the answer: at K=16 and a median of 8
+    steps that is 144 generations per trajectory, which is how the first attempt
+    came to need eleven hours for a run budgeted at three.
+    """
     rates: list[float] = []
     for i in range(0, len(contexts), args.contexts_per_batch):
         chunk = contexts[i:i + args.contexts_per_batch]
@@ -139,16 +147,33 @@ def solve_rates(contexts: list[str], gold: str, model, tok, device, args
         for gens in outs:
             hits = sum(1 for g in gens if grade(g, gold)["correct"])
             rates.append(hits / max(1, len(gens)))
+            if stop_at_zero and rates[-1] == 0.0:
+                # Index 0 is the bare problem. A zero there means the model
+                # cannot solve it at all, so no step of this trajectory can be
+                # blamed for anything and the label would be discarded by
+                # --min_base_rate downstream. Stopping here is the same decision,
+                # taken before paying for it.
+                return rates
     return rates
 
 
-def label_trajectories(trajs: list[dict], model, tok, device, args) -> list[dict]:
+def label_trajectories(trajs: list[dict], model, tok, device, args,
+                       out_path: Path | None = None) -> list[dict]:
+    """Label each trajectory, appending as it goes.
+
+    Written per trajectory rather than at the end: a run that hits its walltime
+    should lose the trajectory it was working on, not all of them. The first
+    attempt buffered everything and would have lost every label when it timed
+    out.
+    """
     rows = []
+    fh = out_path.open("a") if out_path is not None else None
     t0 = time.perf_counter()
     for i, tr in enumerate(trajs):
         steps = split_into_steps(tr["solution"])
         ctx = prefix_contexts(tr["problem"], steps)
-        rates = solve_rates(ctx, tr["gold"], model, tok, device, args)
+        rates = solve_rates(ctx, tr["gold"], model, tok, device, args,
+                            stop_at_zero=(args.rule == "zero"))
         fe = first_error_from_curve(rates, args.rule, args.min_drop)
         k = args.k_rollouts
         rows.append({
@@ -159,11 +184,21 @@ def label_trajectories(trajs: list[dict], model, tok, device, args) -> list[dict
             "base_rate": float(rates[0]) if rates else float("nan"),
             "base_ci": list(wilson_ci(int(round(rates[0] * k)), k)) if rates else None,
             "rule": args.rule, "k_rollouts": k,
+            "contexts_rolled": len(rates), "contexts_total": len(ctx),
         })
+        if fh is not None:
+            fh.write(json.dumps(rows[-1]) + "\n")
+            fh.flush()
         if (i + 1) % 10 == 0 or i + 1 == len(trajs):
             fired = sum(1 for r in rows if r["first_error"] != NO_ERROR)
+            saved = 1 - sum(r["contexts_rolled"] for r in rows) / max(
+                1, sum(r["contexts_total"] for r in rows))
             print(f"[rollout] {i+1}/{len(trajs)} ({time.perf_counter()-t0:.0f}s) "
-                  f"rule fired on {fired}/{len(rows)}", flush=True)
+                  f"rule fired on {fired}/{len(rows)}, "
+                  f"{saved:.0%} of contexts skipped by stopping at the first "
+                  f"collapse", flush=True)
+    if fh is not None:
+        fh.close()
     return rows
 
 
@@ -290,6 +325,8 @@ def main() -> None:
                         "They are labelled -1 by outcome either way; this measures "
                         "how often the rule would have disagreed.")
     p.add_argument("--max_forks", type=int, default=200)
+    p.add_argument("--resume", action="store_true",
+                   help="Skip trajectories already in --out.")
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
@@ -348,14 +385,21 @@ def main() -> None:
     # rolled out, purely to measure how often the rule would have disagreed.
     todo = wrong + audit
     todo = todo[args.shard_idx::args.num_shards]
+    if args.out.exists() and args.resume:
+        seen = {r["traj_uid"] for r in read_jsonl(args.out)}
+        before = len(todo)
+        todo = [t for t in todo if t["traj_uid"] not in seen]
+        print(f"[rollout] resuming: {before - len(todo)} already labelled", flush=True)
     print(f"[rollout] shard {args.shard_idx}/{args.num_shards}: {len(todo)} "
           f"trajectories ({len(wrong)} incorrect + {len(audit)} correct audited), "
           f"K={args.k_rollouts}", flush=True)
 
-    rows = label_trajectories(todo, model, tok, device, args)
+    rows = label_trajectories(todo, model, tok, device, args, args.out)
+    if args.resume and args.out.exists():
+        rows = read_jsonl(args.out)          # report over everything on disk
     # The audited correct trajectories keep the grader's verdict as their label.
     for r in rows:
-        if r["traj_correct"]:
+        if r["traj_correct"] and "rule_fired_at" not in r:
             r["rule_fired_at"] = r["first_error"]
             r["first_error"] = NO_ERROR
     write_jsonl(args.out, rows)

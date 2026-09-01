@@ -111,3 +111,56 @@ def test_the_sign_test_is_the_exact_binomial():
     from scripts.onpolicy.rollout_labels import sign_test_p
     assert sign_test_p(4, 4) == 2 * (1 / 16)
     assert sign_test_p(0, 0) != sign_test_p(0, 0) or True   # nan on empty
+
+
+def test_rolling_stops_at_the_first_collapse(monkeypatch):
+    """Under the zero rule only the first collapse is the label, so every context
+    after it is paid for and thrown away. At K=16 and a median of 8 steps a
+    trajectory costs 144 generations without this, which is how the first attempt
+    came to need eleven hours for a three-hour job."""
+    import scripts.onpolicy.rollout_labels as rl
+
+    calls = []
+
+    def fake_generate(model, tok, device, chunk, k, args):
+        calls.append(len(chunk))
+        # solve rates 0.5, 0.5, 0.0, 0.5 in context order
+        return [["right"], ["right"], ["wrong"], ["right"]][
+            sum(calls[:-1]):sum(calls[:-1]) + len(chunk)]
+
+    monkeypatch.setattr(rl, "generate_batch", fake_generate)
+    monkeypatch.setattr(rl, "grade", lambda g, gold: {"correct": g == "right"})
+
+    class A:
+        contexts_per_batch = 1
+        k_rollouts = 1
+
+    rates = rl.solve_rates(["c0", "c1", "c2", "c3"], "4", None, None, None, A(),
+                           stop_at_zero=True)
+    assert rates == [1.0, 1.0, 0.0]      # stopped; the fourth was never rolled
+    assert len(calls) == 3
+
+
+def test_an_unsolvable_problem_costs_one_context_not_all_of_them(monkeypatch):
+    """A zero at the bare problem means no step can be blamed, and the label is
+    discarded downstream anyway. Stopping there takes the same decision before
+    paying for it."""
+    import scripts.onpolicy.rollout_labels as rl
+    calls = []
+
+    def fake_generate(model, tok, device, chunk, k, args):
+        calls.append(len(chunk))
+        return [["wrong"]] * len(chunk)
+
+    monkeypatch.setattr(rl, "generate_batch", fake_generate)
+    monkeypatch.setattr(rl, "grade", lambda g, gold: {"correct": False})
+
+    class A:
+        contexts_per_batch = 1
+        k_rollouts = 1
+
+    rates = rl.solve_rates(["c0", "c1", "c2"], "4", None, None, None, A(),
+                           stop_at_zero=True)
+    assert rates == [0.0]
+    assert len(calls) == 1
+    assert first_error_from_curve(rates, "zero") == NO_ERROR

@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=03:00:00
+#SBATCH --time=05:00:00
 #SBATCH --output=%x-%j.out
 
 # Stage 2b: label the first wrong step by rollout instead of by judge, and
@@ -40,9 +40,18 @@ MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-8B-Base}"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
 STEM="${STEM:-onpolicy_stage1}"
 K_ROLLOUTS="${K_ROLLOUTS:-16}"
+# Certification needs resolution: it has to separate two branches of one fork, so
+# it pays for K=16. Labelling only has to notice a collapse to zero, which K=8
+# settles at half the cost.
+K_LABEL="${K_LABEL:-8}"
 MAX_FORKS="${MAX_FORKS:-300}"
-MAX_TRACES="${MAX_TRACES:-0}"
-N_CORRECT_AUDIT="${N_CORRECT_AUDIT:-200}"
+# Job 433700 ran phase 1 and was cancelled in phase 2: at K=16, every context of
+# every trajectory, it needed about eleven hours for a three-hour job. Labelling
+# now stops at the first collapse, stops immediately when the model cannot solve
+# the problem at all, appends each trajectory as it finishes, and resumes. The
+# cap keeps the run inside its walltime; raise it once the rate is known.
+MAX_TRACES="${MAX_TRACES:-600}"
+N_CORRECT_AUDIT="${N_CORRECT_AUDIT:-150}"
 RULE="${RULE:-zero}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 OUT="$RUN_ROOT/rollout"
@@ -77,7 +86,8 @@ git_commit : $(git rev-parse HEAD 2>/dev/null || echo unknown)
 model      : $MODEL_NAME_OR_PATH (offline)
 phase 1    : $MAX_FORKS matched forks, K=$K_ROLLOUTS
              gate: decided >= $MIN_DECIDED and win rate among decided >= $MIN_WIN_RATE
-phase 2    : $RUN_ROOT/$STEM.shard*_trajectories.jsonl, rule=$RULE
+phase 2    : $RUN_ROOT/$STEM.shard*_trajectories.jsonl, rule=$RULE, K=$K_LABEL
+             cap $MAX_TRACES incorrect + $N_CORRECT_AUDIT audited
 out        : $OUT
 ================================================================
 BANNER
@@ -104,6 +114,10 @@ run_sharded () {   # $1 = tag, rest = args
   [[ "$fail" == "0" ]] || { tail -40 "$LOG_FILE" >&2; return 1; }
 }
 
+if [[ -f "$OUT/cert_summary.json" && "${REDO_CERT:-0}" != "1" ]]; then
+  echo "=== phase 1 already certified, skipping (REDO_CERT=1 to rerun) ==="
+  cat "$OUT/cert_summary.json"
+else
 echo "=== phase 1: certify against human fork annotations ==="
 run_sharded cert \
   --certify_forks "$FORKS" --max_forks "$MAX_FORKS" \
@@ -143,6 +157,8 @@ print(f"Among the decided, the step humans rated WRONG has the lower value "
       f"(sign test p = {summary['sign_test_p']:.2e}). Chance is 0.500.")
 PY
 
+fi
+
 GATE=$(python -c "
 import json
 s = json.load(open('$OUT/cert_summary.json'))
@@ -160,8 +176,8 @@ echo "=== phase 2: label the on-policy trajectories ==="
 run_sharded labels \
   --trajectories "$RUN_ROOT"/"$STEM".shard*_trajectories.jsonl \
   --model_name_or_path "$MODEL_NAME_OR_PATH" --local_files_only \
-  --model_dtype bfloat16 --k_rollouts "$K_ROLLOUTS" --rule "$RULE" \
-  --max_traces "$MAX_TRACES" --n_correct_audit "$N_CORRECT_AUDIT"
+  --model_dtype bfloat16 --k_rollouts "$K_LABEL" --rule "$RULE" \
+  --max_traces "$MAX_TRACES" --n_correct_audit "$N_CORRECT_AUDIT" --resume
 
 cat "$OUT"/labels.shard*.jsonl > "$OUT/labels.jsonl"
 wc -l "$OUT/labels.jsonl"

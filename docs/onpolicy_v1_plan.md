@@ -1,5 +1,49 @@
 # onpolicy_v1: does the representation leaderboard transfer to on-policy use?
 
+Status (2026-09-02): **T2 ran and is the headline.** Job 434763, 19 verifiers on
+2,873 self-generated solutions to 300 problems, no step labels used anywhere.
+Baselines: random pick 0.375, self-consistency 0.560, any-of-10 0.700.
+
+```
+best verifier at best-of-10        0.503   (boundary_stats x mlp:h1024)
+verifiers beating self-consistency  0 / 19
+best score-weighted vote          0.561   against 0.560 unweighted
+pooled trajectory AUROC     up to 0.833   (length alone: 0.561)
+```
+
+The signal is real and not a length artifact: keeping the shortest solution
+scores 0.350, worse than random. Benchmark rank predicts downstream rank
+(Spearman +0.66 to +0.84 for best-of-N, +0.76 to +0.83 for the AUROC metrics)
+but the gaps compress by an order of magnitude: `last_token -> step_mean` is
++0.050 F1_PB and +0.009 best-of-10, and `fixed -> learned pooling` is +0.090
+F1_PB and -0.006 best-of-10.
+
+Two things must be settled before this is written as a result, and TamIA went
+into maintenance before either could run.
+
+1. **Did the encoder drop steps?** It skips any step whose prompt exceeds 2,048
+   tokens, and on-policy solutions run long (one had 27 steps). Truncated score
+   lists would break a max-over-steps aggregation exactly where it matters.
+2. **Pooled versus within-problem AUROC.** A pooled 0.833 next to a failing
+   best-of-N is the signature of a score that ranks *problems* by difficulty
+   rather than *solutions* by correctness: pooled AUROC compares solutions
+   across different problems, best-of-N compares solutions to the same one. If
+   the within-problem number sits near 0.5, the result is explained and the
+   explanation is the finding.
+
+Power, stated honestly: at 300 problems the per-problem binomial SE is 0.029, so
+the 0.057 gap to self-consistency is about 2 SE and the whole spread across
+nineteen representations is 1.9 SE. The AUROC numbers are tight; the best-of-N
+numbers are not. Job 434822 (2,000 problems) was submitted to fix that and its
+fate is unknown until the cluster returns.
+
+A design difference that keeps this compatible with ReProbe rather than
+contradicting it: ReProbe trains its probe **on-policy**, labelling the target
+model's own steps with R1. These nineteen verifiers were trained on PRM800K and
+have never seen a Qwen-generated step, so this is a transfer test by
+construction, and the result is an argument for running the on-policy training
+arm rather than evidence against ReProbe.
+
 Status (2026-08-31): Stage 0 done. **Stage 1 ran and passed every gate** (job
 433635, 21 minutes). Stage 2's first judge bake-off ran (job 433640) and came
 back too weak to use, which forked the labelling question; see "Stage 2: what

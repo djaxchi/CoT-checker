@@ -120,3 +120,29 @@ def test_two_identical_rules_are_not_reported_as_different():
     m = mcnemar(a, dict(a))
     assert m["n_discordant"] == 0
     assert m["gap"] == 0.0
+
+
+def test_a_score_that_only_tracks_problem_difficulty_is_caught():
+    """Pooled AUROC answers "given two solutions to different problems, is the
+    failing one ranked higher", which a score reading only difficulty aces. Best
+    of N depends on the within-problem question, and that is where such a score
+    is exposed as useless."""
+    from scripts.analysis.onpolicy_downstream import auroc as _auroc
+    from scripts.analysis.onpolicy_downstream import within_problem_auroc
+    # Two problems. Every solution of the hard one scores 0.9 and fails more
+    # often; every solution of the easy one scores 0.1. Inside a problem the
+    # score is constant, so it cannot pick anything.
+    groups = {
+        "hard": [sol([0.9], False), sol([0.9], False), sol([0.9], True)],
+        "easy": [sol([0.1], True), sol([0.1], True), sol([0.1], False)],
+    }
+    y = np.array([0 if s["correct"] else 1 for g in groups.values() for s in g])
+    sc = np.array([s["scores"][0] for g in groups.values() for s in g])
+    assert _auroc(y, sc) > 0.6                     # pooled looks informative
+    assert within_problem_auroc(groups, "worst_step") == 0.5   # within, it is blind
+
+
+def test_within_problem_auroc_rewards_a_verifier_that_ranks_inside_a_problem():
+    groups = {"p": [sol([0.1], True), sol([0.9], False), sol([0.8], False)]}
+    from scripts.analysis.onpolicy_downstream import within_problem_auroc
+    assert within_problem_auroc(groups, "worst_step") == 1.0

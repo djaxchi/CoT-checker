@@ -22,7 +22,9 @@ cost nothing to beat on paper and are hard to beat in practice:
   best-of-N        rank the N solutions of a problem, keep one
   weighted vote    weight each solution's answer by its score, take the winner
   trajectory AUROC does the score separate solutions that succeed from those
-                   that fail, before any picking rule is imposed
+                   that fail, pooled across problems
+  within-problem   the same question asked inside one problem, which is the one
+                   best-of-N actually depends on
   step AUROC       do steps of failed solutions score higher than steps of
                    successful ones, which is the label-free shadow of F1_PB
 
@@ -273,6 +275,28 @@ def cell_solutions(scores_path: Path, outcomes: dict[str, dict]) -> dict[str, li
     return dict(groups)
 
 
+def within_problem_auroc(groups: dict[str, list[dict]], how: str) -> float:
+    """AUROC computed inside each problem, then averaged over problems.
+
+    The pooled trajectory AUROC answers "given two solutions to *different*
+    problems, does the verifier rank the failing one higher", and a score that
+    only tracked problem difficulty would do well at that while being useless
+    for picking. Best-of-N asks the other question: given ten solutions to the
+    *same* problem, is the good one ranked first. Only problems with both a
+    correct and an incorrect solution can contribute; the rest are undefined.
+    """
+    vals = []
+    for sols in groups.values():
+        y = np.array([0 if s["correct"] else 1 for s in sols])
+        if y.min() == y.max():
+            continue
+        sc = np.array([aggregate(s["scores"], how) for s in sols])
+        a = auroc(y, sc)
+        if not np.isnan(a):
+            vals.append(a)
+    return float(np.mean(vals)) if vals else float("nan")
+
+
 def evaluate_cell(groups: dict[str, list[dict]], sc_hits: dict[str, float] | None = None
                   ) -> dict:
     out: dict = {}
@@ -283,6 +307,7 @@ def evaluate_cell(groups: dict[str, list[dict]], sc_hits: dict[str, float] | Non
         out["vs_self_consistency_discordant"] = m["n_discordant"]
     for how in AGGREGATIONS:
         out[f"best_of_n__{how}"] = best_of_n(groups, how)
+        out[f"within_problem_auroc__{how}"] = within_problem_auroc(groups, how)
         out[f"weighted_vote__{how}"] = weighted_vote(groups, how)
         y = np.array([0 if s["correct"] else 1
                       for sols in groups.values() for s in sols])
@@ -356,21 +381,22 @@ def main() -> None:
           f"{lb['mean_steps_correct']:.1f}, so a score that quietly tracked length "
           f"would land near that AUROC)\n")
 
-    print(f"{'cell':<44}{'BoN worst':>11}{'vs SC':>8}{'p':>8}"
-          f"{'vote':>8}{'traj AUC':>10}{'step AUC':>10}")
+    print(f"{'cell':<44}{'BoN worst':>11}{'vs SC':>8}{'p':>7}"
+          f"{'pooled':>9}{'within':>9}{'step AUC':>10}")
     rows = []
     for k in sorted(keys, key=lambda c: -mean_of("best_of_n__worst_step", c)):
         r = {"rep": k[0], "learner": k[1], "n_seeds": len(per_cell[k]),
              **{m: mean_of(m, k) for m in per_cell[k][0] if m.startswith(
                  ("best_of_n", "weighted_vote", "traj_auroc", "step_auroc",
-                  "vs_self_consistency"))}}
+                  "within_problem_auroc", "vs_self_consistency"))}}
         rows.append(r)
         print(f"{k[0] + ' x ' + k[1]:<44}"
               f"{r['best_of_n__worst_step']:>11.3f}"
               f"{r.get('vs_self_consistency_gap', float('nan')):>+8.3f}"
-              f"{r.get('vs_self_consistency_p', float('nan')):>8.3f}"
-              f"{r['weighted_vote__worst_step']:>8.3f}"
-              f"{r['traj_auroc__worst_step']:>10.3f}{r['step_auroc_outcome']:>10.3f}")
+              f"{r.get('vs_self_consistency_p', float('nan')):>7.3f}"
+              f"{r['traj_auroc__worst_step']:>9.3f}"
+              f"{r['within_problem_auroc__worst_step']:>9.3f}"
+              f"{r['step_auroc_outcome']:>10.3f}")
 
     report = {"baselines": {"random": chance, "self_consistency": sc, "oracle": oracle,
                             "length_only": lb},
@@ -388,7 +414,7 @@ def main() -> None:
             corr = {}
             for m in ("best_of_n__worst_step", "best_of_n__mean_step",
                       "weighted_vote__worst_step", "traj_auroc__worst_step",
-                      "step_auroc_outcome"):
+                      "within_problem_auroc__worst_step", "step_auroc_outcome"):
                 rho = spearman(x, [r[m] for _, r in pairs])
                 corr[m] = rho
                 print(f"  off-policy F1_PB vs {m:<26} Spearman {rho:+.3f}")

@@ -47,6 +47,11 @@ def flatten(traces: list[dict], subset: str) -> list[dict]:
         steps = tr["steps"]
         lbl = int(tr["label"])
         n = len(steps)
+        step_labels = tr.get("step_labels")
+        if step_labels is not None and len(step_labels) != n:
+            raise ValueError(
+                f"{tr['id']}: {len(step_labels)} step_labels for {n} steps; a "
+                f"misaligned label vector would silently train on the wrong steps")
         for k, step in enumerate(steps):
             flat.append({
                 "id": tr["id"], "step_idx": k, "label": lbl, "n_steps": n,
@@ -58,6 +63,13 @@ def flatten(traces: list[dict], subset: str) -> list[dict]:
                 # have no such field and get None.
                 "traj_correct": tr.get("traj_correct"),
                 "problem_id": tr.get("problem_id"),
+                # ReProbe reports a SET of faulty steps, so a trace may carry a
+                # per-step label vector (1 correct, 0 incorrect). Without it the
+                # only positive is the first-error step, which is the
+                # ProcessBench convention and cannot express "steps 2 and 5 are
+                # both wrong, 3 and 4 are fine".
+                "step_label": (None if step_labels is None
+                               else int(step_labels[k])),
             })
     for gi, r in enumerate(flat):
         r["global_index"] = gi
@@ -119,12 +131,17 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
                     f"non-finite float16 activations for {ex['id']} step "
                     f"{ex['step_idx']}; the store cannot hold this step at float16")
             h_mm[cur:cur + keep] = vecs
-            y[i + b] = int(ex["step_idx"] == ex["label"])
+            # y is 1 for an INCORRECT step throughout this project. A per-step
+            # vector uses ReProbe's polarity (1 correct) and is inverted here;
+            # without one, the first-error step is the only positive.
+            y[i + b] = (1 - int(ex["step_label"])) if ex.get("step_label") is not None \
+                else int(ex["step_idx"] == ex["label"])
             row = {
                 "id": ex["id"], "step_idx": ex["step_idx"], "label": ex["label"],
                 "n_steps": ex["n_steps"], "pb_subset": subset,
                 "traj_correct": ex.get("traj_correct"),
                 "problem_id": ex.get("problem_id"),
+                "step_label": ex.get("step_label"),
                 "prompt_style": prompt_style, "n_tokens": nt,
                 "step_start_idx": start, "pre_step_boundary_idx": start - 1,
                 "global_index": ex["global_index"],

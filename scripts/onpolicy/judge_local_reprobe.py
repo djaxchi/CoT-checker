@@ -57,6 +57,11 @@ def main() -> None:
                    help="Recorded with every row so the pool is identifiable later.")
     p.add_argument("--dtype", default="auto")
     p.add_argument("--device_map", default="auto")
+    p.add_argument("--cpu_then_dispatch", action="store_true",
+                   help="Build on CPU, then place layers with accelerate. Three "
+                        "jobs died inside transformers' streaming placement "
+                        "while the CPU build succeeded, so this splits the two "
+                        "steps that were failing together.")
     p.add_argument("--dequantize_mxfp4", action="store_true",
                    help="Load an MXFP4 checkpoint by dequantising it to the "
                         "requested dtype instead of running the quantised "
@@ -102,8 +107,15 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     t_load = time.perf_counter()
+    # Diagnostic 443105 settled where the fault is. Copying tensors to a GPU
+    # works, the real MXFP4 shards read and move fine, and the model builds on
+    # CPU (116.8B params, bfloat16, under five minutes). What fails is
+    # transformers streaming weights straight into a device_map target during
+    # from_pretrained, which is what jobs 443012, 443041 and 443043 all died
+    # inside. So build on CPU where that path is known to work, then place the
+    # layers with accelerate as a separate step.
     load_kw = dict(local_files_only=True, dtype=args.dtype,
-                   device_map=args.device_map)
+                   device_map=None if args.cpu_then_dispatch else args.device_map)
     if args.dequantize_mxfp4:
         # The checkpoint is MXFP4. Running it quantised needs triton_kernels,
         # which is not in the offline wheelhouse, and letting transformers work
@@ -121,6 +133,22 @@ def main() -> None:
                                  for i in range(torch.cuda.device_count())}
         print(f"[judge] max_memory {load_kw['max_memory']}", flush=True)
     model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kw)
+    if args.cpu_then_dispatch and torch.cuda.is_available():
+        from accelerate import dispatch_model, infer_auto_device_map
+        n_gpu = torch.cuda.device_count()
+        cap = args.max_memory_gib or 68.0
+        mm = {i: f"{cap:g}GiB" for i in range(n_gpu)}
+        # Never split a decoder layer across devices: the model declares which
+        # blocks must stay whole and honouring that avoids per-token transfers
+        # of a layer's own activations.
+        nsm = list(getattr(model, "_no_split_modules", None) or [])
+        dm = infer_auto_device_map(model, max_memory=mm, no_split_module_classes=nsm)
+        placed = {}
+        for v in dm.values():
+            placed[v] = placed.get(v, 0) + 1
+        print(f"[judge] dispatching to {n_gpu} GPUs at {cap:g}GiB each; "
+              f"no_split={nsm}; blocks per device {placed}", flush=True)
+        model = dispatch_model(model, device_map=dm)
     model.eval()
     print(f"[judge] model loaded in {time.perf_counter()-t_load:.0f}s", flush=True)
     device = next(model.parameters()).device

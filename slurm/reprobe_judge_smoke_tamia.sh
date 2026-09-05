@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=01:00:00
+#SBATCH --time=01:30:00
 #SBATCH --output=%x-%j.out
 
 # Phase 2 smoke test: can GPT-OSS-120B load and annotate offline on one node,
@@ -72,7 +72,7 @@ BANNER
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
-pip install --no-index torch transformers numpy accelerate triton kernels 2>&1 | tail -2
+pip install --no-index torch transformers numpy accelerate triton kernels safetensors 2>&1 | tail -2
 # triton_kernels is what the MXFP4 path needs and it is not in the wheelhouse;
 # the attempt is logged rather than hidden so the fallback to bf16 is on record.
 pip install --no-index triton_kernels 2>&1 | tail -1 || echo "[note] triton_kernels unavailable offline: MXFP4 path disabled, bf16 dequant it is"
@@ -90,7 +90,8 @@ python scripts/onpolicy/judge_local_reprobe.py \
   --report "$RUN_ROOT/smoke/smoke_report.json" \
   --model_path "$MODEL_PATH" \
   --max_traces "$N" --batch_size "$BATCH" --max_new_tokens "$MAX_NEW" \
-  --dtype "$DTYPE" --max_memory_gib "$MAX_MEM_GIB" --dequantize_mxfp4
+  --dtype "$DTYPE" --max_memory_gib "$MAX_MEM_GIB" --dequantize_mxfp4 \
+  --cpu_then_dispatch
 
 echo
 echo "=== what the judge actually said ==="

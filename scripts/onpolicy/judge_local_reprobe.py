@@ -57,6 +57,15 @@ def main() -> None:
                    help="Recorded with every row so the pool is identifiable later.")
     p.add_argument("--dtype", default="auto")
     p.add_argument("--device_map", default="auto")
+    p.add_argument("--max_memory_gib", type=float, default=0.0,
+                   help="Per-GPU cap handed to device_map. Left at 0 the "
+                        "automatic map packed the first H100 to 79.4 of 81.5 GiB "
+                        "and died inside tensor.to() with an illegal memory "
+                        "access (job 443012). MXFP4 needs triton_kernels, which "
+                        "is not in the offline wheelhouse and which the kernels "
+                        "library would fetch from the hub, so the weights "
+                        "dequantise to bf16 and need ~234 GiB across the node; "
+                        "an explicit cap spreads them instead of filling GPU 0.")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--max_new_tokens", type=int, default=320)
     p.add_argument("--max_prompt_tokens", type=int, default=3072)
@@ -89,9 +98,13 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     t_load = time.perf_counter()
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path, local_files_only=True, dtype=args.dtype,
-        device_map=args.device_map)
+    load_kw = dict(local_files_only=True, dtype=args.dtype,
+                   device_map=args.device_map)
+    if args.max_memory_gib > 0 and torch.cuda.is_available():
+        load_kw["max_memory"] = {i: f"{args.max_memory_gib:g}GiB"
+                                 for i in range(torch.cuda.device_count())}
+        print(f"[judge] max_memory {load_kw['max_memory']}", flush=True)
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **load_kw)
     model.eval()
     print(f"[judge] model loaded in {time.perf_counter()-t_load:.0f}s", flush=True)
     device = next(model.parameters()).device

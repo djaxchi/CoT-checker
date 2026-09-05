@@ -126,6 +126,80 @@ def build_prompt(problem: str, steps: list[str], outcome: bool | None = None,
     return f"{user}\nCheck:" if cot else f"{user}\nAnswer:"
 
 
+# ---------------------------------------------------------------------------
+# ReProbe protocol (arXiv:2511.06209); see docs/reprobe_label_semantics.md
+# ---------------------------------------------------------------------------
+# Three things differ from the first-error protocol above, and they are the
+# paper's, not ours: the judge is shown the ground-truth answer, it is asked for
+# the SET of steps that contain errors rather than the first one, and nothing in
+# the paper says the steps after an error become negative, so they are left
+# alone. Propagating them is the common PRM convention and would change the
+# class balance substantially, which is exactly why it is not done here.
+INSTRUCTIONS_REPROBE = (
+    "You are grading a student's step-by-step solution to a math problem. You "
+    "are given the problem, the correct final answer, and the student's steps.\n"
+    "Examine each step to determine whether it is both logically correct and "
+    "relevant. A step is faulty if it is wrong, if it does not follow from the "
+    "steps before it, or if it is unnecessary or redundant reasoning that does "
+    "not move toward the correct solution.\n"
+    "Check the steps in order and be brief.\n"
+    "Steps are numbered starting at 1.\n"
+    "Finish with exactly this line, listing every faulty step:\n"
+    "Faulty: <comma-separated step numbers, or NONE if every step is sound>"
+)
+
+
+def render_trace_reprobe(problem: str, steps: list[str], gold: str) -> str:
+    body = "\n".join(f"Step {i + 1}: {s}" for i, s in enumerate(steps))
+    return (f"Problem:\n{problem}\n\nCorrect final answer: {gold}\n\n"
+            f"Student's solution:\n{body}\n")
+
+
+def build_prompt_reprobe(problem: str, steps: list[str], gold: str,
+                         tokenizer=None, chat: bool = False) -> str:
+    user = f"{INSTRUCTIONS_REPROBE}\n\n{render_trace_reprobe(problem, steps, gold)}"
+    if chat and tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": user}], tokenize=False,
+            add_generation_prompt=True)
+    return f"{user}\nCheck:"
+
+
+_FAULTY = re.compile(r"faulty\s*:?\s*(.*)", re.IGNORECASE)
+
+
+def parse_step_set(text: str, n_steps: int) -> list[int] | None:
+    """The faulty-step numbers as 0-based indices, or None if unreadable.
+
+    Reads the LAST `Faulty:` line, since a model that reasons first may use the
+    word on the way to its verdict. NONE means every step is sound and returns an
+    empty list, which is a real answer and must not be confused with a parse
+    failure. Numbers outside 1..n_steps are dropped rather than clipped: a judge
+    naming a step that does not exist has lost track of the solution, and
+    clamping would invent a label for a step it never looked at.
+    """
+    hits = [m for m in _FAULTY.finditer(text or "")]
+    if not hits:
+        return None
+    tail = hits[-1].group(1).strip()
+    if not tail:
+        return None
+    if re.match(r"^(none|n/a|no(ne)?\b)", tail, re.IGNORECASE):
+        return []
+    nums = [int(x) for x in re.findall(r"\d+", tail)]
+    if not nums:
+        return None
+    keep = sorted({v - 1 for v in nums if 1 <= v <= n_steps})
+    # every number out of range: the judge was not describing this solution
+    return keep if keep or not nums else None
+
+
+def step_labels_from_faulty(faulty: list[int], n_steps: int) -> list[int]:
+    """Binary per-step labels, 1 correct and 0 incorrect, no propagation."""
+    bad = set(faulty)
+    return [0 if i in bad else 1 for i in range(n_steps)]
+
+
 _INT = re.compile(r"-?\d+")
 
 

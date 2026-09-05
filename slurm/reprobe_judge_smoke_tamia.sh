@@ -45,6 +45,10 @@ MAX_NEW="${MAX_NEW:-320}"
 
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+# Both previous failures reported an async CUDA fault, so the stack trace could
+# have been pointing at the wrong call. If this one fails too, the trace is the
+# real one.
+export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
 export HF_HOME="${HF_HOME:-/project/aip-azouaq/$USER/hf_cache}"
 mkdir -p "$RUN_ROOT/logs" "$RUN_ROOT/smoke"
 
@@ -86,7 +90,7 @@ python scripts/onpolicy/judge_local_reprobe.py \
   --report "$RUN_ROOT/smoke/smoke_report.json" \
   --model_path "$MODEL_PATH" \
   --max_traces "$N" --batch_size "$BATCH" --max_new_tokens "$MAX_NEW" \
-  --dtype "$DTYPE" --max_memory_gib "$MAX_MEM_GIB"
+  --dtype "$DTYPE" --max_memory_gib "$MAX_MEM_GIB" --dequantize_mxfp4
 
 echo
 echo "=== what the judge actually said ==="

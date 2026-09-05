@@ -57,6 +57,10 @@ def main() -> None:
                    help="Recorded with every row so the pool is identifiable later.")
     p.add_argument("--dtype", default="auto")
     p.add_argument("--device_map", default="auto")
+    p.add_argument("--dequantize_mxfp4", action="store_true",
+                   help="Load an MXFP4 checkpoint by dequantising it to the "
+                        "requested dtype instead of running the quantised "
+                        "kernels, which need triton_kernels and a network.")
     p.add_argument("--max_memory_gib", type=float, default=0.0,
                    help="Per-GPU cap handed to device_map. Left at 0 the "
                         "automatic map packed the first H100 to 79.4 of 81.5 GiB "
@@ -100,6 +104,18 @@ def main() -> None:
     t_load = time.perf_counter()
     load_kw = dict(local_files_only=True, dtype=args.dtype,
                    device_map=args.device_map)
+    if args.dequantize_mxfp4:
+        # The checkpoint is MXFP4. Running it quantised needs triton_kernels,
+        # which is not in the offline wheelhouse, and letting transformers work
+        # that out for itself failed twice inside _materialize_copy with
+        # CUDA_ERROR_ILLEGAL_ADDRESS during the host-to-device copy (jobs 443012
+        # and 443041), with and without a per-GPU memory cap, so it was never
+        # about capacity. Asking for the dequantised path explicitly is the
+        # documented way to run gpt-oss without those kernels.
+        from transformers import Mxfp4Config
+        load_kw["quantization_config"] = Mxfp4Config(dequantize=True)
+        print("[judge] MXFP4 dequantize=True (triton_kernels unavailable offline)",
+              flush=True)
     if args.max_memory_gib > 0 and torch.cuda.is_available():
         load_kw["max_memory"] = {i: f"{args.max_memory_gib:g}GiB"
                                  for i in range(torch.cuda.device_count())}

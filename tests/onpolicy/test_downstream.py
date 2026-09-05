@@ -146,3 +146,14 @@ def test_within_problem_auroc_rewards_a_verifier_that_ranks_inside_a_problem():
     groups = {"p": [sol([0.1], True), sol([0.9], False), sol([0.8], False)]}
     from scripts.analysis.onpolicy_downstream import within_problem_auroc
     assert within_problem_auroc(groups, "worst_step") == 1.0
+
+
+def test_the_length_baseline_needs_one_score_per_step_not_per_solution():
+    """The picking rules are blind to a constant score, so a single-element list
+    passed every other check while making every solution look one step long and
+    reporting a length AUROC of exactly 0.500."""
+    from scripts.analysis.onpolicy_downstream import length_baseline
+    flat = {f"p{i}": [sol([0.5], True), sol([0.5], False)] for i in range(5)}
+    assert length_baseline(flat)["traj_auroc"] == 0.5      # the degenerate case
+    real = {f"p{i}": [sol([0.5] * 3, True), sol([0.5] * 9, False)] for i in range(5)}
+    assert length_baseline(real)["traj_auroc"] == 1.0

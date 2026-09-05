@@ -360,8 +360,13 @@ def main() -> None:
     # Baselines depend only on the outcomes, not on any verifier.
     base_groups: dict[str, list[dict]] = defaultdict(list)
     for r in outcomes.values():
+        # One flat score per step, not one per solution: the picking rules are
+        # blind to a constant either way, but the length baseline reads the list
+        # length, and a single-element list made every solution look one step
+        # long and reported a meaningless AUROC of exactly 0.500.
+        n = max(1, int(r.get("n_steps") or 1))
         base_groups[r["problem_id"]].append(
-            {"id": r["id"], "scores": [0.5], "correct": bool(r["correct"]),
+            {"id": r["id"], "scores": [0.5] * n, "correct": bool(r["correct"]),
              "pred": r.get("pred")})
     oracle, chance = oracle_and_chance(base_groups)
     sc = self_consistency(base_groups)

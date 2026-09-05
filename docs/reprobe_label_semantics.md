@@ -108,3 +108,34 @@ in steps, an order of magnitude fewer problems. Recorded.
 4. Optimiser hyperparameters follow this project's protocol; the paper's are not
    recoverable from the public HTML.
 5. 991 problems against 10.8K.
+
+---
+
+## Running GPT-OSS-120B offline on TamIA: what does and does not work
+
+Recorded because two of these look like solutions and are not.
+
+**MXFP4 needs `triton_kernels` from the Triton repo, and it is not obtainable.**
+It is absent from the Alliance offline wheelhouse. The `kernels` library would
+fetch kernels from the Hub at run time, which a compute node cannot do. And the
+package named `triton_kernels` on PyPI is **a different project** from Kernelize
+AI containing `add_vectors` and `rotary_embedding`; installing it would shadow
+the import name and fail somewhere less obvious. The real one is a subdirectory
+of the Triton git repo and would have to be installed from source on the login
+node.
+
+**Without those kernels the checkpoint dequantises to bf16**, from 61 GiB to
+about 234 GiB. That fits across four H100s but not under a `device_map="auto"`
+that fills the first GPU before spilling.
+
+**Two failures at the same line ruled out capacity.** Jobs 443012 (auto map,
+GPU 0 at 79.4/81.5 GiB) and 443041 (explicit 68 GiB cap) both died in
+`transformers.core_model_loading._materialize_copy` at `tensor.to(device)` with
+`CUDA_ERROR_ILLEGAL_ADDRESS` out of `cuMemcpyHtoDAsync`. A capacity problem would
+not survive being given more room.
+
+**vLLM is available after all.** The wheelhouse lists it as `cp38`, which reads
+like a Python 3.8 build and TamIA has no 3.8 module, but the wheel is actually
+`cp38-abi3` and installs on 3.12. The earlier `pip download` failure was its
+`opencv` dependency, not vLLM. So a vLLM environment is a genuine fallback and
+would use the native MXFP4 path, avoiding the dequantisation entirely.

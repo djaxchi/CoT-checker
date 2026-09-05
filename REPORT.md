@@ -1675,7 +1675,199 @@ follows from both.
 
 ---
 
-## 20. Limitations
+## 20. On-Policy Transfer: Does the Leaderboard Predict Usefulness? (onpolicy_v1)
+
+§19 built a controlled leaderboard of step representations measured entirely
+**off-policy**: trained on PRM800K, whose solutions a GPT-4 fine-tune wrote, and
+evaluated on ProcessBench, whose solutions other models wrote. Nobody deploys a
+verifier that way. In practice the model being verified is the model that wrote
+the reasoning, and the point of reading internal states is that they are the
+states of the model doing the thinking.
+
+This section asks whether that leaderboard survives contact with deployment. Two
+questions, kept apart throughout, because conflating them is how this kind of
+study goes wrong:
+
+**A. Frozen transfer.** Take the nineteen dense verifiers exactly as trained and
+point them at Qwen3-8B-Base's own solutions. Nothing is retrained. This is the
+deployment-realistic question and it is complete.
+
+**B. On-policy controlled training.** Train verifier heads on Qwen-generated
+trajectories with on-policy step labels and evaluate on disjoint Qwen
+trajectories, so distribution shift is removed and only the representation
+varies. In progress; the annotation stage is the current blocker.
+
+### 20.1 The on-policy pool
+
+Qwen3-8B-Base wrote ten solutions each for 300 PRM800K **test** problems under
+ReProbe's sampling settings (top-k 50, top-p 0.95, T=1.0): 3,000 trajectories,
+99.8% gradeable, 37.2% correct, 2,873 usable after dropping single-step
+solutions, 26,791 steps. Every gate passed before anything downstream ran.
+
+Two of those gates mattered more than the rest. **Step length was not the
+confound it looked like**: the handoff recorded on-policy steps at ~24 words
+against PRM800K's 38.8 tokens, but measured in the same unit the medians are 32
+tokens against 33. The apparent shift was a unit mismatch. And **best-of-10 has
+room**: oracle@10 is 0.700 against 0.375 for a single sample and 0.560 for
+self-consistency, so a reranker has something to win. Had that gap been near
+zero, every verifier would have scored the same downstream number and the whole
+comparison would have been measuring sampling noise.
+
+### 20.2 Frozen transfer: the verifiers detect, and still lose to counting
+
+All nineteen dense cells were scored on the on-policy split without retraining,
+using the weights already on disk. ReProbe's canonical aggregation, the minimum
+over steps of P(correct), is identical in ranking to the `worst_step` rule
+already implemented, so it is the primary; mean-step and last-step are reported
+as sensitivity checks.
+
+```
+pick one at random        0.375
+self-consistency          0.560   <- the baseline to beat
+any-of-10 (oracle)        0.700   <- the ceiling
+
+best verifier at best-of-10   0.503   (boundary_stats x mlp:h1024)
+verifiers beating self-consistency   0 / 19   (paired McNemar p 0.033 to <0.001)
+best score-weighted vote      0.561   against 0.560 unweighted
+```
+
+The signal is real. Within-problem AUROC, which is the question best-of-N
+actually depends on, runs 0.675 to 0.745: these verifiers genuinely rank
+competing solutions to the same problem. It is also not a length artifact, since
+length alone gives 0.561 and keeping the shortest solution scores 0.350, worse
+than random.
+
+What beats them is that **agreement with the majority ranks the same solutions at
+0.874**, and the two signals overlap (correlation −0.19 to −0.38, centred within
+problem). So best-of-N replaces a stronger signal with a weaker one, and
+weighting a vote by a partially redundant one adds nothing, which is exactly the
+0.561 against 0.560 measured.
+
+Where the verifier does contribute is **inside the majority bloc**, where every
+solution already agrees and voting has nothing left to say: 0.568 to 0.590
+against 0.564 for taking any member, largest for `last_token x linear` at
++0.026. That is small, consistently positive, and not where best-of-N looks.
+
+### 20.3 Rank transfer and effect-size transfer disagree
+
+Bootstrapping **problems**, since every downstream number is a mean over
+problems:
+
+| benchmark | vs on-policy within-problem AUROC | vs best-of-N |
+|---|---|---|
+| ProcessBench | +0.823 | +0.661 [+0.099, +0.790] |
+| PRM800K | +0.658 | +0.525 [−0.017, +0.711] |
+
+ProcessBench predicts both better than PRM800K does, and its downstream interval
+excludes zero where PRM800K's does not. Holding the learner at linear and reading
+representation families instead of cells, ProcessBench orders the six
+representations by within-problem AUROC **perfectly** (Spearman 1.000, n=6),
+though at that n the downstream intervals resolve nothing.
+
+The effect sizes tell the other half:
+
+| contrast | Δ ProcessBench | Δ best-of-10 |
+|---|---|---|
+| `last_token` → `step_mean` | +0.050 | +0.009 |
+| `step_mean` → `step_stats` | +0.042 | +0.011 |
+| fixed → learned pooling | +0.090 | −0.006 |
+
+**Order transfers. Magnitude does not.** The benchmark's gaps are five to ten
+times the downstream ones and the largest reverses sign. The defensible claim is
+that ProcessBench preserves the ranking while exaggerating what the ranking is
+worth, which is weaker and more useful than "ProcessBench predicts downstream
+usefulness".
+
+### 20.4 Compatibility with published ReProbe behaviour
+
+Nothing here contradicts ReProbe. Two differences are sufficient to reconcile
+them. ReProbe trains its probe **on-policy**, labelling the target model's own
+steps with DeepSeek-R1; these nineteen verifiers were trained on PRM800K and have
+never seen a Qwen-generated step, so experiment A is a transfer test by
+construction. And much of the PRM literature reports best-of-N against greedy or
+random selection, where these verifiers win clearly (0.503 against 0.375);
+self-consistency at N=10 is a substantially harder bar and is the one used here.
+Experiment B exists to close the first difference.
+
+### 20.5 Judges, and why the annotator question consumed real effort
+
+On-policy steps have no human labels, and the label F1_PB needs is the first
+error, not the trajectory outcome the generator records. Local judges were
+scored on 400 human-labelled ProcessBench traces at their natural prevalence,
+with degenerate strategies scored underneath them:
+
+```
+                        F1_PB  Acc_err  Acc_cor
+qwen25_7b_instruct_cot  0.481    0.346    0.787
+qwen25_32b              0.435    0.294    0.834
+qwen3_8b_base           0.421    0.294    0.740
+qwen25_32b_cot          0.236    0.134    0.982
+qwen25_7b_instruct      0.009    0.004    0.994
+always_no_error         0.000    0.000    1.000
+```
+
+Every one sits below the 0.566 of the representation it would be supervising.
+Reasoning helped the instruction-tuned model (0.009 → 0.481, from degenerate to
+best local) and hurt both base models, which became more conservative rather than
+more accurate. DeepSeek-R1 over an API scores 0.785 stratified across all four
+subsets with no parse failures, and deepseek-v3.2 reaches 0.759 at 1/87th the
+cost, but neither is usable as the primary annotator for a compute-node pipeline
+with no network.
+
+Two lessons were paid for here and are recorded in
+`docs/reprobe_label_semantics.md`. The certification set was written one subset
+after another, so a run that stopped early scored 0.807 on 63 traces that were
+GSM8K to the last one; interleaved, the per-subset spread is 0.913 GSM8K against
+0.609 OmniMath. And a reasoning judge that exhausts its token budget returns
+empty content, which was being scored as "no error" and penalising the judge for
+a budget setting.
+
+### 20.6 ReProbe label semantics, recovered rather than assumed
+
+Read from arXiv:2511.06209 before implementation. Three differences from the
+first-error protocol already in the tree, one of which would have gone wrong
+silently: the judge is shown the **ground-truth answer**; it is asked for the
+**set** of faulty steps rather than the first one; and the paper never says steps
+after a faulty one become negative, so they are left alone. Propagation is the
+common PRM convention and would roughly double the negative class.
+
+Deviations from the paper are recorded rather than reconciled: GPT-OSS-120B
+instead of DeepSeek-R1 as the local annotator, blank-line step segmentation
+instead of one-per-line, last-layer hidden states instead of the paper's
+attention-plus-logits features, this project's optimiser protocol since appendix
+D.2 is truncated in the public HTML, and 991 problems against their 10.8K. The
+dataset is named "ReProbe-style GPT-OSS-120B on-policy labels" and is never
+described as an exact reproduction.
+
+One agreement worth recording: the paper's `Q_offline` is the minimum over steps
+of P(correct), which ranks identically to the `worst_step` aggregation already
+reported as primary.
+
+### 20.7 Status and artifacts
+
+Experiment A is complete. Experiment B is blocked on annotation: GPT-OSS-120B is
+downloaded and verified (15/15 shards, MXFP4, 61 GiB), and three load attempts
+failed identically inside transformers' streaming device placement. A diagnostic
+job established that host-to-device copies work, the real MXFP4 shards read and
+move, and the model builds on CPU at 116.8B parameters in bfloat16, so the fault
+is narrowly the placement path and the fix is to build on CPU and dispatch with
+accelerate.
+
+```
+generation pool      $SCRATCH/cot_mech/reprobe_v1/reprobe_train.shard*_trajectories.jsonl
+judge pool           $SCRATCH/cot_mech/reprobe_v1/reprobe_train_judge_traces.jsonl
+frozen-transfer      cot-checker-results/onpolicy_v1/downstream_{verifier,generation}.json
+rank/effect transfer cot-checker-results/onpolicy_v1/transfer_report.json
+agreement analysis   cot-checker-results/onpolicy_v1/agreement_redundancy.json
+label semantics      docs/reprobe_label_semantics.md
+plan and gates       docs/onpolicy_v1_plan.md
+jobs                 435635 gen, 434763 encode+score, 442884 reprobe gen,
+                     443012/443041/443043 smoke failures, 443105 diagnostic
+```
+
+---
+
+## 21. Limitations
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -1684,7 +1876,7 @@ follows from both.
 
 ---
 
-## 21. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 22. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
 ### 17.1 Overview
 
@@ -2008,7 +2200,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 22. Next Steps
+## 23. Next Steps
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

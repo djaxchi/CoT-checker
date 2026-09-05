@@ -76,7 +76,13 @@ def main() -> None:
                         "dequantise to bf16 and need ~234 GiB across the node; "
                         "an explicit cap spreads them instead of filling GPU 0.")
     p.add_argument("--batch_size", type=int, default=8)
-    p.add_argument("--max_new_tokens", type=int, default=320)
+    p.add_argument("--max_new_tokens", type=int, default=1024,
+                   help="GPT-OSS reasons in a harmony analysis channel before "
+                        "answering; 320 was not enough to reach the verdict and "
+                        "81% of the smoke run failed to parse.")
+    p.add_argument("--reasoning_effort", default=None,
+                   help="Passed to the chat template (gpt-oss accepts low, "
+                        "medium, high). Shortens the analysis channel.")
     p.add_argument("--max_prompt_tokens", type=int, default=3072)
     p.add_argument("--max_traces", type=int, default=0)
     p.add_argument("--shard_idx", type=int, default=0)
@@ -161,7 +167,8 @@ def main() -> None:
         for i in range(0, len(todo), args.batch_size):
             batch = todo[i:i + args.batch_size]
             prompts = [build_prompt_reprobe(t["problem"], t["steps"],
-                                            t.get("gold") or "", tok, chat)
+                                            t.get("gold") or "", tok, chat,
+                                            args.reasoning_effort)
                        for t in batch]
             enc = tok(prompts, return_tensors="pt", padding=True,
                       truncation=True, max_length=args.max_prompt_tokens).to(device)
@@ -211,6 +218,7 @@ def main() -> None:
                                         max(time.perf_counter() - t0, 1e-9) * 3600, 1),
            "model_path": args.model_path, "prompt_version": PROMPT_VERSION,
            "batch_size": args.batch_size, "max_new_tokens": args.max_new_tokens,
+           "reasoning_effort": args.reasoning_effort,
            "shard_idx": args.shard_idx, "num_shards": args.num_shards,
            "created_at": datetime.now(timezone.utc).isoformat(),
            "code_commit": git_commit()}

@@ -31,8 +31,8 @@ PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/reprobe_v1}"
 MODEL_PATH="${MODEL_PATH:-$SCRATCH/shared_models/gpt-oss-120b}"
 TRACES="${TRACES:-$RUN_ROOT/reprobe_train_judge_traces.jsonl}"
-N="${N:-16}"
-BATCH="${BATCH:-2}"
+N="${N:-24}"
+BATCH="${BATCH:-8}"
 # Job 443012 died in tensor.to() with CUDA_ERROR_ILLEGAL_ADDRESS after
 # device_map="auto" packed GPU 0 to 79.4 of 81.5 GiB. MXFP4 inference needs
 # triton_kernels, which is absent from the offline wheelhouse and which the
@@ -41,7 +41,12 @@ BATCH="${BATCH:-2}"
 # per-GPU cap spreads them evenly and leaves room for activations.
 MAX_MEM_GIB="${MAX_MEM_GIB:-68}"
 DTYPE="${DTYPE:-bfloat16}"
-MAX_NEW="${MAX_NEW:-320}"
+# 320 was not enough: GPT-OSS answers in the harmony format and spends its
+# budget in the analysis channel, so 81% of the first run never reached the
+# final channel and could not be parsed. A larger budget plus a shorter analysis
+# is cheaper than either alone.
+MAX_NEW="${MAX_NEW:-1024}"
+REASONING="${REASONING:-low}"
 
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
@@ -64,7 +69,7 @@ job        : ${SLURM_JOB_NAME:-gptoss_smoke}  id: ${SLURM_JOB_ID:-N/A}
 git_commit : $(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 model      : $MODEL_PATH  ($(du -sh "$MODEL_PATH" | cut -f1), offline)
 traces     : $TRACES  ($(wc -l <"$TRACES") available, annotating $N)
-batch      : $BATCH   max_new_tokens: $MAX_NEW
+batch      : $BATCH   max_new_tokens: $MAX_NEW   reasoning: $REASONING
 dtype      : $DTYPE   per-GPU cap: ${MAX_MEM_GIB}GiB (bf16 dequant, ~234GiB total)
 ================================================================
 BANNER
@@ -91,7 +96,7 @@ python scripts/onpolicy/judge_local_reprobe.py \
   --model_path "$MODEL_PATH" \
   --max_traces "$N" --batch_size "$BATCH" --max_new_tokens "$MAX_NEW" \
   --dtype "$DTYPE" --max_memory_gib "$MAX_MEM_GIB" --dequantize_mxfp4 \
-  --cpu_then_dispatch
+  --cpu_then_dispatch --reasoning_effort "$REASONING"
 
 echo
 echo "=== what the judge actually said ==="

@@ -83,3 +83,31 @@ def test_steps_are_numbered_from_one_in_the_prompt_and_zero_in_the_labels():
     text = render_trace_reprobe("p?", ["x", "y", "z"], "7")
     assert "Step 1: x" in text and "Step 3: z" in text
     assert step_labels_from_faulty(parse_step_set("Faulty: 3", 3), 3) == [1, 1, 0]
+
+
+def test_the_verdict_is_read_from_the_harmony_final_channel():
+    """GPT-OSS thinks aloud in an analysis channel first. Parsing the whole reply
+    would read a hypothesis from the thinking as the verdict."""
+    from scripts.onpolicy.judge_steps import harmony_final
+    reply = ("analysisLet me check. Step 2 might be faulty: 7+5=12 is right. "
+             "Faulty: 2 would be wrong here.assistantfinalFaulty: 4")
+    assert harmony_final(reply).strip() == "Faulty: 4"
+    assert parse_step_set(reply, 5) == [3]
+
+
+def test_a_plain_reply_with_no_channel_marker_is_parsed_whole():
+    from scripts.onpolicy.judge_steps import harmony_final
+    assert harmony_final("Faulty: 2") == "Faulty: 2"
+    assert parse_step_set("Faulty: 2", 3) == [1]
+
+
+def test_an_analysis_that_never_reaches_the_final_channel_fails_to_parse():
+    """This is the 81% case from the smoke run: the model ran out of budget
+    mid-thought. It must be a parse failure, not a label."""
+    from scripts.onpolicy.judge_steps import harmony_final
+    truncated = "analysisWe need to identify faulty steps. Let's examine. Step 1"
+    assert harmony_final(truncated) is None
+    assert parse_step_set(truncated, 5) is None
+    # the danger is concrete: the analysis is full of sentences that read like a
+    # verdict, and parsing it would have produced a label from the thinking
+    assert parse_step_set("analysisStep 2 might be faulty, checking...", 5) is None

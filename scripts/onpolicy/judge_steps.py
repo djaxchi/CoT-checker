@@ -156,13 +156,48 @@ def render_trace_reprobe(problem: str, steps: list[str], gold: str) -> str:
 
 
 def build_prompt_reprobe(problem: str, steps: list[str], gold: str,
-                         tokenizer=None, chat: bool = False) -> str:
+                         tokenizer=None, chat: bool = False,
+                         reasoning_effort: str | None = None) -> str:
     user = f"{INSTRUCTIONS_REPROBE}\n\n{render_trace_reprobe(problem, steps, gold)}"
     if chat and tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        kw = {}
+        if reasoning_effort:
+            # GPT-OSS spends its budget in the analysis channel before answering.
+            # At 320 new tokens it never reached the final channel and 81% of the
+            # smoke run failed to parse. This asks the template for a shorter
+            # analysis rather than paying for a longer one.
+            kw["reasoning_effort"] = reasoning_effort
         return tokenizer.apply_chat_template(
             [{"role": "user", "content": user}], tokenize=False,
-            add_generation_prompt=True)
+            add_generation_prompt=True, **kw)
     return f"{user}\nCheck:"
+
+
+# GPT-OSS answers in the harmony format: a long `analysis` channel followed by
+# a `final` channel. With special tokens stripped the boundary collapses to the
+# literal "assistantfinal", and everything before it is the model thinking aloud.
+# Parsing the whole string would read a hypothesis from the analysis as the
+# verdict, which is the same mistake as taking the first Faulty line instead of
+# the last, one level up.
+_HARMONY_FINAL = re.compile(r"assistantfinal", re.IGNORECASE)
+
+
+def harmony_final(text: str) -> str | None:
+    """The final channel of a harmony reply.
+
+    Returns the whole text for a reply that is not harmony at all, and None for
+    one that opened an analysis channel and never reached the final one. That
+    last case is the 81% failure of the smoke run, where the model ran out of
+    budget mid-thought, and it must not be parsed: its analysis is full of
+    sentences like "Step 2 might be faulty" that read exactly like a verdict.
+    """
+    t = text or ""
+    parts = _HARMONY_FINAL.split(t)
+    if len(parts) > 1:
+        return parts[-1]
+    if t.lstrip().lower().startswith("analysis"):
+        return None
+    return t
 
 
 _FAULTY = re.compile(r"faulty\s*:?\s*(.*)", re.IGNORECASE)
@@ -178,7 +213,10 @@ def parse_step_set(text: str, n_steps: int) -> list[int] | None:
     naming a step that does not exist has lost track of the solution, and
     clamping would invent a label for a step it never looked at.
     """
-    hits = [m for m in _FAULTY.finditer(text or "")]
+    final = harmony_final(text)
+    if final is None:
+        return None
+    hits = [m for m in _FAULTY.finditer(final)]
     if not hits:
         return None
     tail = hits[-1].group(1).strip()

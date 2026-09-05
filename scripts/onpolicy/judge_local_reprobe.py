@@ -84,6 +84,10 @@ def main() -> None:
                    help="Passed to the chat template (gpt-oss accepts low, "
                         "medium, high). Shortens the analysis channel.")
     p.add_argument("--max_prompt_tokens", type=int, default=3072)
+    p.add_argument("--shuffle", action="store_true",
+                   help="Mix the pool once under --shuffle_seed so each shard "
+                        "sees correct and incorrect trajectories from the start.")
+    p.add_argument("--shuffle_seed", type=int, default=1234)
     p.add_argument("--max_traces", type=int, default=0)
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
@@ -98,6 +102,15 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     traces = read_jsonl(args.traces)
+    if args.shuffle:
+        # The pool is written incorrect-trajectories-first, so a strided shard
+        # would annotate every wrong solution before reaching a single correct
+        # one and partial output would be unrepresentative for hours. The
+        # false-alarm rate on correct trajectories is the label-quality number
+        # that matters most, so the order is mixed once under a fixed seed and
+        # every shard sees both classes from the start.
+        import random as _r
+        _r.Random(args.shuffle_seed).shuffle(traces)
     if args.max_traces > 0:
         traces = traces[:args.max_traces]
     traces = traces[args.shard_idx::args.num_shards]
@@ -219,6 +232,7 @@ def main() -> None:
            "model_path": args.model_path, "prompt_version": PROMPT_VERSION,
            "batch_size": args.batch_size, "max_new_tokens": args.max_new_tokens,
            "reasoning_effort": args.reasoning_effort,
+           "shuffle": bool(args.shuffle), "shuffle_seed": args.shuffle_seed,
            "shard_idx": args.shard_idx, "num_shards": args.num_shards,
            "created_at": datetime.now(timezone.utc).isoformat(),
            "code_commit": git_commit()}

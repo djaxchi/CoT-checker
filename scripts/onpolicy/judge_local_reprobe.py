@@ -39,6 +39,40 @@ from scripts.onpolicy.judge_steps import (  # noqa: E402
 PROMPT_VERSION = "reprobe-faulty-set-v1"
 
 
+def generate_with_oom_retry(model, tok, prompts: list[str], device, args
+                            ) -> list[str]:
+    """Generate, halving the batch on an out-of-memory error rather than dying.
+
+    Shard 1 of the first full run (job 443140) died eight minutes in with 76.6 of
+    79.2 GiB used on one GPU: the weights take a 68 GiB cap per device and a
+    prefill over a batch of unusually long traces does not fit in what is left.
+    It is data-dependent, so shard 0 finished the same code path without
+    trouble. Killing a six-hour job over one unlucky batch is the wrong
+    behaviour, and lowering the batch globally would slow every shard for the
+    sake of a few batches, so the batch is split on demand and only when needed.
+    """
+    import torch
+    if not prompts:
+        return []
+    try:
+        enc = tok(prompts, return_tensors="pt", padding=True).to(device)
+        with torch.no_grad():
+            out = model.generate(**enc, max_new_tokens=args.max_new_tokens,
+                                 do_sample=False, pad_token_id=tok.pad_token_id)
+        width = enc["input_ids"].shape[1]
+        return tok.batch_decode(out[:, width:], skip_special_tokens=True)
+    except torch.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        if len(prompts) == 1:
+            print("[judge] OOM on a single prompt; recording it as a failure",
+                  flush=True)
+            return [""]
+        mid = len(prompts) // 2
+        print(f"[judge] OOM on a batch of {len(prompts)}, splitting", flush=True)
+        return (generate_with_oom_retry(model, tok, prompts[:mid], device, args)
+                + generate_with_oom_retry(model, tok, prompts[mid:], device, args))
+
+
 def load_done(path: Path) -> set[str]:
     if not path.exists():
         return set()
@@ -183,14 +217,33 @@ def main() -> None:
                                             t.get("gold") or "", tok, chat,
                                             args.reasoning_effort)
                        for t in batch]
-            enc = tok(prompts, return_tensors="pt", padding=True,
-                      truncation=True, max_length=args.max_prompt_tokens).to(device)
-            with torch.no_grad():
-                out = model.generate(**enc, max_new_tokens=args.max_new_tokens,
-                                     do_sample=False,
-                                     pad_token_id=tok.pad_token_id)
-            width = enc["input_ids"].shape[1]
-            texts = tok.batch_decode(out[:, width:], skip_special_tokens=True)
+            # Never truncate. Cutting from the right removes the last steps and
+            # the answer cue, and the judge would then confidently label a
+            # solution it was never shown. Over-long traces are recorded as
+            # failures instead, the same rule the API judge already follows.
+            lens = [len(tok(pr)["input_ids"]) for pr in prompts]
+            too_long = [i for i, n in enumerate(lens) if n > args.max_prompt_tokens]
+            for i in too_long:
+                t = batch[i]
+                fh.write(json.dumps({
+                    "traj_uid": t["id"], "id": t["id"],
+                    "problem_id": t.get("problem_id"), "gold": t.get("gold"),
+                    "traj_correct": t.get("traj_correct"),
+                    "n_steps": len(t["steps"]), "faulty_steps": None,
+                    "step_labels": None, "first_error": -1, "parse_ok": False,
+                    "raw": f"[skipped: prompt {lens[i]} tokens > "
+                           f"{args.max_prompt_tokens}]",
+                    "prompt_version": PROMPT_VERSION,
+                    "judge_model": args.model_path, "generator": args.generator,
+                    "seed": args.seed, "code_commit": git_commit()}) + "\n")
+            keep = [i for i in range(len(batch)) if i not in set(too_long)]
+            if not keep:
+                fh.flush()
+                continue
+            batch = [batch[i] for i in keep]
+            prompts = [prompts[i] for i in keep]
+
+            texts = generate_with_oom_retry(model, tok, prompts, device, args)
             for t, raw in zip(batch, texts):
                 faulty = parse_step_set(raw, len(t["steps"]))
                 ok = faulty is not None

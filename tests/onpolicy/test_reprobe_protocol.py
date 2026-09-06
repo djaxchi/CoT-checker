@@ -111,3 +111,62 @@ def test_an_analysis_that_never_reaches_the_final_channel_fails_to_parse():
     # the danger is concrete: the analysis is full of sentences that read like a
     # verdict, and parsing it would have produced a label from the thinking
     assert parse_step_set("analysisStep 2 might be faulty, checking...", 5) is None
+
+
+def test_an_oom_splits_the_batch_instead_of_killing_the_run():
+    """Job 443140 died eight minutes into a six-hour shard because one batch of
+    unusually long traces did not fit. Splitting on demand costs nothing on the
+    batches that fit and saves the run on the ones that do not."""
+    import sys
+    import types
+    from scripts.onpolicy import judge_local_reprobe as jl
+
+    calls = []
+
+    class FakeOOM(Exception):
+        pass
+
+    class FakeTorch(types.SimpleNamespace):
+        OutOfMemoryError = FakeOOM
+
+    def fake_generate(model, tok, prompts, device, args):
+        return jl.generate_with_oom_retry(model, tok, prompts, device, args)
+
+    class Tok:
+        pad_token_id = 0
+        def __call__(self, prompts, **kw):
+            class E(dict):
+                def to(self, d): return self
+            return E(input_ids=_Arr(len(prompts)))
+        def batch_decode(self, x, **kw): return ["ok"] * x.n
+
+    class _Arr:
+        def __init__(self, n): self.n = n
+        @property
+        def shape(self): return (self.n, 3)
+        def __getitem__(self, k): return _Arr(self.n)
+
+    class Model:
+        def generate(self, **kw):
+            n = kw["input_ids"].n
+            calls.append(n)
+            if n > 2:
+                raise FakeOOM("out of memory")
+            return _Arr(n)
+
+    real_torch = sys.modules.get("torch")
+    sys.modules["torch"] = FakeTorch(
+        OutOfMemoryError=FakeOOM,
+        cuda=types.SimpleNamespace(empty_cache=lambda: None),
+        no_grad=lambda: __import__("contextlib").nullcontext())
+    try:
+        class A:
+            max_new_tokens = 8
+        out = jl.generate_with_oom_retry(Model(), Tok(), ["p"] * 8, None, A())
+    finally:
+        if real_torch is not None:
+            sys.modules["torch"] = real_torch
+        else:
+            del sys.modules["torch"]
+    assert len(out) == 8                    # nothing was dropped
+    assert 8 in calls and min(calls) <= 2   # it tried big, then split down

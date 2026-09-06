@@ -45,6 +45,9 @@ MAX_MEM_GIB="${MAX_MEM_GIB:-68}"
 
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+# torch's own suggestion from the shard 1 OOM: the failure reserved 3.24 GiB it
+# could not use, which is fragmentation rather than genuine demand.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export HF_HOME="${HF_HOME:-/project/aip-azouaq/$USER/hf_cache}"
 mkdir -p "$OUT_DIR" "$RUN_ROOT/logs"
 

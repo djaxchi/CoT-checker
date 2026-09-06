@@ -95,8 +95,16 @@ protocol and records that as a deviation rather than guessing the paper's values
 > 10.8K problems from the PRM800K training dataset, 3 reasoning chains per
 > problem, ~32K data samples
 
-Ours: 991 problems, 6 chains each, 5,946 trajectories, 33,447 steps. Comparable
-in steps, an order of magnitude fewer problems. Recorded.
+Ours, as measured on the completed annotation run rather than as planned:
+991 problems, 5,686 trajectories annotated, of which 5,483 parsed and were kept,
+51,711 steps. Of those, 4,657 traces / 43,837 steps over 842 problems went to
+training and 826 traces over 149 disjoint problems to validation. Comparable in
+steps, an order of magnitude fewer problems. Recorded.
+
+(An earlier draft of this section carried the planning estimate of 5,946
+trajectories and 33,447 steps, which was the 991 x 6 target and a projected step
+count. The numbers above are the audited ones from
+`cot-checker-results/reprobe_v1/label_audit_full.json`.)
 
 ## Deviations, in one place
 
@@ -107,7 +115,7 @@ in steps, an order of magnitude fewer problems. Recorded.
 3. Features are last-layer hidden states, not attention + logits.
 4. Optimiser hyperparameters follow this project's protocol; the paper's are not
    recoverable from the public HTML.
-5. 991 problems against 10.8K.
+5. 991 problems against 10.8K, and 5,483 kept trajectories against ~32K samples.
 
 ---
 

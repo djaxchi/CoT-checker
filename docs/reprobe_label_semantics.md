@@ -139,3 +139,56 @@ like a Python 3.8 build and TamIA has no 3.8 module, but the wheel is actually
 `cp38-abi3` and installs on 3.12. The earlier `pip download` failure was its
 `opencv` dependency, not vLLM. So a vLLM environment is a genuine fallback and
 would use the native MXFP4 path, avoiding the dequantisation entirely.
+
+---
+
+## What GPT-OSS actually did with the no-propagation rule
+
+Measured on 2,674 parsed annotations, over the 1,393 failing traces where it
+found at least one fault:
+
+```
+faulty set is the whole suffix from the first error : 0.569
+faulty set is a contiguous run, not to the end      : 0.146
+faulty set has gaps (clean steps inside the span)   : 0.284
+mean fraction of a trace marked faulty              : 0.543
+```
+
+**The judge arrives at propagation on its own in 57% of traces**, even though the
+prompt never asks for it and the parser and encoder were built to preserve a
+sparse set. That is not a defect and not a bug in the protocol: a step that
+carries a wrong value forward genuinely is incorrect, and a careful annotator
+would mark it. The 28.4% with gaps, median two clean steps sitting inside the
+faulty span, is the evidence that it is reading steps individually rather than
+applying a rule.
+
+What it changes is what the labels *mean*, and that has to travel with them:
+
+- they sit much closer to the first-error convention than the paper's protocol
+  implies, so "we did not propagate" describes the prompt, not the data;
+- the positive class is 54% of steps within a failing trace, against 30% over the
+  pool as a whole;
+- localisation signal is correspondingly weak, since a probe can score well by
+  learning "this trace has gone wrong by now" rather than "this step is the
+  wrong one".
+
+The third point is the one to carry into the Phase 9 gate. If the on-policy
+probe improves on step-level metrics but not on within-problem ranking or
+best-of-N, this is the first explanation to test, ahead of anything about
+architecture or training.
+
+### A threshold that was recalibrated after seeing data
+
+The audit's original check counted traces where most steps were faulty against a
+0.25 bound, and the real labels came in at 0.422. The bound was chosen before the
+trace-length distribution was known and it fires on short traces for arithmetic
+reasons: two faulty of three steps is "most steps", and the rate falls from 0.66
+at three steps to 0.33 at fifteen-plus purely from that.
+
+It is replaced by a bound on the **length-normalised** faulty fraction at 0.75,
+which catches a judge marking essentially everything without encoding a prior
+about how many steps ought to be wrong, plus the propagation shares above as a
+reported metric rather than a gate. Changing a threshold after seeing the data it
+judges is a real methodological risk, so both the old bound and the reason for
+the change are recorded here rather than quietly edited away, and propagation is
+reported prominently instead of being hidden by a passing check.

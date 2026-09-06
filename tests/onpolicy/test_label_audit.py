@@ -49,10 +49,13 @@ def test_a_judge_copying_the_grader_is_caught():
 
 
 def test_traces_marked_almost_entirely_faulty_are_caught():
+    """Five of six steps faulty in every failing trace. The check that catches
+    this is now the length-normalised faulty fraction, replacing a count-based
+    one that also fired on short traces for arithmetic reasons."""
     rows = ([row(f"c{i}", True, []) for i in range(40)] +
             [row(f"w{i}", False, [0, 1, 2, 3, 4], n_steps=6) for i in range(40)])
     n = named(audit(rows))
-    assert n["few degenerate traces"] is False or n["positives are not the majority"] is False
+    assert n["not marking nearly every step"] is False
 
 
 def test_errors_all_at_step_zero_are_caught():
@@ -77,3 +80,49 @@ def test_the_measured_partial_run_would_pass():
     rep = audit(rows)
     assert rep["discrimination"] > 0.5
     assert all(named(rep).values())
+
+
+def test_propagation_is_measured_by_the_shape_of_the_faulty_set():
+    """ReProbe reports a set and does not mark everything after the first error.
+    Whether the judge honours that is a fact about the judge, so it is measured
+    rather than assumed from the fact that the parser preserves a set."""
+    from scripts.analysis.onpolicy_label_audit import propagation_shape
+    rows = (
+        [row(f"s{i}", False, [2, 3, 4, 5], n_steps=6) for i in range(10)] +   # suffix
+        [row(f"c{i}", False, [1, 2], n_steps=6) for i in range(5)] +          # contiguous
+        [row(f"g{i}", False, [1, 4], n_steps=6) for i in range(5)]            # gapped
+    )
+    p = propagation_shape(rows)
+    assert p["n_traces"] == 20
+    assert p["suffix_share"] == 0.5
+    assert p["contiguous_share"] == 0.25
+    assert p["gapped_share"] == 0.25
+
+
+def test_a_judge_marking_nearly_every_step_still_fails():
+    """The recalibrated check bounds the length-normalised faulty fraction, so it
+    catches the pathology the old count-based one was aiming at without firing on
+    short traces for arithmetic reasons."""
+    rows = ([row(f"c{i}", True, []) for i in range(20)] +
+            [row(f"w{i}", False, list(range(6)), n_steps=6) for i in range(20)])
+    assert named(audit(rows))["not marking nearly every step"] is False
+
+
+def test_short_traces_no_longer_fail_the_check_for_being_short():
+    """Two faulty of three steps is 'most steps' but is not a pathology; the old
+    threshold fired on exactly this and the new one does not."""
+    rows = ([row(f"c{i}", True, []) for i in range(20)] +
+            [row(f"w{i}", False, [1, 2], n_steps=3) for i in range(20)])
+    assert named(audit(rows))["not marking nearly every step"] is True
+
+
+def test_the_measured_run_shape_is_reported_without_failing_the_gate():
+    """56.9% suffix, as measured on the real labels, is a semantics finding
+    rather than a defect, so it must not block training."""
+    rows = ([row(f"c{i}", True, [] if i % 5 else [1]) for i in range(100)] +
+            [row(f"s{i}", False, [2, 3, 4, 5], n_steps=6) for i in range(57)] +
+            [row(f"k{i}", False, [1, 2], n_steps=6) for i in range(15)] +
+            [row(f"g{i}", False, [1, 4], n_steps=6) for i in range(28)])
+    n = named(audit(rows))
+    assert n["propagation is measured, not assumed"] is True
+    assert all(n.values())

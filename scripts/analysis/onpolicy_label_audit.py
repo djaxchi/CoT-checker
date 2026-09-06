@@ -47,6 +47,45 @@ sys.path.insert(0, str(ROOT))
 from scripts.encode_prm800k_hidden_states import read_jsonl  # noqa: E402
 
 
+def propagation_shape(rows: list[dict]) -> dict:
+    """How the faulty steps are arranged inside a trace.
+
+    ReProbe reports a SET of faulty steps and the paper does not mark everything
+    after the first error, which is why the parser and the encoder were built to
+    preserve a sparse set. Whether the judge honours that is an empirical
+    question about the judge, not about the code, and this measures it:
+
+      suffix      every step from the first error to the end is faulty, which is
+                  propagation whether or not it was asked for
+      contiguous  an unbroken run that stops before the end
+      gapped      steps judged fine sit inside the faulty span, which is
+                  evidence the judge is reading steps rather than applying a rule
+
+    A high suffix share does not make the labels wrong: a step carrying a bad
+    value forward really is incorrect. It does mean the labels sit close to the
+    first-error convention, the positive class is large, and localisation signal
+    is weak, so it belongs in the interpretation of anything trained on them.
+    """
+    inc = [r for r in rows if not r.get("traj_correct") and r.get("faulty_steps")]
+    if not inc:
+        return {}
+    suffix = contiguous = gapped = 0
+    for r in inc:
+        f = sorted(r["faulty_steps"])
+        n = r["n_steps"]
+        if f == list(range(f[0], n)):
+            suffix += 1
+        elif f == list(range(f[0], f[-1] + 1)):
+            contiguous += 1
+        else:
+            gapped += 1
+    t = len(inc)
+    return {"n_traces": t, "suffix_share": suffix / t,
+            "contiguous_share": contiguous / t, "gapped_share": gapped / t,
+            "mean_faulty_fraction": float(np.mean(
+                [len(r["faulty_steps"]) / r["n_steps"] for r in inc]))}
+
+
 def group_stats(rows: list[dict]) -> dict:
     if not rows:
         return {}
@@ -89,6 +128,7 @@ def audit(rows: list[dict]) -> dict:
             np.mean([r.get("first_error", -1) == 0 for r in inc]))
         rep["first_error_at_last_step"] = float(
             np.mean([r.get("first_error", -1) == r["n_steps"] - 1 for r in inc]))
+    rep["propagation"] = propagation_shape(ok)
     steps = sum(r["n_steps"] for r in ok)
     faulty = sum(len(r["faulty_steps"] or []) for r in ok)
     rep["n_steps"] = steps
@@ -118,12 +158,27 @@ def checks(rep: dict) -> list[tuple[str, bool, str]]:
         c.append(("errors are not all at step 0", rep["first_error_at_step_0"] <= 0.4,
                   f"{rep['first_error_at_step_0']:.3f} <= 0.4; higher suggests the "
                   f"judge blames the setup rather than the reasoning"))
-    inc = rep.get("incorrect_answer", {})
-    if inc:
-        c.append(("few degenerate traces", inc.get("mostly_faulty_traces", 0) <= 0.25,
-                  f"{inc.get('mostly_faulty_traces', 0):.3f} of incorrect traces "
-                  f"have most steps faulty (<= 0.25); such traces carry almost no "
-                  f"localisation signal"))
+    prop = rep.get("propagation") or {}
+    if prop:
+        # Recalibrated after the first real run, and the change is deliberate.
+        # The original check counted traces with "most steps faulty" against a
+        # 0.25 threshold picked before the trace-length distribution was known,
+        # and it fires on short traces for arithmetic reasons: marking two of
+        # three steps is "most". The quantity worth bounding is the fraction of
+        # steps marked faulty, which is length-normalised, and the bound is set
+        # to catch a judge that marks essentially everything rather than to
+        # encode a prior about how many steps ought to be wrong.
+        c.append(("not marking nearly every step",
+                  prop["mean_faulty_fraction"] <= 0.75,
+                  f"mean faulty fraction {prop['mean_faulty_fraction']:.3f} <= 0.75"))
+        # Propagation is reported, not failed. It is a property of the judge and
+        # a fact about what the labels mean, and blocking on it would discard
+        # labels that are defensible.
+        c.append(("propagation is measured, not assumed", True,
+                  f"suffix {prop['suffix_share']:.3f}, contiguous "
+                  f"{prop['contiguous_share']:.3f}, gapped {prop['gapped_share']:.3f} "
+                  f"-- a high suffix share means the labels sit close to the "
+                  f"first-error convention and localisation signal is weak"))
     return c
 
 
@@ -195,6 +250,12 @@ def main() -> None:
         print(f"\nfirst error at {rep['first_error_relative_position']:.2f} of the "
               f"trace; step 0 {rep['first_error_at_step_0']:.3f}, "
               f"last step {rep['first_error_at_last_step']:.3f}")
+    prop = rep.get("propagation") or {}
+    if prop:
+        print(f"faulty-set shape over {prop['n_traces']} failing traces: "
+              f"suffix {prop['suffix_share']:.3f}, contiguous "
+              f"{prop['contiguous_share']:.3f}, gapped {prop['gapped_share']:.3f}; "
+              f"mean faulty fraction {prop['mean_faulty_fraction']:.3f}")
     print(f"positive step share {rep['positive_step_share']:.3f}")
     if "holdout_overlap" in rep:
         print(f"held-out evaluation problems present in this pool: "

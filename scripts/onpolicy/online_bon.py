@@ -203,10 +203,13 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
     chosen_scores: list[float] = []
     pool_scores: list[list[float]] = []
     n = 1 if arm == "plain" else args.n_candidates
+    temp = args.temperature
+    if arm == "plain" and getattr(args, "plain_temperature", None) is not None:
+        temp = args.plain_temperature
     gen_tokens = 0
     for _ in range(args.max_steps):
         cands, used = sample_candidates(backbone, tok, problem, steps, n,
-                                        args.temperature, args.top_p,
+                                        temp, args.top_p,
                                         args.max_new_tokens, args.device)
         gen_tokens += used
         cands = [c for c in cands if c] or [""]
@@ -357,7 +360,16 @@ def main() -> None:
     p.add_argument("--assume_rescale", default=None)
     p.add_argument("--arms", nargs="+", default=list(ARMS), choices=ARMS)
     p.add_argument("--n_candidates", type=int, default=5)
-    p.add_argument("--temperature", type=float, default=1.5)
+    p.add_argument("--temperature", type=float, default=1.5,
+                   help="sampling temperature for the BRANCHING arms; ReProbe uses "
+                        "1.5 for candidate diversity")
+    p.add_argument("--plain_temperature", type=float, default=None,
+                   help="temperature for the plain arm. The base policy's own "
+                        "setting is 1.0; running it at the branching temperature "
+                        "makes it a strawman (0.061 against a true pass@1 of "
+                        "0.366) and makes the absolute numbers incomparable to "
+                        "the self-consistency baseline. Defaults to --temperature "
+                        "only if unset.")
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--max_steps", type=int, default=16)
     p.add_argument("--max_new_tokens", type=int, default=160)

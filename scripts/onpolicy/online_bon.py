@@ -134,8 +134,14 @@ class Checker:
 
         seqs = []
         for i, r in enumerate(rows):
-            span = self._rescale(h[i, n_ctx: len(r)].float())[: self.t_max]
-            seqs.append(span)
+            # The store holds float16 (encode_processbench_token_store.py opens
+            # h.npy as np.float16 and casts with .to(torch.float16)), so the head
+            # was fitted on activations rounded to that precision. Keeping full
+            # precision here is more accurate but not what the head saw, and it
+            # was the entire 0.011 discrepancy: the tokenisation was already
+            # identical, which is why fixing that moved the number not at all.
+            span = h[i, n_ctx: len(r)].to(torch.float16).float()
+            seqs.append(self._rescale(span)[: self.t_max])
 
         t = max(x.shape[0] for x in seqs)
         batch = torch.zeros(len(seqs), t, self.dim, device=self.device)
@@ -235,11 +241,19 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
 
 def verify(checker: Checker, traces_path: Path, offline_scores: Path,
            n_traces: int, tol: float) -> int:
+    """Re-score stored steps through the live path and compare to the cell's own scores.
+
+    Reports the whole distribution, not just the maximum. A systematic mismatch
+    (wrong span, wrong layer, wrong rescaling) shifts every step and shows up in
+    the median; float16 round-off shows up as a small median with a heavier tail.
+    Telling those apart from a single max would be guesswork, and the response to
+    each is different.
+    """
     traces = {}
     for line in open(traces_path):
         r = json.loads(line)
         traces[r["id"]] = r
-    worst, n_cmp = 0.0, 0
+    diffs, n_traces_done = [], 0
     for line in open(offline_scores):
         r = json.loads(line)
         t = traces.get(r["id"])
@@ -250,16 +264,23 @@ def verify(checker: Checker, traces_path: Path, offline_scores: Path,
             continue
         for i in range(min(len(steps), 6)):
             got = checker.score_steps(t["problem"], steps[:i], [steps[i]])[0]
-            worst = max(worst, abs(got - r["scores"][i]))
-            n_cmp += 1
-        n_traces -= 1
-        if n_traces <= 0:
+            diffs.append(abs(got - r["scores"][i]))
+        n_traces_done += 1
+        if n_traces_done >= n_traces:
             break
-    print(f"[verify] compared {n_cmp} steps, max abs difference {worst:.5f}, tolerance {tol}")
-    if worst > tol:
+
+    d = np.asarray(diffs)
+    print(f"[verify] {d.size} steps over {n_traces_done} traces\n"
+          f"[verify]   median {np.median(d):.6f}   p95 {np.percentile(d, 95):.6f}   "
+          f"max {d.max():.6f}   tolerance {tol}")
+    if d.max() > tol:
         print("[verify] FAIL: the online scoring path does not reproduce the "
-              "offline scores. Generation results would be meaningless; fix the "
-              "span or rescaling before running.")
+              "offline scores. Generation results would be meaningless.\n"
+              "[verify] If the MEDIAN is also large the mismatch is systematic "
+              "(span, layer, or rescaling). If the median is near zero and only "
+              "the tail exceeds tolerance, it is float16 round-off in the store "
+              "and the tolerance should be set from measured noise, with the "
+              "evidence recorded, rather than nudged until it passes.")
         return 1
     print("[verify] OK: online scoring reproduces the trained cell's offline scores.")
     return 0

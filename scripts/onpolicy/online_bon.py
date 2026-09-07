@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Step-level guided decoding: let the checker choose the next step as it is written.
+
+Everything measured so far reranks *finished* solutions. This is the other mode
+ReProbe defines, and the one worth wanting:
+
+    Q_online(r_t) = 1 - U(r_t | r_<t, x)
+
+At each position the policy proposes N candidate next steps, the head scores
+each, and the best one is kept and extended. The paper uses N=5 at temperature
+1.5; both are flags here and default to those values.
+
+WHY THERE IS A RANDOM ARM. Branching five ways at every step and keeping any one
+of them is already a different sampler from writing one step and moving on: it
+raises the effective temperature, then filters. So "guided beats plain sampling"
+does not show the head did anything, because the search alone could produce it.
+The comparison that isolates the head is guided against *random choice from the
+same candidate pool*, and that arm is not optional here.
+
+Three arms, sharing problems and seeds so the comparison is paired per problem:
+
+    plain    one step sampled per position, no branching   (the base policy)
+    random   N candidates per position, uniform choice     (search, no checker)
+    guided   N candidates per position, lowest U wins      (search + checker)
+
+plain -> random measures the search. random -> guided measures the checker. Only
+the second is a claim about the verifier.
+
+CORRECTNESS. The head was trained on step spans encoded under `verifier_prefix`
+at one layer, so scoring online has to reproduce that exactly or the numbers mean
+nothing. `--verify_against` re-scores stored trajectories through this file's own
+scoring path and compares against the offline scores that cell already wrote; it
+must agree to within tolerance before any generation run is trusted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from src.harness.learners import build_learner  # noqa: E402
+from src.onpolicy.prompts import generation_prefix, verifier_prefix  # noqa: E402
+from src.eval.math_grade import grade  # noqa: E402
+
+ARMS = ("plain", "random", "guided")
+STEP_SEP = "\n\n"
+
+
+# ---------------------------------------------------------------------------
+# checker
+# ---------------------------------------------------------------------------
+
+class Checker:
+    """A trained cell, rebuilt and applied to freshly generated step text.
+
+    Holds the backbone too, since scoring needs hidden states of the step's
+    tokens under the verifier template, not the generation context.
+    """
+
+    def __init__(self, cell_dir: Path, backbone, tokenizer, layer: int,
+                 stats: dict | None, device: str, t_max: int = 512):
+        res = json.loads((cell_dir / "results.json").read_text())
+        self.rep = res["rep"]
+        if self.rep != "step_tokens":
+            raise ValueError(
+                f"online decoding needs a per-step sequence head; cell rep is {self.rep!r}. "
+                "Pooled readouts (last_token, step_mean, ...) score a step too, but this "
+                "script has only been verified for step_tokens.")
+        self.learner = res["learner"]
+        self.dim = int(res["dim"])
+        self.t_max = int(res.get("protocol", {}).get("t_max", t_max))
+        self.model = build_learner(self.learner, self.dim, t_max=self.t_max)
+        self.model.load_state_dict(torch.load(cell_dir / "model.pt", map_location=device))
+        self.model.to(device).eval()
+        self.backbone = backbone
+        self.tok = tokenizer
+        self.layer = layer
+        self.stats = stats
+        self.device = device
+
+    def _rescale(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.stats:
+            return x
+        mu = torch.as_tensor(self.stats["mean"], dtype=x.dtype, device=x.device)
+        sd = torch.as_tensor(self.stats["std"], dtype=x.dtype, device=x.device)
+        return (x - mu) / sd
+
+    @torch.no_grad()
+    def score_steps(self, problem: str, prior_steps: list[str],
+                    candidates: list[str]) -> list[float]:
+        """P(this step is wrong) for each candidate continuation of the same prefix."""
+        ctx = verifier_prefix(problem, STEP_SEP.join(prior_steps))
+        n_ctx = len(self.tok(ctx, add_special_tokens=False)["input_ids"])
+
+        texts = [ctx + c for c in candidates]
+        enc = self.tok(texts, return_tensors="pt", padding=True,
+                       add_special_tokens=False).to(self.device)
+        out = self.backbone(**enc, output_hidden_states=True)
+        h = out.hidden_states[self.layer]                      # (B, T, D)
+
+        seqs, lens = [], []
+        pad_left = self.tok.padding_side == "left"
+        for i in range(len(candidates)):
+            total = int(enc["attention_mask"][i].sum())
+            off = h.shape[1] - total if pad_left else 0
+            span = h[i, off + n_ctx: off + total]              # (L, D)
+            if span.shape[0] == 0:                             # empty candidate
+                span = h[i, off + total - 1: off + total]
+            span = self._rescale(span.float())[: self.t_max]
+            seqs.append(span)
+            lens.append(span.shape[0])
+
+        t = max(lens)
+        batch = torch.zeros(len(seqs), t, self.dim, device=self.device)
+        mask = torch.zeros(len(seqs), t, dtype=torch.bool, device=self.device)
+        for i, s in enumerate(seqs):
+            batch[i, : s.shape[0]] = s
+            mask[i, : s.shape[0]] = True
+        logits = self.model(batch, mask)
+        if logits.ndim > 1:
+            logits = logits.squeeze(-1)
+        return torch.sigmoid(logits).float().cpu().tolist()
+
+
+# ---------------------------------------------------------------------------
+# generation
+# ---------------------------------------------------------------------------
+
+def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
+                      n: int, temperature: float, top_p: float,
+                      max_new_tokens: int, device: str) -> tuple[list[str], int]:
+    """n candidate next steps, each cut at the first blank line.
+
+    The step splitter downstream segments on blank lines, so a candidate must be
+    exactly one step; generating past the boundary and truncating keeps the
+    sampler's own distribution rather than forcing an early stop token.
+    """
+    ctx = generation_prefix(problem, STEP_SEP.join(prior_steps))
+    enc = tok(ctx, return_tensors="pt", add_special_tokens=False).to(device)
+    with torch.no_grad():
+        out = backbone.generate(
+            **enc, do_sample=True, temperature=temperature, top_p=top_p,
+            num_return_sequences=n, max_new_tokens=max_new_tokens,
+            pad_token_id=tok.pad_token_id or tok.eos_token_id,
+        )
+    n_ctx = enc["input_ids"].shape[1]
+    cands, generated = [], 0
+    for row in out:
+        new = row[n_ctx:]
+        # Every sampled token is paid for, including the candidates thrown away.
+        # Counting only the kept branch would understate branching by ~Nx and
+        # make guided decoding look cheap when it is the opposite.
+        generated += int((new != (tok.pad_token_id or tok.eos_token_id)).sum())
+        text = tok.decode(new, skip_special_tokens=True)
+        cands.append(text.split(STEP_SEP)[0].strip())
+    return cands, generated
+
+
+def is_final(step: str) -> bool:
+    return "\\boxed{" in step
+
+
+def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
+            args, rng: random.Random) -> dict:
+    steps: list[str] = []
+    chosen_scores: list[float] = []
+    pool_scores: list[list[float]] = []
+    n = 1 if arm == "plain" else args.n_candidates
+    gen_tokens = 0
+    for _ in range(args.max_steps):
+        cands, used = sample_candidates(backbone, tok, problem, steps, n,
+                                        args.temperature, args.top_p,
+                                        args.max_new_tokens, args.device)
+        gen_tokens += used
+        cands = [c for c in cands if c] or [""]
+        if arm == "guided":
+            u = checker.score_steps(problem, steps, cands)
+            k = int(np.argmin(u))
+            pool_scores.append([round(x, 5) for x in u])
+            chosen_scores.append(u[k])
+        elif arm == "random":
+            k = rng.randrange(len(cands))
+        else:
+            k = 0
+        steps.append(cands[k])
+        if is_final(cands[k]) or not cands[k]:
+            break
+    solution = STEP_SEP.join(steps)
+    ok = bool(grade(solution, gold))
+    return {"arm": arm, "steps": steps, "n_steps": len(steps),
+            "correct": ok, "chosen_scores": chosen_scores,
+            "pool_scores": pool_scores,
+            # generation tokens actually sampled (discarded branches included),
+            # and how many times the head ran, so cost can be reported per arm
+            # and accuracy compared at a matched token budget
+            "gen_tokens": gen_tokens,
+            "checker_calls": len(pool_scores),
+            "scored_candidates": sum(len(x) for x in pool_scores)}
+
+
+# ---------------------------------------------------------------------------
+# verification: does online scoring reproduce the offline scores?
+# ---------------------------------------------------------------------------
+
+def verify(checker: Checker, traces_path: Path, offline_scores: Path,
+           n_traces: int, tol: float) -> int:
+    traces = {}
+    for line in open(traces_path):
+        r = json.loads(line)
+        traces[r["id"]] = r
+    worst, n_cmp = 0.0, 0
+    for line in open(offline_scores):
+        r = json.loads(line)
+        t = traces.get(r["id"])
+        if t is None:
+            continue
+        steps = t["steps"] if isinstance(t["steps"], list) else eval(t["steps"])
+        if len(steps) != len(r["scores"]):
+            continue
+        for i in range(min(len(steps), 6)):
+            got = checker.score_steps(t["problem"], steps[:i], [steps[i]])[0]
+            worst = max(worst, abs(got - r["scores"][i]))
+            n_cmp += 1
+        n_traces -= 1
+        if n_traces <= 0:
+            break
+    print(f"[verify] compared {n_cmp} steps, max abs difference {worst:.5f}, tolerance {tol}")
+    if worst > tol:
+        print("[verify] FAIL: the online scoring path does not reproduce the "
+              "offline scores. Generation results would be meaningless; fix the "
+              "span or rescaling before running.")
+        return 1
+    print("[verify] OK: online scoring reproduces the trained cell's offline scores.")
+    return 0
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--cell_dir", required=True, type=Path)
+    p.add_argument("--traces", required=True, type=Path,
+                   help="judge traces jsonl: id, problem, gold, problem_id, steps")
+    p.add_argument("--model_name_or_path", required=True)
+    p.add_argument("--local_files_only", action="store_true")
+    p.add_argument("--layer", type=int, default=35)
+    p.add_argument("--stats", type=Path, default=None,
+                   help="rescaling stats json fit on the cell's training split")
+    p.add_argument("--arms", nargs="+", default=list(ARMS), choices=ARMS)
+    p.add_argument("--n_candidates", type=int, default=5)
+    p.add_argument("--temperature", type=float, default=1.5)
+    p.add_argument("--top_p", type=float, default=0.95)
+    p.add_argument("--max_steps", type=int, default=16)
+    p.add_argument("--max_new_tokens", type=int, default=160)
+    p.add_argument("--max_problems", type=int, default=300)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--model_dtype", default="bfloat16")
+    p.add_argument("--out", type=Path, default=None)
+    p.add_argument("--verify_against", type=Path, default=None,
+                   help="pb_step_scores_*.jsonl from the same cell; verify and exit")
+    p.add_argument("--verify_traces", type=int, default=20)
+    p.add_argument("--verify_tol", type=float, default=2e-3)
+    a = p.parse_args()
+
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16,
+             "float32": torch.float32}[a.model_dtype]
+    tok = AutoTokenizer.from_pretrained(a.model_name_or_path,
+                                        local_files_only=a.local_files_only)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tok.padding_side = "left"
+    backbone = AutoModelForCausalLM.from_pretrained(
+        a.model_name_or_path, torch_dtype=dtype, local_files_only=a.local_files_only,
+    ).to(a.device).eval()
+
+    stats = json.loads(a.stats.read_text()) if a.stats else None
+    checker = Checker(a.cell_dir, backbone, tok, a.layer, stats, a.device)
+
+    if a.verify_against:
+        sys.exit(verify(checker, a.traces, a.verify_against,
+                        a.verify_traces, a.verify_tol))
+
+    problems: dict[str, dict] = {}
+    for line in open(a.traces):
+        r = json.loads(line)
+        problems.setdefault(r["problem_id"], r)
+    keys = sorted(problems)[: a.max_problems]
+    print(f"{len(keys)} problems, arms {a.arms}, N={a.n_candidates}, T={a.temperature}")
+
+    a.out.parent.mkdir(parents=True, exist_ok=True) if a.out else None
+    fh = open(a.out, "a") if a.out else None
+    done = set()
+    if a.out and a.out.exists():
+        for line in open(a.out):
+            try:
+                r = json.loads(line)
+                done.add((r["problem_id"], r["arm"]))
+            except json.JSONDecodeError:
+                pass
+        print(f"resuming: {len(done)} rollouts already written")
+
+    t0 = time.time()
+    for i, pid in enumerate(keys):
+        rec = problems[pid]
+        for arm in a.arms:
+            if (pid, arm) in done:
+                continue
+            rng = random.Random(f"{a.seed}:{pid}:{arm}")
+            torch.manual_seed(abs(hash((a.seed, pid, arm))) % (2**31))
+            r = rollout(arm, rec["problem"], rec["gold"], backbone, tok,
+                        checker, a, rng)
+            r["problem_id"] = pid
+            if fh:
+                fh.write(json.dumps(r) + "\n")
+                fh.flush()
+        if (i + 1) % 10 == 0:
+            print(f"  {i+1}/{len(keys)} problems, {time.time()-t0:.0f}s")
+    if fh:
+        fh.close()
+    print(f"[online] done in {time.time()-t0:.0f}s -> {a.out}")
+
+
+if __name__ == "__main__":
+    main()

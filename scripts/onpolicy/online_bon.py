@@ -161,7 +161,8 @@ class Checker:
 
 def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
                       n: int, temperature: float, top_p: float,
-                      max_new_tokens: int, device: str) -> tuple[list[str], int]:
+                      max_new_tokens: int, device: str,
+                      top_k: int = 50) -> tuple[list[str], int]:
     """n candidate next steps, each cut at the first blank line.
 
     The step splitter downstream segments on blank lines, so a candidate must be
@@ -177,6 +178,10 @@ def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
     with torch.no_grad():
         out = backbone.generate(
             **enc, do_sample=True, temperature=temperature, top_p=top_p,
+            # scripts/generate_onpolicy_steps.py samples with top_k=50; omitting
+            # it here made the plain arm a different policy from the one every
+            # baseline in this study describes.
+            top_k=top_k,
             num_return_sequences=n, max_new_tokens=max_new_tokens,
             pad_token_id=tok.pad_token_id or tok.eos_token_id,
         )
@@ -210,7 +215,8 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
     for _ in range(args.max_steps):
         cands, used = sample_candidates(backbone, tok, problem, steps, n,
                                         temp, args.top_p,
-                                        args.max_new_tokens, args.device)
+                                        args.max_new_tokens, args.device,
+                                        getattr(args, "top_k", 50))
         gen_tokens += used
         cands = [c for c in cands if c] or [""]
         if arm == "guided":
@@ -371,6 +377,9 @@ def main() -> None:
                         "the self-consistency baseline. Defaults to --temperature "
                         "only if unset.")
     p.add_argument("--top_p", type=float, default=0.95)
+    p.add_argument("--top_k", type=int, default=50,
+                   help="matches scripts/generate_onpolicy_steps.py; the policy's "
+                        "own setting")
     p.add_argument("--max_steps", type=int, default=16)
     p.add_argument("--max_new_tokens", type=int, default=160)
     p.add_argument("--max_problems", type=int, default=300)

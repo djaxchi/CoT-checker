@@ -41,6 +41,9 @@ ONPOLICY_ROOT="${ONPOLICY_ROOT:-$SCRATCH/cot_mech/onpolicy_v1}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-8B-Base}"
 REP_ROOT="${REP_ROOT:-$RUN_ROOT/repstore/onpolicy_train_spans}"
 CELL="${CELL:-$RUN_ROOT/cells/step_tokens__transformer_d256_l2_f1024_h4__seed42}"
+# The HELD-OUT evaluation problems, disjoint from the 842 the head trained on
+# (the label audit records holdout_overlap = 0). Generating on the training
+# problems would let the checker steer text it was fitted on.
 TRACES="${TRACES:-$ONPOLICY_ROOT/onpolicy_stage1_judge_traces.jsonl}"
 OUT_DIR="${OUT_DIR:-$RUN_ROOT/online_bon}"
 LAYER="${LAYER:-35}"
@@ -52,9 +55,11 @@ NUM_SHARDS="${NUM_SHARDS:-4}"
 ARMS="${ARMS:-plain random guided}"
 
 cd "$PROJECT_ROOT"
-[[ -f models.env ]] && source models.env
+# The Qwen weights live in $STORE/hf_cache, not $SCRATCH/hf_cache, and compute
+# nodes have no internet: pointing at the wrong one fails the offline load.
+HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
 export TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
-export HF_HOME="${HF_CACHE_ROOT:-$SCRATCH/hf_cache}"
+export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 source "$HOME/venvs/cot/bin/activate"
 
@@ -98,6 +103,7 @@ echo
 echo "=== 3. results ==="
 python scripts/analysis/online_bon_report.py \
   --rollouts "$OUT_DIR"/rollouts.shard*.jsonl \
+  --outcomes "$ONPOLICY_ROOT/onpolicy_stage1_outcomes.jsonl" \
   --out "$RUN_ROOT/online_bon_report.json" 2>&1 | tee -a "$LOG"
 
 echo "[done] $OUT_DIR"

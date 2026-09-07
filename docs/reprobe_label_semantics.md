@@ -200,3 +200,47 @@ reported metric rather than a gate. Changing a threshold after seeing the data i
 judges is a real methodological risk, so both the old bound and the reason for
 the change are recorded here rather than quietly edited away, and propagation is
 reported prominently instead of being hidden by a passing check.
+
+
+## The guided-decoding verification gate, and why its tolerance was changed
+
+Before generating anything with the checker in the loop, the runner re-scores
+stored steps through the live scoring path and compares against the offline
+scores that cell already wrote. A span reconstructed even slightly differently
+would produce plausible and wrong generation numbers, so this blocks the run.
+
+It failed four times at essentially one value (0.01095, 0.01095, 0.010947,
+0.010947) against a 0.002 tolerance. Two hypotheses were tested and both were
+wrong, and in each case the giveaway was that the maximum did not move at all:
+
+1. **Tokenisation.** `encode_processbench_token_store.py` tokenises the prefix
+   with special tokens and the step without, then concatenates the id lists,
+   while scoring tokenised the joined string. A real mismatch, fixed, max
+   unchanged.
+2. **Precision.** The store is `np.float16`, so the head was fitted on
+   float16-rounded activations while scoring kept float32. Also real, also
+   fixed, max also unchanged.
+
+The distribution then ruled out the whole class of systematic explanations:
+median 0.000898 against a max of 0.010947. A wrong span, layer or rescaling
+shifts every step and would move the median with it.
+
+What remained was measured rather than assumed. Scoring the same step alone and
+again inside a batch, with identical inputs and identical weights, moves the
+result by median 0.000487, p95 0.005123, max 0.006439. Widening that probe from
+three sequences to eight changed the numbers not at all, which locates the
+discontinuity at batch-of-one versus batched: the two take different kernel
+paths in bf16. The encoder read steps in batches of eight; the verification path
+reads them singly.
+
+So a max tolerance of 0.002 sat below the noise floor of the hardware and could
+not be met by any implementation. The gate now uses two thresholds instead:
+
+- **median <= 0.002**, which is the real check, since a systematic error shifts
+  every step and shows up here;
+- **max <= 0.02**, comfortably above the measured floor, to catch gross breakage
+  without gating on numerics.
+
+Recorded because a threshold loosened after seeing the data it governs is
+exactly the move that should attract suspicion. The evidence for the change is
+the floor measurement above, which was taken before the threshold was chosen.

@@ -150,3 +150,29 @@ def test_checker_workload_is_recorded_for_the_guided_arm_only(patched):
     r = online_bon.rollout("random", "p", "g", None, None, ch, args, random.Random(0))
     assert g["checker_calls"] == 2 and g["scored_candidates"] == 6
     assert r["checker_calls"] == 0 and r["scored_candidates"] == 0
+
+
+# --------------------------------------------------------------------------
+# the report: the contrast that isolates the checker must be the one reported
+# --------------------------------------------------------------------------
+
+def test_mcnemar_counts_only_disagreements():
+    from scripts.analysis.online_bon_report import mcnemar
+    a = {f"p{i}": True for i in range(10)}
+    b = dict(a)
+    assert mcnemar(a, b)["n_discordant"] == 0
+
+    b["p0"] = False          # a wins one
+    b["p1"] = False          # a wins two
+    a["p2"] = False          # b wins one
+    m = mcnemar(a, b)
+    assert m["a_wins"] == 2 and m["b_wins"] == 1 and m["n_discordant"] == 3
+
+
+def test_paired_bootstrap_recovers_the_accuracy_difference():
+    from scripts.analysis.online_bon_report import paired_bootstrap
+    a = {f"p{i}": False for i in range(100)}
+    b = {f"p{i}": i < 20 for i in range(100)}   # b right on 20 more
+    d, lo, hi = paired_bootstrap(a, b, n_boot=400)
+    assert d == pytest.approx(0.20, abs=1e-9)
+    assert lo < 0.20 < hi

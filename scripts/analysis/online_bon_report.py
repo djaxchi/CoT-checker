@@ -27,10 +27,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
 
 ARMS = ("plain", "random", "guided")
 
@@ -64,6 +68,12 @@ def main() -> None:
                         "0.560 self-consistency is over 300 problems and four of "
                         "them have no source record, so quoting it against a "
                         "296-problem run would be comparing different sets.")
+    p.add_argument("--regrade_with", type=Path, default=None,
+                   help="judge traces jsonl (problem_id -> gold). Recomputes the "
+                        "correct flag from the saved step text. The first run "
+                        "took bool() of grade()'s dict, which is always True, so "
+                        "every rollout was scored correct; the generations "
+                        "themselves are fine and re-gradable without rerunning.")
     p.add_argument("--n_boot", type=int, default=2000)
     p.add_argument("--out", type=Path, default=None)
     a = p.parse_args()
@@ -73,6 +83,23 @@ def main() -> None:
         for line in open(f):
             r = json.loads(line)
             by_arm[r["arm"]][r["problem_id"]] = r
+    if a.regrade_with:
+        from src.eval.math_grade import grade as _grade
+        gold = {}
+        for line in open(a.regrade_with):
+            r = json.loads(line)
+            gold.setdefault(r["problem_id"], r["gold"])
+        n_flip = 0
+        for arm in by_arm:
+            for pid, r in by_arm[arm].items():
+                g = _grade("\n\n".join(r["steps"]), gold[pid])
+                if bool(g["correct"]) != bool(r["correct"]):
+                    n_flip += 1
+                r["correct"] = bool(g["correct"])
+                r["gradeable"] = bool(g["gradeable"])
+        print(f"[regrade] recomputed {n_flip} of "
+              f"{sum(len(v) for v in by_arm.values())} rollouts from saved text\n")
+
     arms = [x for x in ARMS if x in by_arm]
     if not arms:
         raise SystemExit("no rollouts found")

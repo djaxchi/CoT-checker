@@ -48,7 +48,12 @@ def patched(monkeypatch):
         return pool[:n], 7 * n
 
     monkeypatch.setattr(online_bon, "sample_candidates", fake_sample)
-    monkeypatch.setattr(online_bon, "grade", lambda sol, gold: "good" in sol)
+    # Mirror the real return shape: grade() gives a dict, not a bool. The stub
+    # returning a bool is what let the truthiness bug through unnoticed.
+    monkeypatch.setattr(online_bon, "grade",
+                        lambda sol, gold: {"pred": gold, "gold_norm": gold,
+                                           "correct": "good" in sol,
+                                           "gradeable": True})
     return pools
 
 
@@ -176,3 +181,32 @@ def test_paired_bootstrap_recovers_the_accuracy_difference():
     d, lo, hi = paired_bootstrap(a, b, n_boot=400)
     assert d == pytest.approx(0.20, abs=1e-9)
     assert lo < 0.20 < hi
+
+
+def test_rollout_reads_the_correct_field_not_the_grade_dict(monkeypatch):
+    """grade() returns a dict, and bool(dict) is True for any non-empty dict.
+
+    Taking its truthiness marked every rollout correct and produced 1.000
+    accuracy for all three arms on a pool whose pass@1 is 0.366. The arms are
+    only meaningful if a wrong answer can be scored wrong, so this pins it.
+    """
+    pools = {}
+
+    def fake_sample(backbone, tok, problem, prior_steps, n, *a, **k):
+        return ["the answer is \\boxed{3}"][:n] or ["x"], 7 * n
+
+    monkeypatch.setattr(online_bon, "sample_candidates", fake_sample)
+    monkeypatch.setattr(online_bon, "grade",
+                        lambda sol, gold: {"pred": "3", "gold_norm": gold,
+                                           "correct": False, "gradeable": True})
+    ch = FakeChecker({"the answer is \\boxed{3}": 0.1})
+    r = online_bon.rollout("guided", "p", "7", None, None, ch, _args(max_steps=1),
+                           random.Random(0))
+    assert r["correct"] is False, "a wrong answer must be scored wrong"
+
+    monkeypatch.setattr(online_bon, "grade",
+                        lambda sol, gold: {"pred": "7", "gold_norm": gold,
+                                           "correct": True, "gradeable": True})
+    r = online_bon.rollout("guided", "p", "7", None, None, ch, _args(max_steps=1),
+                           random.Random(0))
+    assert r["correct"] is True

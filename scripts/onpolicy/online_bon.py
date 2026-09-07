@@ -223,9 +223,12 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
         if is_final(cands[k]) or not cands[k]:
             break
     solution = STEP_SEP.join(steps)
-    ok = bool(grade(solution, gold))
+    # grade() returns a dict; bool() of it is always True. Take the field.
+    g = grade(solution, gold)
+    ok = bool(g["correct"])
     return {"arm": arm, "steps": steps, "n_steps": len(steps),
-            "correct": ok, "chosen_scores": chosen_scores,
+            "correct": ok, "gradeable": bool(g["gradeable"]), "pred": g["pred"],
+            "chosen_scores": chosen_scores,
             "pool_scores": pool_scores,
             # generation tokens actually sampled (discarded branches included),
             # and how many times the head ran, so cost can be reported per arm

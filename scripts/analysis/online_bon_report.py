@@ -143,6 +143,37 @@ def main() -> None:
               f"McNemar p={mc['p']:.4g} ({hi} wins {mc['b_wins']}, {lo} wins {mc['a_wins']})"
               f"   {what}")
 
+    # Length control. The arms do not produce equally long solutions, and on this
+    # pool length alone gives trajectory AUROC 0.561 while picking the shortest
+    # solution scores 0.350. So if guided writes shorter solutions than random,
+    # part of any gain could be length rather than verification. This asks
+    # directly: on the problems where guided wins and random loses, is guided
+    # also the shorter one more often than chance?
+    if "guided" in by_arm and "random" in by_arm:
+        shorter_when_winning, n_win = 0, 0
+        shorter_when_losing, n_lose = 0, 0
+        dsteps = []
+        for k in sorted(common):
+            g, r = by_arm["guided"][k], by_arm["random"][k]
+            dsteps.append(g["n_steps"] - r["n_steps"])
+            if g["correct"] and not r["correct"]:
+                n_win += 1
+                shorter_when_winning += int(g["n_steps"] < r["n_steps"])
+            elif r["correct"] and not g["correct"]:
+                n_lose += 1
+                shorter_when_losing += int(g["n_steps"] < r["n_steps"])
+        rate_w = shorter_when_winning / n_win if n_win else float("nan")
+        rate_l = shorter_when_losing / n_lose if n_lose else float("nan")
+        report["length_control"] = {
+            "mean_step_delta_guided_minus_random": float(np.mean(dsteps)),
+            "guided_shorter_when_it_wins": rate_w, "n_wins": n_win,
+            "guided_shorter_when_it_loses": rate_l, "n_losses": n_lose,
+        }
+        print(f"\nlength control: guided runs {np.mean(dsteps):+.2f} steps vs random on average.")
+        print(f"  when guided wins ({n_win} problems) it is the shorter solution {rate_w:.2f} of the time")
+        print(f"  when guided loses ({n_lose} problems) it is the shorter solution {rate_l:.2f} of the time")
+        print("  a large gap between those two rates means the gain tracks length, not verification")
+
     if "guided" in by_arm and "plain" in by_arm:
         g = report["arms"]["guided"]
         pl = report["arms"]["plain"]

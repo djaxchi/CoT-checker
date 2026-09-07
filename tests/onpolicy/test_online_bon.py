@@ -231,3 +231,37 @@ def test_plain_arm_can_use_its_own_temperature(patched, monkeypatch):
     online_bon.rollout("random", "p", "g", None, None, ch, args, random.Random(0))
     assert seen[1] == 1.0, "plain must sample at the policy's own temperature"
     assert seen[3] == 1.5, "branching arms keep the diversity temperature"
+
+
+def test_sampler_passes_the_policys_top_k(monkeypatch):
+    """The generator that produced every baseline samples with top_k=50.
+
+    Omitting it made the plain arm a different policy, which is part of why it
+    scored 0.193 against a true pass@1 of 0.366.
+    """
+    seen = {}
+
+    class FakeTok:
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, text, **kw):
+            class E(dict):
+                def to(self, d):
+                    return self
+            e = E(input_ids=__import__("torch").zeros((1, 3), dtype=__import__("torch").long))
+            return e
+
+        def decode(self, ids, **kw):
+            return "a step"
+
+    class FakeBackbone:
+        def generate(self, **kw):
+            seen.update(kw)
+            import torch
+            return torch.zeros((kw["num_return_sequences"], 5), dtype=torch.long)
+
+    online_bon.sample_candidates(FakeBackbone(), FakeTok(), "p", [], 3,
+                                 1.5, 0.95, 64, "cpu", top_k=50)
+    assert seen["top_k"] == 50
+    assert seen["temperature"] == 1.5 and seen["top_p"] == 0.95

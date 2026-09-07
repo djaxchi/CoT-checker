@@ -1780,14 +1780,36 @@ usefulness".
 
 ### 20.4 Compatibility with published ReProbe behaviour
 
-Nothing here contradicts ReProbe. Two differences are sufficient to reconcile
-them. ReProbe trains its probe **on-policy**, labelling the target model's own
-steps with DeepSeek-R1; these nineteen verifiers were trained on PRM800K and have
-never seen a Qwen-generated step, so experiment A is a transfer test by
-construction. And much of the PRM literature reports best-of-N against greedy or
-random selection, where these verifiers win clearly (0.503 against 0.375);
-self-consistency at N=10 is a substantially harder bar and is the one used here.
-Experiment B exists to close the first difference.
+Checked against the PDF rather than inferred. Two of the three claims this
+section previously rested on survive; the third does not, and the correction
+matters because it is the point where our result and theirs genuinely differ.
+
+**Their beam-search table (Table 2), which is the step-level online mode, carries
+no majority-voting or pass@N baseline at all.** It compares ReProbes against PRMs
+only. So for the mode where the verifier steers generation, the paper does not
+report whether counting would have done as well.
+
+**Their best-of-N table (Table 3) does report majority voting, on the three
+datasets with verifiable answers, and ReProbe beats it on all three.** Majority
+voting scores 97.6 on GSM8k, 86.6 on StrategyQA and 92.5 on ScienceQA; the best
+ReProbe variant scores 97.8, 88.6 and 97.1. That is a real win of +0.2, +2.0 and
++4.6, and it is the opposite of what we find. An earlier draft of this section
+implied the comparison was largely avoided, which was wrong.
+
+The candidate reconciliation is difficulty, and it should be read as a hypothesis
+rather than a resolution. Their tasks are close to saturated: Qwen3-8B scores
+pass@1 of 95.6 on GSM8k, 86.8 on StrategyQA and 92.7 on ScienceQA, so majority
+voting starts from a very high floor and the margins above it are small. Our pool
+sits at pass@1 0.375 with self-consistency at 0.560 and an oracle ceiling of
+0.700, which is a regime with far more headroom and, apparently, a much harder
+bar. Whether a verifier's advantage over counting survives into that regime is
+exactly what these experiments measure, and here it does not.
+
+The remaining difference is training distribution. ReProbe labels the target
+model's own steps with DeepSeek-R1; the nineteen frozen verifiers were trained on
+PRM800K and had never seen a Qwen-generated step, so experiment A is a transfer
+test by construction. Experiment B closes that difference and does not change the
+outcome: every retrained verifier still loses to counting.
 
 ### 20.5 Judges, and why the annotator question consumed real effort
 

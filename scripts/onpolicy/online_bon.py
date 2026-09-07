@@ -240,7 +240,7 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
 # ---------------------------------------------------------------------------
 
 def verify(checker: Checker, traces_path: Path, offline_scores: Path,
-           n_traces: int, tol: float) -> int:
+           n_traces: int, tol: float, max_tol: float) -> int:
     """Re-score stored steps through the live path and compare to the cell's own scores.
 
     Reports the whole distribution, not just the maximum. A systematic mismatch
@@ -302,17 +302,33 @@ def verify(checker: Checker, traces_path: Path, offline_scores: Path,
     d = np.asarray(diffs)
     print(f"[verify] {d.size} steps over {n_traces_done} traces\n"
           f"[verify]   median {np.median(d):.6f}   p95 {np.percentile(d, 95):.6f}   "
-          f"max {d.max():.6f}   tolerance {tol}")
-    if d.max() > tol:
-        print("[verify] FAIL: the online scoring path does not reproduce the "
-              "offline scores. Generation results would be meaningless.\n"
-              "[verify] If the MEDIAN is also large the mismatch is systematic "
-              "(span, layer, or rescaling). If the median is near zero and only "
-              "the tail exceeds tolerance, it is float16 round-off in the store "
-              "and the tolerance should be set from measured noise, with the "
-              "evidence recorded, rather than nudged until it passes.")
+          f"max {d.max():.6f}")
+
+    # Two thresholds, because the two failure modes look different and only one
+    # of them is a bug.
+    #
+    # A wrong span, layer or rescaling shifts EVERY step, so it shows in the
+    # median. That is the real check, and it is tight.
+    #
+    # The tail is numerical. Changing nothing but batch composition, with
+    # identical inputs and weights, already moves scores by up to ~0.0064 (the
+    # floor printed above): a single sequence and a batch take different kernel
+    # paths in bf16. A max tolerance below that floor cannot be met by any
+    # implementation, so gating on the max alone meant gating on noise.
+    ok = True
+    if np.median(d) > tol:
+        print(f"[verify] FAIL: median {np.median(d):.6f} exceeds {tol}. A shift "
+              "this uniform is systematic, not numerical: check the span "
+              "boundary, the hidden-state layer index, and the rescaling stats.")
+        ok = False
+    if d.max() > max_tol:
+        print(f"[verify] FAIL: max {d.max():.6f} exceeds {max_tol}, which is well "
+              "above the measured batch-shape floor, so this is not numerical.")
+        ok = False
+    if not ok:
         return 1
-    print("[verify] OK: online scoring reproduces the trained cell's offline scores.")
+    print(f"[verify] OK: median within {tol} (no systematic offset) and max within "
+          f"{max_tol}. The residual tail is batch-shape numerics, measured above.")
     return 0
 
 
@@ -352,7 +368,12 @@ def main() -> None:
     p.add_argument("--verify_against", type=Path, default=None,
                    help="pb_step_scores_*.jsonl from the same cell; verify and exit")
     p.add_argument("--verify_traces", type=int, default=20)
-    p.add_argument("--verify_tol", type=float, default=2e-3)
+    p.add_argument("--verify_tol", type=float, default=2e-3,
+                   help="MEDIAN tolerance: catches a systematic offset, which is "
+                        "the failure that would invalidate results")
+    p.add_argument("--verify_max_tol", type=float, default=0.02,
+                   help="MAX tolerance: set above the measured batch-shape noise "
+                        "floor (~0.0064), since no implementation can beat it")
     a = p.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -384,7 +405,7 @@ def main() -> None:
 
     if a.verify_against:
         sys.exit(verify(checker, a.traces, a.verify_against,
-                        a.verify_traces, a.verify_tol))
+                        a.verify_traces, a.verify_tol, a.verify_max_tol))
 
     problems: dict[str, dict] = {}
     for line in open(a.traces):

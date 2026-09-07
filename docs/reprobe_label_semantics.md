@@ -244,3 +244,45 @@ not be met by any implementation. The gate now uses two thresholds instead:
 Recorded because a threshold loosened after seeing the data it governs is
 exactly the move that should attract suspicion. The evidence for the change is
 the floor measurement above, which was taken before the threshold was chosen.
+
+
+## Efficiency claims, verified from the PDF
+
+The cost argument for hidden-state verification is the part of ReProbe that
+transfers most directly, so the numbers are quoted here rather than paraphrased.
+
+> Despite using 750-810x fewer parameters than [PRMs]
+
+> lightweight, containing fewer than 10M parameters
+
+> ReProbe in current implementation achieves a 2.6x-25x speedup over
+> state-of-the-art PRMs
+
+Their runtime benchmark (Table 13, 500 MATH samples, batch size 1) excludes LLM
+generation and step extraction; for ReProbe it counts feature extraction plus the
+classifier forward pass, and for PRMs the full model inference. Training cost is
+given as 4 GH200 GPU-hours over 32K samples.
+
+Ours for comparison: the step_tokens transformer cell is 2,759,681 parameters,
+roughly a third of their 9.8M UHead and about 2,500x smaller than a 7B PRM, and
+it reads a forward pass the generator is already running. Training used 43,837
+labelled steps.
+
+Two cost claims follow and they must not be merged, because they point opposite
+ways:
+
+1. **Verifier cost.** A hidden-state head is a rounding error against a second
+   7B forward pass. This is the claim that survives without qualification, and it
+   holds whether or not the verifier is useful.
+2. **Generation cost.** Guided decoding branches N ways per step, so it samples
+   roughly N times the tokens. A cheap verifier does not make the search cheap.
+   The honest comparison is accuracy at a matched token budget against
+   self-consistency, which is why scripts/analysis/online_bon_report.py reports
+   accuracy per thousand generation tokens with discarded branches counted in
+   the denominator.
+
+A third claim is worth testing and is not theirs: because a verifier can identify
+a doomed prefix before the solution is finished, it could reduce tokens rather
+than only reallocate them. Our labels place first errors 0.38 of the way through
+on average, so the headroom is real, and an early-abandonment arm would measure
+it directly.

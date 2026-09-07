@@ -285,10 +285,13 @@ def verify(checker: Checker, traces_path: Path, offline_scores: Path,
             continue
         for i in range(min(len(steps), 4)):
             alone = checker.score_steps(t["problem"], steps[:i], [steps[i]])[0]
-            # same step, but batched beside longer neighbours so it is padded
-            padded = checker.score_steps(
-                t["problem"], steps[:i],
-                [steps[i], steps[i] + " " + "x " * 200, steps[i] + " y"])[0]
+            # Same step, but in a batch of 8 with widely varying lengths, which
+            # is what the encoder actually did (BATCH_SIZE=8). A 3-element probe
+            # understates the floor: the perturbation grows with how much padding
+            # and length spread the batch carries.
+            neigh = [steps[i]] + [steps[i] + " " + "x " * k
+                                  for k in (1, 5, 20, 60, 120, 250, 400)]
+            padded = checker.score_steps(t["problem"], steps[:i], neigh)[0]
             floor.append(abs(alone - padded))
         if len(floor) >= 40:
             break

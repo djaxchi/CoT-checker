@@ -100,34 +100,49 @@ class Checker:
     @torch.no_grad()
     def score_steps(self, problem: str, prior_steps: list[str],
                     candidates: list[str]) -> list[float]:
-        """P(this step is wrong) for each candidate continuation of the same prefix."""
+        """P(this step is wrong) for each candidate continuation of the same prefix.
+
+        Tokenisation mirrors scripts/encode_processbench_token_store.py exactly:
+        the prefix is tokenised WITH special tokens, the step WITHOUT, and the id
+        lists are concatenated rather than the strings. Tokenising the joined
+        string instead merges tokens across the prefix/step boundary and drops
+        the BOS, which moved scores by ~0.011 and failed the verification gate.
+        """
         ctx = verifier_prefix(problem, STEP_SEP.join(prior_steps))
-        n_ctx = len(self.tok(ctx, add_special_tokens=False)["input_ids"])
+        prefix_ids = self.tok(ctx, add_special_tokens=True,
+                              truncation=False)["input_ids"]
+        n_ctx = len(prefix_ids)
 
-        texts = [ctx + c for c in candidates]
-        enc = self.tok(texts, return_tensors="pt", padding=True,
-                       add_special_tokens=False).to(self.device)
-        out = self.backbone(**enc, output_hidden_states=True)
-        h = out.hidden_states[self.layer]                      # (B, T, D)
+        rows = []
+        for c in candidates:
+            step_ids = self.tok(c, add_special_tokens=False,
+                                truncation=False)["input_ids"]
+            if not step_ids:                       # empty candidate: score its boundary
+                step_ids = prefix_ids[-1:]
+            rows.append(prefix_ids + step_ids)
 
-        seqs, lens = [], []
-        pad_left = self.tok.padding_side == "left"
-        for i in range(len(candidates)):
-            total = int(enc["attention_mask"][i].sum())
-            off = h.shape[1] - total if pad_left else 0
-            span = h[i, off + n_ctx: off + total]              # (L, D)
-            if span.shape[0] == 0:                             # empty candidate
-                span = h[i, off + total - 1: off + total]
-            span = self._rescale(span.float())[: self.t_max]
+        # Right padding, so a step span is always [n_ctx, n_ctx + len(step_ids)).
+        t_in = max(len(r) for r in rows)
+        pad = self.tok.pad_token_id or self.tok.eos_token_id
+        ids = torch.full((len(rows), t_in), pad, dtype=torch.long, device=self.device)
+        att = torch.zeros((len(rows), t_in), dtype=torch.long, device=self.device)
+        for i, r in enumerate(rows):
+            ids[i, : len(r)] = torch.tensor(r, device=self.device)
+            att[i, : len(r)] = 1
+        h = self.backbone(input_ids=ids, attention_mask=att,
+                          output_hidden_states=True).hidden_states[self.layer]
+
+        seqs = []
+        for i, r in enumerate(rows):
+            span = self._rescale(h[i, n_ctx: len(r)].float())[: self.t_max]
             seqs.append(span)
-            lens.append(span.shape[0])
 
-        t = max(lens)
+        t = max(x.shape[0] for x in seqs)
         batch = torch.zeros(len(seqs), t, self.dim, device=self.device)
         mask = torch.zeros(len(seqs), t, dtype=torch.bool, device=self.device)
-        for i, s in enumerate(seqs):
-            batch[i, : s.shape[0]] = s
-            mask[i, : s.shape[0]] = True
+        for i, x in enumerate(seqs):
+            batch[i, : x.shape[0]] = x
+            mask[i, : x.shape[0]] = True
         logits = self.model(batch, mask)
         if logits.ndim > 1:
             logits = logits.squeeze(-1)
@@ -148,7 +163,11 @@ def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
     sampler's own distribution rather than forcing an early stop token.
     """
     ctx = generation_prefix(problem, STEP_SEP.join(prior_steps))
-    enc = tok(ctx, return_tensors="pt", add_special_tokens=False).to(device)
+    # add_special_tokens defaults to True, matching what
+    # scripts/generate_onpolicy_steps.py sends to model.generate. Dropping the
+    # BOS here would sample from a different distribution than the policy whose
+    # behaviour every baseline in this study describes.
+    enc = tok(ctx, return_tensors="pt").to(device)
     with torch.no_grad():
         out = backbone.generate(
             **enc, do_sample=True, temperature=temperature, top_p=top_p,

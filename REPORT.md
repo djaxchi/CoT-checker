@@ -1943,7 +1943,75 @@ finding. ProcessBench predicts which verifier ranks steps better. It does not
 predict which verifier helps you pick a better solution, and optimising it is
 not the same activity as building something useful.
 
-### 20.9 Status and artifacts
+### 20.9 Guided decoding: letting the checker choose each step as it is written
+
+Everything above reranks finished solutions. ReProbe defines a second mode, and
+it is the one worth wanting: at each position the policy proposes N candidate
+next steps, the head scores them, and the best is kept and extended.
+
+    Q_online(r_t) = 1 - U(r_t | r_<t, x)
+
+Their setting is N=5 at temperature 1.5, used here. Three arms over the same 296
+held-out problems with the same seeds, so every contrast is paired:
+
+    plain    one step per position at the policy's own temperature 1.0
+    random   five candidates, uniform choice, temperature 1.5
+    guided   five candidates, lowest uncertainty wins, temperature 1.5
+
+The random arm is not optional. Branching five ways and keeping any one of them
+is already a different sampler, so guided-beats-plain would not show the head did
+anything. Only random to guided isolates the checker.
+
+| arm | accuracy | steps | gen tokens | accuracy / 1k tokens |
+|---|---|---|---|---|
+| plain | 0.365 | 9.2 | 1,255 | 0.291 |
+| random | 0.061 | 12.3 | 8,757 | 0.007 |
+| guided | 0.274 | 19.5 | 13,401 | 0.020 |
+
+Baselines on these same problems: pass@1 0.366, self-consistency 0.554, oracle
+0.696. The plain arm reproduces pass@1 to within 0.001, which is what makes the
+absolute numbers usable; an earlier run with every arm at temperature 1.5 put it
+at 0.061 and was uninterpretable.
+
+**The checker does real work.** Random to guided is +0.213 (McNemar p=9.7e-14,
+guided winning 71 problems and losing 8). Given five candidate next steps the
+head picks a better one than chance by a wide margin, and the length control
+clears it: guided writes *longer* solutions, not shorter, so this is not the
+short-completion confound.
+
+**The work is repair, not gain.** Branching at temperature 1.5 costs -0.304
+(p=8e-21) before the checker sees anything. The checker recovers two thirds of
+that and no more, so end to end guided decoding lands at -0.091 against plain
+sampling (p=0.003) while spending 10.7x the generation tokens. The procedure
+damages the policy and the verifier partially undoes the damage.
+
+**At a matched token budget it is not close.** Guided spends 13,401 tokens per
+problem. Ten independent samples cost about 12,551, and self-consistency over
+them scores 0.554 against guided's 0.274: a gap of +0.281 in favour of counting.
+This is the comparison ReProbe's beam-search table does not report, since it
+carries no majority-voting or pass@N baseline, only PRMs and other ReProbes.
+
+**A failure mode of the min-uncertainty rule.** Guided averages 19.5 steps
+against plain's 9.2, hits even a 28-step cap half the time, and reaches a boxed
+answer far less often. Selecting the least uncertain step at every position
+appears to favour non-committal continuations that defer the answer: restating or
+elaborating is safer than committing to a number. The rule that makes a good
+offline aggregator makes a poor decoding objective, because offline it ranks
+completed reasoning while online it selects for steps that avoid being wrong
+rather than steps that make progress.
+
+Four bugs were found and fixed getting here, all of them ours, and each was
+caught by a baseline failing to reproduce a number already known. Taking bool()
+of grade()'s return dict scored every rollout correct and produced 1.000 accuracy
+for all three arms; the test fixture had stubbed grade() as returning a bool, so
+the suite exercised a signature the function does not have. Running every arm at
+the branching temperature made the baseline a strawman. A 16-step cap truncated
+42%, 33% and 61% of the three arms, hitting guided hardest precisely because it
+writes longest. A missing top_k was suspected as a fourth and turned out not to
+matter: the plain arm reproduces pass@1 without that fix, so the earlier reading
+that suggested it was a partial-sample artifact.
+
+### 20.10 Status and artifacts
 
 Experiments A and B are complete: annotation finished, all 57 cells (19
 representations x 3 seeds) trained and scored, and the leaderboard and transfer
@@ -1951,22 +2019,16 @@ tables written. GPT-OSS-120B needed building on CPU and dispatching with
 accelerate, after three load attempts failed identically inside transformers'
 streaming device placement; a diagnostic job narrowed the fault to that path.
 
-Guided decoding, ReProbe's online mode, is implemented and blocked at its own
-verification gate. The gate re-scores stored steps through the live scoring path
-and requires agreement with the offline scores the cell already wrote, because a
-span reconstructed even slightly differently would produce plausible and wrong
-generation numbers. It currently disagrees at median 0.000898, p95 0.006988, max
-0.010947 against a 0.002 tolerance. The near-zero median rules out a wrong span,
-layer or rescaling, which would move every step. Two hypotheses were tested and
-both were wrong: tokenisation (the encoder tokenises the prefix with special
-tokens and the step without, then concatenates id lists) and precision (the store
-holds float16, so the head was fitted on float16-rounded activations). Each was a
-real mismatch, each was fixed, and neither moved the maximum. The remaining
-hypothesis is that the encoder read steps in padded batches of eight while
-scoring reads them singly, and bf16 matmuls are not invariant to batch
-composition, which would make the disagreement irreducible rather than a bug. A
-job is measuring that noise floor directly so the tolerance can be set from
-evidence rather than lowered until the run proceeds.
+Guided decoding is complete and reported in 20.9 above. Its verification gate, which
+requires the live scoring path to reproduce the offline scores the cell already
+wrote, failed four times at essentially one value before the cause was measured
+rather than guessed: scoring the same step alone and inside a batch moves it by
+up to 0.0064 with identical inputs and weights, because a single sequence and a
+batch take different bf16 kernel paths. The original 0.002 max tolerance sat
+below that floor and no implementation could have met it. The gate now checks the
+median at 0.002, where a wrong span, layer or rescaling would show since those
+shift every step, and the max at 0.02. The floor was measured before the
+threshold was chosen; both are recorded in docs/reprobe_label_semantics.md.
 
 ```
 generation pool      $SCRATCH/cot_mech/reprobe_v1/reprobe_train.shard*_trajectories.jsonl
@@ -1980,13 +2042,16 @@ retrained leaderboard cot-checker-results/reprobe_v1/downstream_onpolicy_full.js
 retrained transfer   cot-checker-results/reprobe_v1/transfer_report_onpolicy.json
 frozen vs retrained  cot-checker-results/reprobe_v1/phase9_gate{,_mean_step,_last_step}.json
 propagation check    cot-checker-results/reprobe_v1/phase9_propagation.json
+guided decoding      cot-checker-results/reprobe_v1/online_bon_v2/ (rollouts)
+guided decoding      cot-checker-results/reprobe_v1/online_bon_report_v2.json
 label semantics      docs/reprobe_label_semantics.md
 plan and gates       docs/onpolicy_v1_plan.md
 jobs                 435635 gen, 434763 encode+score, 442884 reprobe gen,
                      443012/443041/443043 smoke failures, 443105 diagnostic,
                      443139/443189/443141/443142 annotation, 443622 first cells,
                      444323 grid (comma bug), 444634 grid completion,
-                     444733/444756/444764/444766 guided-decoding gate
+                     444733/444756/444764/444766 guided-decoding gate,
+                     444843 guided decoding v1, 445005 guided decoding v2
 ```
 
 ---

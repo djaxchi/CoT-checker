@@ -269,6 +269,33 @@ def verify(checker: Checker, traces_path: Path, offline_scores: Path,
         if n_traces_done >= n_traces:
             break
 
+    # Noise floor: the same step scored under two batch shapes. The encoder read
+    # steps in padded batches; this scores them singly, and bf16 matmuls are not
+    # invariant to batch composition. Any disagreement below this floor is not a
+    # bug and cannot be fixed by changing the scoring code, so the gate tolerance
+    # has to be set above it or it can never pass.
+    floor = []
+    for line in open(offline_scores):
+        r = json.loads(line)
+        t = traces.get(r["id"])
+        if t is None:
+            continue
+        steps = t["steps"] if isinstance(t["steps"], list) else eval(t["steps"])
+        if len(steps) != len(r["scores"]):
+            continue
+        for i in range(min(len(steps), 4)):
+            alone = checker.score_steps(t["problem"], steps[:i], [steps[i]])[0]
+            # same step, but batched beside longer neighbours so it is padded
+            padded = checker.score_steps(
+                t["problem"], steps[:i],
+                [steps[i], steps[i] + " " + "x " * 200, steps[i] + " y"])[0]
+            floor.append(abs(alone - padded))
+        if len(floor) >= 40:
+            break
+    f = np.asarray(floor) if floor else np.zeros(1)
+    print(f"[verify] batch-shape noise floor over {f.size} steps: "
+          f"median {np.median(f):.6f}  p95 {np.percentile(f, 95):.6f}  max {f.max():.6f}")
+
     d = np.asarray(diffs)
     print(f"[verify] {d.size} steps over {n_traces_done} traces\n"
           f"[verify]   median {np.median(d):.6f}   p95 {np.percentile(d, 95):.6f}   "

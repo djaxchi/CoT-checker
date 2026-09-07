@@ -1843,15 +1843,108 @@ One agreement worth recording: the paper's `Q_offline` is the minimum over steps
 of P(correct), which ranks identically to the `worst_step` aggregation already
 reported as primary.
 
-### 20.7 Status and artifacts
+### 20.7 Training the verifier on the model's own reasoning
 
-Experiment A is complete. Experiment B is blocked on annotation: GPT-OSS-120B is
-downloaded and verified (15/15 shards, MXFP4, 61 GiB), and three load attempts
-failed identically inside transformers' streaming device placement. A diagnostic
-job established that host-to-device copies work, the real MXFP4 shards read and
-move, and the model builds on CPU at 116.8B parameters in bfloat16, so the fault
-is narrowly the placement path and the fix is to build on CPU and dispatch with
-accelerate.
+The frozen-transfer arm leaves an obvious objection open: those verifiers were
+fitted on human-labelled PRM800K text and had never seen Qwen's writing, so their
+failure to beat counting might be a distribution problem rather than a statement
+about hidden-state verification. Experiment B removes that objection by
+retraining every head on Qwen's own trajectories and changing nothing else.
+
+GPT-OSS-120B, run locally on the cluster with no paid API, annotated 5,686
+trajectories; 5,483 parsed and were kept, giving 51,711 steps over 991 problems.
+The audit passes eight checks: 96.4% parsed, no duplicate ids, faults in 89.5% of
+failing trajectories against 19.1% of succeeding ones (discrimination 0.704),
+first errors 0.38 of the way through with 21.9% at step 0, positive step share
+0.293, and zero evaluation problems in the pool. Splits are by problem, never by
+trajectory: 4,657 traces and 43,837 steps over 842 problems for training, 826
+traces over 149 disjoint problems for validation. All nineteen leaderboard cells
+were then retrained over seeds 42/43/44 on that one frozen label set and scored
+on the same held-out trajectories the frozen verifiers were scored on, so the
+comparison is paired trajectory by trajectory.
+
+Training on the model's own reasoning helps, consistently and modestly. Every
+cell improved. Mean deltas against the frozen arm are +0.083 step AUROC, +0.046
+trajectory AUROC, +0.038 best-of-N and +0.031 within-problem AUROC, with all six
+cells of the matched-architecture comparison positive on all four metrics. The
+best-of-N gain is individually significant in only one of six cells, so the
+consistency carries it rather than any single test.
+
+It changes nothing about the headline. The retrained leaderboard runs from 0.486
+to 0.521, and **self-consistency at 0.560 beats all nineteen**, by 0.039 to 0.074.
+The ReProbe-style transformer rises from fifteenth to fifth but still loses. What
+retraining buys is a better verifier, not a useful one.
+
+The label convention needed checking before any of this could be believed. Over
+2,894 failing traces the faulty set is the entire suffix from the first error
+55.6% of the time, so a head fitted on those labels could score well by learning
+that a trace has gone wrong by now rather than which step is wrong, and the step
+gain running 2.7x the within-problem gain is exactly the shape that would
+produce. Three tests. Position coupling did rise, from +0.15..+0.30 to +0.49 with
+87-90% of failing traces ramping, so a lateness component is real. But peakiness
+rose to 2.28-2.54 where suffix-flagging with first errors at 0.38 through
+predicts about 1.6, and last-step aggregation scores far worse than worst-step
+(0.443-0.450 against 0.507-0.520), which a "gone wrong by now" detector could not
+produce because the final step would already carry the verdict. Lateness is
+present and is not the mechanism.
+
+### 20.8 Does the benchmark predict usefulness when every verifier is trained alike?
+
+Experiment B also gives the cleaner version of the transfer question. In the
+frozen arm the verifiers differed in quality partly because off-policy training
+suited some representations better than others; here every head saw the same
+trajectories, the same labels, the same splits and the same backbone, so a
+benchmark's predictive power is being measured with the training distribution
+pinned.
+
+At the cell unit (n=19), ProcessBench predicts within-problem ranking at +0.758
+(p<0.001) and best-of-N at +0.383 (p=0.105, bootstrap CI [-0.214, +0.685]).
+PRM800K predicts within-problem ranking at +0.782 and best-of-N at +0.072
+(p=0.769). Holding the learner fixed and treating each representation family as
+the unit (n=6) gives the same split: ProcessBench to within-problem +0.829
+(p=0.042), to best-of-N +0.406 (p=0.425).
+
+Set against the frozen arm, the step-ranking correlation is undiminished (+0.823
+frozen, +0.758 here) while the usefulness correlation weakens and loses
+significance (+0.661 with CI [+0.099, +0.790] frozen, +0.383 with CI spanning
+zero here). The frozen arm's apparent link to best-of-N was carried in part by
+quality differences that on-policy training removes.
+
+Effect sizes are the sharper statement. ProcessBench gaps of +0.024 to +0.090 map
+to best-of-N gaps of -0.002 to +0.010, and the largest benchmark gap reverses
+sign downstream. The leaderboard order also only partly survives retraining:
+Spearman between the frozen and retrained rankings is +0.782 on trajectory AUROC
+but +0.321 on best-of-N, and the top three change.
+
+The answer to the section's question is therefore split, and the split is the
+finding. ProcessBench predicts which verifier ranks steps better. It does not
+predict which verifier helps you pick a better solution, and optimising it is
+not the same activity as building something useful.
+
+### 20.9 Status and artifacts
+
+Experiments A and B are complete: annotation finished, all 57 cells (19
+representations x 3 seeds) trained and scored, and the leaderboard and transfer
+tables written. GPT-OSS-120B needed building on CPU and dispatching with
+accelerate, after three load attempts failed identically inside transformers'
+streaming device placement; a diagnostic job narrowed the fault to that path.
+
+Guided decoding, ReProbe's online mode, is implemented and blocked at its own
+verification gate. The gate re-scores stored steps through the live scoring path
+and requires agreement with the offline scores the cell already wrote, because a
+span reconstructed even slightly differently would produce plausible and wrong
+generation numbers. It currently disagrees at median 0.000898, p95 0.006988, max
+0.010947 against a 0.002 tolerance. The near-zero median rules out a wrong span,
+layer or rescaling, which would move every step. Two hypotheses were tested and
+both were wrong: tokenisation (the encoder tokenises the prefix with special
+tokens and the step without, then concatenates id lists) and precision (the store
+holds float16, so the head was fitted on float16-rounded activations). Each was a
+real mismatch, each was fixed, and neither moved the maximum. The remaining
+hypothesis is that the encoder read steps in padded batches of eight while
+scoring reads them singly, and bf16 matmuls are not invariant to batch
+composition, which would make the disagreement irreducible rather than a bug. A
+job is measuring that noise floor directly so the tolerance can be set from
+evidence rather than lowered until the run proceeds.
 
 ```
 generation pool      $SCRATCH/cot_mech/reprobe_v1/reprobe_train.shard*_trajectories.jsonl
@@ -1859,10 +1952,19 @@ judge pool           $SCRATCH/cot_mech/reprobe_v1/reprobe_train_judge_traces.jso
 frozen-transfer      cot-checker-results/onpolicy_v1/downstream_{verifier,generation}.json
 rank/effect transfer cot-checker-results/onpolicy_v1/transfer_report.json
 agreement analysis   cot-checker-results/onpolicy_v1/agreement_redundancy.json
+labels + audit       cot-checker-results/reprobe_v1/label_audit_full.json
+retrained cells      cot-checker-results/reprobe_v1/grid/ (19 reps x 3 seeds)
+retrained leaderboard cot-checker-results/reprobe_v1/downstream_onpolicy_full.json
+retrained transfer   cot-checker-results/reprobe_v1/transfer_report_onpolicy.json
+frozen vs retrained  cot-checker-results/reprobe_v1/phase9_gate{,_mean_step,_last_step}.json
+propagation check    cot-checker-results/reprobe_v1/phase9_propagation.json
 label semantics      docs/reprobe_label_semantics.md
 plan and gates       docs/onpolicy_v1_plan.md
 jobs                 435635 gen, 434763 encode+score, 442884 reprobe gen,
-                     443012/443041/443043 smoke failures, 443105 diagnostic
+                     443012/443041/443043 smoke failures, 443105 diagnostic,
+                     443139/443189/443141/443142 annotation, 443622 first cells,
+                     444323 grid (comma bug), 444634 grid completion,
+                     444733/444756/444764/444766 guided-decoding gate
 ```
 
 ---

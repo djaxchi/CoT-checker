@@ -210,3 +210,24 @@ def test_rollout_reads_the_correct_field_not_the_grade_dict(monkeypatch):
     r = online_bon.rollout("guided", "p", "7", None, None, ch, _args(max_steps=1),
                            random.Random(0))
     assert r["correct"] is True
+
+
+def test_plain_arm_can_use_its_own_temperature(patched, monkeypatch):
+    """The base policy's temperature is 1.0; the branching arms use 1.5.
+
+    Running plain at the branching temperature turns the baseline into a
+    strawman, so the flag has to actually reach the sampler.
+    """
+    seen = {}
+
+    def fake_sample(backbone, tok, problem, prior_steps, n, temperature, *a, **k):
+        seen[n] = temperature
+        return ["good"][:n] or ["good"], 7 * n
+
+    monkeypatch.setattr(online_bon, "sample_candidates", fake_sample)
+    ch = FakeChecker({"good": 0.1})
+    args = _args(max_steps=1, n_candidates=3, temperature=1.5, plain_temperature=1.0)
+    online_bon.rollout("plain", "p", "g", None, None, ch, args, random.Random(0))
+    online_bon.rollout("random", "p", "g", None, None, ch, args, random.Random(0))
+    assert seen[1] == 1.0, "plain must sample at the policy's own temperature"
+    assert seen[3] == 1.5, "branching arms keep the diversity temperature"

@@ -45,12 +45,16 @@ CELL="${CELL:-$RUN_ROOT/cells/step_tokens__transformer_d256_l2_f1024_h4__seed42}
 # (the label audit records holdout_overlap = 0). Generating on the training
 # problems would let the checker steer text it was fitted on.
 TRACES="${TRACES:-$ONPOLICY_ROOT/onpolicy_stage1_judge_traces.jsonl}"
-OUT_DIR="${OUT_DIR:-$RUN_ROOT/online_bon}"
+OUT_DIR="${OUT_DIR:-$RUN_ROOT/online_bon_v2}"
 LAYER="${LAYER:-35}"
 N_CANDIDATES="${N_CANDIDATES:-5}"
 TEMPERATURE="${TEMPERATURE:-1.5}"
 MAX_PROBLEMS="${MAX_PROBLEMS:-300}"
-MAX_STEPS="${MAX_STEPS:-16}"
+# 16 truncated 42-61% of solutions, which suppressed every arm and hit the
+# guided one hardest because it writes longer.
+MAX_STEPS="${MAX_STEPS:-28}"
+# The base policy samples at 1.0; only the branching arms need 1.5 for diversity.
+PLAIN_TEMPERATURE="${PLAIN_TEMPERATURE:-1.0}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 ARMS="${ARMS:-plain random guided}"
 
@@ -89,7 +93,8 @@ for i in $(seq 0 $((NUM_SHARDS-1))); do
     --layer "$LAYER" --prm_store "$REP_ROOT" \
     --stats_cache "$RUN_ROOT/stats_cache" \
     --arms $ARMS --n_candidates "$N_CANDIDATES" \
-    --temperature "$TEMPERATURE" --max_steps "$MAX_STEPS" \
+    --temperature "$TEMPERATURE" --plain_temperature "$PLAIN_TEMPERATURE" \
+    --max_steps "$MAX_STEPS" \
     --max_problems "$MAX_PROBLEMS" \
     --shard_idx "$i" --num_shards "$NUM_SHARDS" \
     --out "$OUT_DIR/rollouts.shard${i}.jsonl" >>"$LOG" 2>&1 &
@@ -104,6 +109,7 @@ echo "=== 3. results ==="
 python scripts/analysis/online_bon_report.py \
   --rollouts "$OUT_DIR"/rollouts.shard*.jsonl \
   --outcomes "$ONPOLICY_ROOT/onpolicy_stage1_outcomes.jsonl" \
+  --regrade_with "$TRACES" \
   --out "$RUN_ROOT/online_bon_report.json" 2>&1 | tee -a "$LOG"
 
 echo "[done] $OUT_DIR"

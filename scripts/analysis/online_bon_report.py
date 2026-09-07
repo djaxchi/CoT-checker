@@ -58,6 +58,12 @@ def paired_bootstrap(a: dict[str, bool], b: dict[str, bool],
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--rollouts", nargs="+", required=True, type=Path)
+    p.add_argument("--outcomes", type=Path, default=None,
+                   help="stage-1 outcomes jsonl. Baselines are recomputed on "
+                        "EXACTLY the problems the rollouts cover; the headline "
+                        "0.560 self-consistency is over 300 problems and four of "
+                        "them have no source record, so quoting it against a "
+                        "296-problem run would be comparing different sets.")
     p.add_argument("--n_boot", type=int, default=2000)
     p.add_argument("--out", type=Path, default=None)
     a = p.parse_args()
@@ -75,6 +81,36 @@ def main() -> None:
     print(f"{len(common)} problems complete in all of {arms}\n")
 
     report = {"n_problems": len(common), "arms": {}}
+
+    if a.outcomes:
+        pool = defaultdict(list)
+        for line in open(a.outcomes):
+            r = json.loads(line)
+            if r["problem_id"] in common:
+                pool[r["problem_id"]].append(r)
+        pass1, sc, oracle = [], [], []
+        for pid, sols in pool.items():
+            ok = [bool(s["correct"]) for s in sols]
+            pass1.append(float(np.mean(ok)))
+            oracle.append(float(any(ok)))
+            counts = defaultdict(int)
+            for s in sols:
+                counts[str(s.get("pred"))] += 1
+            best = max(counts.values())
+            tied = [p_ for p_, c in counts.items() if c == best]
+            hits = [float(np.mean([s["correct"] for s in sols
+                                   if str(s.get("pred")) == t])) for t in tied]
+            sc.append(float(np.mean(hits)))
+        report["baselines_on_covered_problems"] = {
+            "n_problems": len(pool),
+            "pass@1": float(np.mean(pass1)),
+            "self_consistency": float(np.mean(sc)),
+            "oracle": float(np.mean(oracle)),
+        }
+        b = report["baselines_on_covered_problems"]
+        print(f"baselines on these same {b['n_problems']} problems: "
+              f"pass@1 {b['pass@1']:.3f}  self-consistency {b['self_consistency']:.3f}  "
+              f"oracle {b['oracle']:.3f}\n")
     print(f"{'arm':8s} {'accuracy':>9s} {'steps':>7s} {'gen tokens':>11s} "
           f"{'acc / 1k tok':>13s} {'checker calls':>14s}")
     for arm in arms:

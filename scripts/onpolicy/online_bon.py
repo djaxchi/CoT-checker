@@ -50,6 +50,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.harness.learners import build_learner  # noqa: E402
+from scripts.onpolicy.score_cells_on_split import cell_stats  # noqa: E402
 from src.onpolicy.prompts import generation_prefix, verifier_prefix  # noqa: E402
 from src.eval.math_grade import grade  # noqa: E402
 
@@ -254,7 +255,17 @@ def main() -> None:
     p.add_argument("--local_files_only", action="store_true")
     p.add_argument("--layer", type=int, default=35)
     p.add_argument("--stats", type=Path, default=None,
-                   help="rescaling stats json fit on the cell's training split")
+                   help="rescaling stats json, if already fit; otherwise pass "
+                        "--prm_store and they are refit exactly")
+    p.add_argument("--prm_store", type=Path, default=None,
+                   help="the store the cell trained on. Rescaling statistics are "
+                        "not saved with a cell, so they are refit from here by the "
+                        "same fingerprint-checked path scoring uses; a mismatch is "
+                        "refused rather than silently rescaling by numbers the cell "
+                        "never saw.")
+    p.add_argument("--stats_cache", type=Path, default=None)
+    p.add_argument("--train_stem", default=None)
+    p.add_argument("--assume_rescale", default=None)
     p.add_argument("--arms", nargs="+", default=list(ARMS), choices=ARMS)
     p.add_argument("--n_candidates", type=int, default=5)
     p.add_argument("--temperature", type=float, default=1.5)
@@ -263,6 +274,8 @@ def main() -> None:
     p.add_argument("--max_new_tokens", type=int, default=160)
     p.add_argument("--max_problems", type=int, default=300)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--shard_idx", type=int, default=0)
+    p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--device", default="cuda")
     p.add_argument("--model_dtype", default="bfloat16")
     p.add_argument("--out", type=Path, default=None)
@@ -285,7 +298,18 @@ def main() -> None:
         a.model_name_or_path, torch_dtype=dtype, local_files_only=a.local_files_only,
     ).to(a.device).eval()
 
-    stats = json.loads(a.stats.read_text()) if a.stats else None
+    if a.stats:
+        stats = json.loads(a.stats.read_text())
+    elif a.prm_store:
+        res = json.loads((a.cell_dir / "results.json").read_text())
+        stats = cell_stats(res, a.prm_store, None, a.stats_cache, {},
+                           train_stem_override=a.train_stem,
+                           assume_rescale=a.assume_rescale)
+    else:
+        raise SystemExit(
+            "pass --prm_store (to refit the cell's rescaling statistics) or "
+            "--stats. Scoring without them applies the head to unscaled states "
+            "and the numbers would be wrong without looking wrong.")
     checker = Checker(a.cell_dir, backbone, tok, a.layer, stats, a.device)
 
     if a.verify_against:
@@ -297,6 +321,10 @@ def main() -> None:
         r = json.loads(line)
         problems.setdefault(r["problem_id"], r)
     keys = sorted(problems)[: a.max_problems]
+    # Shard round-robin, not in contiguous blocks: the problem ids sort into
+    # dataset order, so a block split would hand one GPU all the hard subset and
+    # make per-shard timings useless for estimating the whole run.
+    keys = keys[a.shard_idx :: a.num_shards]
     print(f"{len(keys)} problems, arms {a.arms}, N={a.n_candidates}, T={a.temperature}")
 
     a.out.parent.mkdir(parents=True, exist_ok=True) if a.out else None

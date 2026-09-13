@@ -28,7 +28,7 @@ from scripts.analysis.onpolicy_tiebreak_baselines import (  # noqa: E402
     fitted_questions, load_pool, read_rows,
 )
 from src.analysis.onpolicy_format import (  # noqa: E402
-    bloc_purity, has_boxed, select_boxed_then, select_has_boxed,
+    bloc_purity, has_boxed, select_boxed_then, select_combined, select_has_boxed,
 )
 from src.analysis.onpolicy_tiebreak import (  # noqa: E402
     answer_groups, cluster_bootstrap, top_bloc,
@@ -132,6 +132,9 @@ def main() -> None:
         "has_boxed": select_has_boxed,
         "answer_margin": high("margin"),
         "has_boxed_then_verifier": lambda r, b: select_boxed_then(r, b, "w"),
+        # Are the two signals complementary, or the same signal twice?
+        "combo_50_50": lambda r, b: select_combined(r, b, 0.5, 0.5),
+        "combo_verifier_weighted": lambda r, b: select_combined(r, b, 0.7, 0.3),
     }
     acc = {n: ev(s) for n, s in rules.items()}
     report = {
@@ -153,7 +156,9 @@ def main() -> None:
                  ("verifier_worst_step", "mean_sampled_logprob"),
                  ("verifier_worst_step", "answer_margin"),
                  ("has_boxed_then_verifier", "has_boxed"),
-                 ("answer_margin", "has_boxed")]:
+                 ("answer_margin", "has_boxed"),
+                 ("combo_50_50", "verifier_worst_step"),
+                 ("combo_50_50", "answer_margin")]:
         report["paired"][f"{x} - {y}"] = cluster_bootstrap(acc[x] - acc[y], clusters)
 
     # Outcome asymmetry of the indicator itself, over the whole pool.
@@ -192,6 +197,17 @@ def main() -> None:
         "accuracy_not_truncated": float(cor2[~trunc].mean()),
         "mean_tokens_boxed": float(nt[bx2].mean()),
         "mean_tokens_unboxed": float(nt[~bx2].mean()),
+    }
+
+    # Redundancy: if the two signals win on the same problems they are one
+    # signal measured twice, whatever the combination's accuracy says.
+    v_hit, m_hit = acc["verifier_worst_step"], acc["answer_margin"]
+    report["redundancy"] = {
+        "both_right": int(((v_hit == 1) & (m_hit == 1)).sum()),
+        "verifier_only": int(((v_hit == 1) & (m_hit == 0)).sum()),
+        "margin_only": int(((v_hit == 0) & (m_hit == 1)).sum()),
+        "neither": int(((v_hit == 0) & (m_hit == 0)).sum()),
+        "phi": float(np.corrcoef(v_hit, m_hit)[0, 1]),
     }
 
     args.out_dir.mkdir(parents=True, exist_ok=True)

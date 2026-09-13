@@ -69,3 +69,37 @@ def bloc_purity(rows: Sequence[dict], bloc: Sequence[int]) -> str:
     if n == len(bloc):
         return "all_boxed"
     return "none_boxed" if n == 0 else "mixed"
+
+
+def within_bloc_z(values: Sequence[float]) -> np.ndarray:
+    """Z-score within one bloc, with a missing value pushed well below the rest.
+
+    Two tie-break signals on different scales cannot be summed as they are: the
+    verifier is a probability and the answer margin is nats. Standardising
+    *within the bloc* puts them on a common footing and makes the combination a
+    statement about relative ranking rather than about units.
+
+    A nan becomes -3.0 rather than 0.0. Zero would be the bloc mean, which would
+    make a trajectory whose statistic failed to compute an average candidate
+    instead of a disqualified one.
+    """
+    v = np.asarray(values, dtype=float)
+    fin = np.isfinite(v)
+    out = np.full(v.size, -3.0)
+    if fin.sum() < 2 or v[fin].std() == 0:
+        out[fin] = 0.0
+        return out
+    out[fin] = (v[fin] - v[fin].mean()) / v[fin].std()
+    return out
+
+
+def select_combined(rows: Sequence[dict], bloc: Sequence[int],
+                    w_verifier: float, w_margin: float) -> int:
+    """Pick by a weighted sum of the two standardised signals.
+
+    The verifier's score is suspicion, so it enters negated: higher is worse.
+    """
+    zv = within_bloc_z([-rows[i]["w"] for i in bloc])
+    zm = within_bloc_z([rows[i]["margin"] for i in bloc])
+    score = w_verifier * zv + w_margin * zm
+    return bloc[int(np.argmax(score))]

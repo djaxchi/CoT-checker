@@ -531,3 +531,82 @@ continue is escalated rather than taken here.
 4. **§20 needs a correction notice** for the truncation confound regardless of
    what happens next, since §20.12's "no cheap ordering reproduces it" is false
    as stated.
+
+
+## 10. Can Phase 2 settle it? A power check before the compute is spent
+
+`scripts/analysis/onpolicy_power.py`, anchored on this pool's own per-tie spread
+(SD 0.313, recovered from the observed interval) rather than an assumed one.
+
+```
+ties needed for 80% power, two-sided 0.05
+true delta   ties    problems @N=4   problems @N=10
+     0.02    1923             4245             7882
+     0.03     855             1887             3503
+     0.05     308              679             1261
+     0.08     120              265              493
+```
+
+The three-set core of §3.2 at 16 samples, halved by the
+exploratory/confirmatory split:
+
+```
+GSM8K          1319 problems -> ~ 79 ties per half   (tie rate ~0.12)
+MATH500         500 problems -> ~ 95 ties per half   (tie rate ~0.38)
+PRM800K test   2000 problems -> ~450 ties per half   (tie rate ~0.45)
+TOTAL          3819 problems -> ~624 ties per half
+
+detectable difference at 624 ties   0.0351
+observed difference to beat         0.0308
+```
+
+**The core as planned is underpowered for its own co-primary endpoint**, by a
+small margin and on the wrong side of it. A study sized to fail is worse than
+no study, so this has to be fixed before Phase 2 runs, and there are only three
+honest fixes: more PRM800K-difficulty problems (about 4,000 rather than 2,000),
+an unequal exploratory/confirmatory split, or accepting that the endpoint is
+verifier-versus-random and that the competitor comparison stays descriptive.
+
+Note where the power is and is not. GSM8K costs 1,319 problems of generation
+and yields about 79 ties, because at 0.90 accuracy the vote rarely ties. It
+earns its place as the prediction test of §3.2, where the effect is *supposed*
+to vanish, and it should not be counted toward the head-to-head at all.
+
+### The number the scaling argument was hiding
+
+A tie-break rule only acts where the vote ties, so its contribution to the
+accuracy a user sees is the tie-break difference times the tie rate:
+
+```
+tie-break difference 0.0308, converted to final accuracy
+N=2   0.0229
+N=4   0.0139
+N=10  0.0075
+```
+
+So the proposition, stated plainly: **if the verifier really is better than
+answer-token confidence by the observed amount, it is worth about 1.4 points of
+final accuracy at N=4 and 0.75 at N=10, over a competitor that is free.** The
++0.064 headline of §20.14 was measured against a *random* tie-break, which is
+not a competitor anyone deploys. Against the best free one, this is what is
+left. That is the trade the compute decision should be made on, and it is the
+first time this study has been able to state it.
+
+### Are the two signals complementary?
+
+Tested, because §20.14 found the verifier and vote agreement were informative on
+different problems and the same could have been true here. It is not:
+
+```
+combo (50/50 of within-bloc z-scores)   0.2462  +0.1519 [+0.0817, +0.2271]
+  vs verifier alone                     +0.0615 [+0.0154, +0.1250]
+  vs answer_margin alone                +0.0308 [+0.0000, +0.0781]
+
+hits: both 10, verifier only 2, margin only 4, neither 49    phi = +0.715
+```
+
+The combination beats the verifier alone and does not clearly beat the margin
+alone, and at phi = +0.715 the two rules win on largely the same problems. This
+is one signal measured twice, not two. The weights were also chosen after
+seeing the data, so the combination is the most selection-exposed number in this
+document.

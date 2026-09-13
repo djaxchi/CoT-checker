@@ -2166,6 +2166,19 @@ confidence, cannot be computed at all from what is on disk, because the saved
 trajectories carry no logprobs. Until that comparison exists, "beats free" means
 "beats free *length* rules".
 
+**Correction (Phase 1 of onpolicy_tiebreak_v2, 2026-09-13).** Both limitations
+above are now closed, and the first sentence of this paragraph is wrong. Token
+confidence did not need regenerating: the trajectory text is on disk and
+`generation_prompt` rebuilds the sampling context byte-identically, so one
+teacher-forced forward pass per trajectory recovers the model's distribution at
+every generated position. Job 462216 did this for 2,995 trajectories in 42
+seconds of GPU time. And "no cheap ordering reproduces it" is false as stated.
+It holds for orderings by length and step count, which is what this section
+tested. It fails for one ordering it did not test: whether the trajectory
+reached a `\boxed{}` answer at all, which costs no logprobs, no forward pass
+and no model, and which breaks these same 57 ties at 0.2105 against the
+verifier's 0.1930 and random's 0.1279. See §20.16.
+
 Artifacts: `results/onpolicy_tiebreak/tiebreak_results.json` (all 228 cells, with
 source digests), `results/onpolicy_tiebreak/tiebreak_table.md`,
 `src/analysis/onpolicy_tiebreak.py`,
@@ -2251,7 +2264,19 @@ samples with a verifier are worth 4.4 without; four are worth 5.6; five are wort
 actually deploys, and at N=2 the verifier is worth more than a third sample
 (+0.064 against +0.057 for drawing one more).
 
-The free control holds at every N. Breaking the same ties by preferring the
+The free control holds at every N, for the free controls tested here.
+§20.16 adds one that was not: 21.2% of this pool hits the 768-token generation
+cap, those trajectories are correct 5.5% of the time against 45.8% for the
+rest, and the grader's fallbacks still parse an answer for them so they enter
+the vote. Any rule that deprioritises them collects a large free gain. The
+verifier scores them as more suspicious than the rest (0.8990 against 0.8193,
+point-biserial r = -0.201), so some part of the +0.064 below is truncation
+detection. Removing those trajectories before the vote raises the verifier's
+tie-break gain rather than lowering it, from +0.0651 [-0.0206, +0.1573] to
++0.0903 [+0.0168, +0.1717], so the effect is not an artifact of the cap. The
+share of it that is remains unquantified at this N.
+
+Breaking the same ties by preferring the
 shorter solution is at or *below* leaving them to chance (0.3449 against 0.3543
 at N=2), and the verifier beats it by +0.0735 [+0.0565, +0.0911].
 
@@ -2314,7 +2339,8 @@ the gain is in the answer rule, not the stopping rule, and it decays with N.
 Published best-of-N comparisons at large N, ReProbe's included, are measuring the
 regime where the effect is weakest. The comparison against token confidence
 cannot be made here at all, because the saved trajectories carry no logprobs
-(§20.11); that is now the single most valuable thing to regenerate.
+(§20.11). §20.16 makes that comparison without regenerating anything, and it
+does not go our way.
 
 Artifacts: `results/onpolicy_budget/budget_frontier.png`,
 `results/onpolicy_budget/budget_{frozen_ver_clean,frozen_gen_clean,retrained_ver_clean,frozen_ver_all,single_last_linear_clean}.{json,md}`,
@@ -2394,6 +2420,116 @@ cannot currently earn back.
 
 Artifacts: `results/onpolicy_abandon/abandon_frozen_generation_clean.{json,md}`,
 `src/analysis/onpolicy_abandon.py`, `tests/analysis/test_onpolicy_abandon.py`.
+
+### 20.16 The competitor that was missing, and what it cost us (onpolicy_tiebreak_v2 Phase 1)
+
+*Updated: 2026-09-13*
+
+§20.12 and §20.14 both close on the same admission: the tie-break result is
+raced only against orderings of the saved text, because token confidence needs
+logprobs the trajectories do not carry. This section closes that gap, and the
+answer changes what the on-policy arm can claim.
+
+**The logprobs did not need regenerating.** The premise was true of the saved
+files and false of the saved data. `src/onpolicy/prompts.py` rebuilds the
+sampling prompt byte-identically, so one teacher-forced forward pass per
+trajectory recovers the model's full next-token distribution at every generated
+position. `scripts/onpolicy/encode_token_confidence.py` does this; job 462216
+processed 2,995 trajectories in 42 seconds of GPU time and 2:03 wall, against
+the ~13 node-hours a 64K-trajectory regeneration would have cost. What comes
+back is the model's raw distribution, which is what DeepConf's Eq 2 reads,
+rather than the temperature-modified distribution the sampler drew from. Step
+spans tile the generated sequence for 2,860 of 2,995 trajectories, and the job
+aborts below 0.90 rather than writing per-step numbers on misaligned spans.
+
+**The comparison, implemented to DeepConf's equations.**
+`src/analysis/token_confidence.py` carries Eqs 2 through 7 with two deviations
+recorded in the module. Their 1024 and 2048-token windows span our entire
+470-token traces, so Eq 4 collapses onto Eq 3 and the degenerate case is kept
+visible rather than dropped. And the paper's stated orientation does not follow
+from its own Eq 2: a flat distribution over a 151K vocabulary gives every top-k
+token log P = -11.93 and so C = 11.93, while a peaked one gives less. Both
+orientations are therefore scored and the competitor is reported at its best.
+
+**The verifier ties DeepConf and loses to a formatting artifact.** On the 57
+clean ties, against a random baseline of 0.1279:
+
+```
+answer_token_margin          0.2807
+has_boxed                    0.2105
+verifier_worst_step          0.1930
+deepconf_bottom10_w32        0.1930
+deepconf_lowest_group_w32    0.1930
+mean_token_conf              0.1754
+```
+
+The verifier and DeepConf's bottom-10% group confidence are separated by
++0.0000 [-0.1071, +0.1071]. The rule that beats both is `answer_token_margin`,
+and the margin is not what is working: 48 of the 57 blocs contain a candidate
+with no `\boxed{}` answer, where the statistic is undefined and always loses.
+The bare presence indicator already carries +0.0826 [+0.0062, +0.1646].
+
+**`has_boxed` is a truncation detector.** The pool ran with a 768-token cap.
+21.2% of trajectories hit it, 81.7% of unboxed trajectories are truncated, and
+truncated trajectories are correct 5.5% of the time against 45.8% for the rest.
+The grader's fallbacks parse an answer for them, so they join the vote and any
+rule that pushes them down wins for free.
+
+**The headline survives the confound and grows.** Dropping truncated candidates
+before the vote is the closest the saved pool comes to an adequate budget. On 65
+ties with random at 0.0943, the verifier's gain rises from +0.0651 [-0.0206,
++0.1573] to +0.0903 [+0.0168, +0.1717] and its interval clears zero. Truncated
+trajectories were adding noise to the decision, not carrying it.
+
+**Nothing separates the verifier from token confidence.** On that corrected
+pool the verifier leads every DeepConf rule by +0.0154 to +0.0308 and trails
+answer-token margin by -0.0308, and all six paired intervals cross zero. The
+prediction this study registered from arXiv:2608.11403, that answer-token
+margin would fail at within-question routing, is not supported: it is the
+strongest free rule even after the confound is removed. That finding came from
+four-way multiple choice, and open-numeric answers behave differently.
+
+**The two signals are redundant, not complementary.** §20.14 found the verifier
+and vote agreement informative on different problems. Not so here. Combining
+them by within-bloc z-score reaches 0.2462 and beats the verifier alone by
++0.0615 [+0.0154, +0.1250], but does not clearly beat the margin alone, and the
+hits overlap at phi = +0.715: both right on 10 problems, verifier alone on 2,
+margin alone on 4. The weights were chosen after seeing the data, which makes
+this the most selection-exposed number in the section.
+
+**What the scaling argument was hiding.** A tie-break rule acts only where the
+vote ties, so its contribution to end-to-end accuracy is the tie-break
+difference times the tie rate. At the observed 0.0308 that is 0.0229 at N=2,
+0.0139 at N=4 and 0.0075 at N=10. §20.14's +0.064 was measured against a random
+tie-break. Against the best free one, roughly one point of final accuracy is
+what remains.
+
+**A study sized to fail.** `scripts/analysis/onpolicy_power.py` computes the
+requirement from this pool's own per-tie spread of 0.313. Detecting a true
+difference of 0.03 at 80% power needs 855 ties, or about 1,887 problems at N=4.
+The planned three-set core yields about 624 ties per half and can detect 0.0351,
+against the 0.0308 it would need to detect. GSM8K supplies 1,319 problems of
+generation and about 79 of those ties, because a vote at 0.90 accuracy rarely
+ties; it earns its place as the test of where the effect should vanish, not as
+power.
+
+**Next step.** Three options, and the choice is a compute decision rather than a
+technical one: resize to roughly 4,000 PRM800K-difficulty problems and settle
+it; keep the endpoint at verifier-versus-random, which is powered and
+significant, and report the confidence comparison as descriptive; or write up
+what exists. Whatever is chosen, the token budget has to rise until the
+truncation share is near zero, since every tie-break number measured at 768
+tokens is partly a measurement of the budget. ReProbe's own 256 would be worse.
+
+Artifacts: `results/onpolicy_confidence_race/confidence_race.{json,md}`,
+`results/onpolicy_format_confound/format_confound.json`,
+`results/onpolicy_format_confound_notrunc/format_confound.json`,
+`results/onpolicy_power/power.json`, `src/analysis/token_confidence.py`,
+`src/analysis/onpolicy_format.py`, `src/onpolicy/spans.py`,
+`scripts/onpolicy/encode_token_confidence.py`,
+`scripts/analysis/onpolicy_{confidence_race,format_confound,power}.py`,
+`slurm/onpolicy_token_confidence_tamia.sh`,
+`docs/onpolicy_tiebreak_v2_plan.md`, job 462216.
 
 ---
 

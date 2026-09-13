@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-08-18*
+*Last updated: 2026-09-10. Sections are appended in the order the work ran; §21 (Limitations) and §23 (Next Steps) describe the Stage-1 SSAE work and have not been rewritten since, so read §20 for the current state.*
 
 ---
 
@@ -886,7 +886,7 @@ Evaluated on the first 50 solutions from `processbench_gsm8k.jsonl`. All steps o
 
 Argmax hit rate is approximately 2x the random baseline for both variants, confirming the perplexity signal generalizes to ProcessBench. No-L1 has a slightly higher hit rate and better average-case F1, but L1 has higher precision at tight thresholds (p95: 0.500 vs 0.333; p99: 0.667 vs 0.600). L1 sparsity trades recall for precision.
 
-The PB-F1 values (best 0.247) are computed with thresholds derived from the correct-step perplexity distribution of the eval data itself (percentiles p50--p99), so they are not tuned on held-out labels.
+The PB-F1 values (best 0.247) are computed with thresholds derived from the correct-step perplexity distribution of the eval data itself (percentiles p50--p99). No held-out label set was used to tune them, but "correct step" is itself an evaluation label, so the thresholds are read off a label-selected subset of the evaluation data and are not label-free. Treat them as in-sample operating points.
 
 ### 14.6 Effect of L1
 
@@ -1053,7 +1053,7 @@ localizable cluster of "error neurons."
   interpretable, clusterable features. Caveats: residualization removes only linear confound (matched
   to the linear probe), and the held-out set is the artificial balanced extremes.
 
-### 15.7 What the direction encodes: ruling out every confound (S3 Stage 4)
+### 15.7 What the direction encodes: ruling out the confounds we could name (S3 Stage 4)
 
 §15.1–15.6 established *where* and *how* the correctness margin sits (a 0.01%-variance linear
 direction, last-token, L20≈L28). This stage asks *what it is*: genuine correctness, or a confound the
@@ -1743,10 +1743,25 @@ problem). So best-of-N replaces a stronger signal with a weaker one, and
 weighting a vote by a partially redundant one adds nothing, which is exactly the
 0.561 against 0.560 measured.
 
-Where the verifier does contribute is **inside the majority bloc**, where every
-solution already agrees and voting has nothing left to say: 0.568 to 0.590
-against 0.564 for taking any member, largest for `last_token x linear` at
+Where the verifier does contribute is **inside the majority bloc**: 0.568 to
+0.590 against 0.564 for taking any member, largest for `last_token x linear` at
 +0.026. That is small, consistently positive, and not where best-of-N looks.
+
+**Correction (audit A0, 2026-09-10).** The sentence that used to open this
+paragraph said every solution in that bloc already agrees. It does not. The bloc
+is built as `bloc = [i for i in range(len(sols)) if agree[i] == top]`
+(`scripts/analysis/onpolicy_agreement_redundancy.py`), which selects every
+solution tied at the top answer frequency, including solutions carrying
+*different* tied answers. Recomputing over all 228 saved score files: 66 of the
+300 problems have co-plurality ties, **zero** exact normalized-answer groups
+contain both a correct and an incorrect outcome, and **zero** problems with a
+unique plurality change correctness when a different bloc member is chosen. The
+whole +0.004 to +0.026 is therefore tie-breaking between distinct answers, and
+this measurement says nothing about derivation quality within one answer group.
+A tie-breaker is still a useful thing to have, but it has to be raced against
+cheap tie-breakers (length, first sample, mean step score) before it is credited
+to the representation. Recomputation in `runs/astra-research-audit/audit_raw.py`;
+the reported 0.564 random-bloc baseline reproduces exactly at 0.5643055556.
 
 ### 20.3 Rank transfer and effect-size transfer disagree
 
@@ -2054,9 +2069,339 @@ jobs                 435635 gen, 434763 encode+score, 442884 reprobe gen,
                      444843 guided decoding v1, 445005 guided decoding v2
 ```
 
+### 20.11 Protocol audit of the on-policy arm (2026-09-10)
+
+Three findings, all recomputed from the saved artifacts with no new fitting or
+generation. Working files are in `runs/astra-research-audit/`.
+
+**The in-domain "test" number was the validation set.**
+`slurm/reprobe_onpolicy_train_tamia.sh` passed `--train_stem train --val_stem val
+--test_stem val`. Both the decision threshold and the lr x wd configuration are
+chosen on val, so `in_domain.auroc` in every retrained cell is a model-selection
+score reported as generalisation; the first inspected cell's `in_domain.auroc`
+and its selected val AUROC are the same number, 0.88300685. Every retrained
+in-domain figure should be read as validation until the cells are rerun.
+`scripts/train_rep_learner_cell.py` now refuses `--test_stem == --val_stem`
+unless `--allow_val_as_test` is passed, and stamps `in_domain.is_validation` and
+`protocol.test_is_val` into `results.json` when it is.
+
+**Id-disjoint was not question-disjoint.** The split was over `problem_id`, but
+`scripts/build_prm800k_prestudy.py` mints fallback ids from a sample index and a
+problem hash, so one question text can hold several ids and pass the check.
+Reconstructing the archived split from its own code (seed 0, val_frac 0.15)
+reproduces its counts exactly, 4,657 train traces / 43,837 steps and 826 val
+traces / 7,874 steps, and then shows 27 question texts shared between train and
+val, 49 between train and the frozen evaluation pool, and 16 between val and
+that pool. Only 228 of the 300 evaluation questions are absent from both fitting
+and selection, and the 300 evaluation ids are only 284 distinct texts.
+`build_onpolicy_splits.py` now splits by canonical question text and emits
+train/val/test. Rebuilt on the same pool: 5,483 labelled traces carry 991
+problem ids but only 865 canonical questions; dropping the 56 questions shared
+with the evaluation pool removes 606 traces and leaves 809 questions over 880
+ids, split 567/121/121 (3,451 / 703 / 723 traces, 33,171 / 6,417 / 6,729 steps).
+`tests/onpolicy/test_onpolicy_splits.py` fails if any canonical text crosses a
+split.
+
+**Scores come from a reread, not from the generation state.** The primary
+numbers encode the model's own text under the verifier template, which
+`src/onpolicy/prompts.py` says explicitly is a context never seen during
+sampling, and 1,018 of the 3,000 generated solutions do not survive the
+step-split and double-newline rejoin byte-identically. So the arm measures
+whether a cheap head on a *reread* is useful, and the cost of that reread is a
+full forward pass, not just the head. The saved trajectories carry no token
+logprobs, so token-confidence baselines cannot be computed from what is on disk.
+
+None of this changes the headline of §20: the frozen and retrained verifiers
+lose to self-consistency. The audit reproduces that (best three-seed means
+0.5033 frozen/verifier, 0.4856 frozen/generation, 0.5211 retrained/verifier,
+0.5200 retrained/generation, against majority 0.560, oracle 0.700). What changes
+is which of the positive sub-results survive: the in-domain AUROC and the
+majority-bloc gain do not, as stated.
+
+### 20.12 The tie-break, raced against free tie-breakers
+
+§20.11 left the arm with one live claim: on a tied vote the verifier picks the
+winning answer more often than chance. §20.2's +0.026 was measured against
+picking a bloc member at random, which is not a competitor anyone would deploy,
+so `scripts/analysis/onpolicy_tiebreak_baselines.py` reruns the decision against
+rules that cost nothing. The decision is first split in two. On the 234 problems
+with a unique plurality no rule can change anything, since every bloc member
+carries the same answer and no answer group mixes outcome labels; the entire
+effect lives on the 66 co-plurality ties. Full best-of-N, which is the other half
+of the decomposition, is already null at 0.503 against 0.560 (§20.2).
+
+Ties are the hard problems: picking at random among the tied candidates is right
+only 14.1% of the time, against 56.4% overall.
+
+```
+tie-break rule            tie acc   delta vs random     95% CI
+random (expectation)      0.1408          .              .
+shortest                  0.1364       -0.0044   [-0.0698, +0.0642]
+longest                   0.0909       -0.0499   [-0.1080, +0.0083]
+fewest steps              0.1515       +0.0107   [-0.0519, +0.0773]
+most steps                0.1515       +0.0107   [-0.0619, +0.0833]
+first sampled             0.1212       -0.0196   [-0.0869, +0.0516]
+verifier, worst step      0.1941       +0.0533   [+0.0143, +0.0959]   <- averaged over 228 cells
+verifier, mean step       0.1748       +0.0340   [-0.0202, +0.0900]
+verifier, last step       0.1499       +0.0091   [-0.0194, +0.0380]
+```
+
+Every free rule's interval crosses zero. The verifier's canonical aggregation,
+the minimum over steps of P(correct), does not, and it survives the restriction
+to the 234 problems whose question text appears in neither the fitted pool nor
+the selection set: +0.0488 [+0.0076, +0.0940] on 57 ties there. Accuracy is
+averaged over cells per problem before the interval is taken, so this is the
+typical cell rather than the best of 228, and the bootstrap resamples question
+texts, since the 300 ids are only 284 questions. As a final-answer number, a vote
+with a verifier tie-break scores 0.594 against 0.564 for a vote with a random
+one.
+
+So the arm's positive result survives its own audit, in this shape: **the
+verifier is worth something only as a tie-breaker, it is worth roughly three
+points of final accuracy there, and no cheap ordering reproduces it.** Two
+things keep this provisional. The evidence is 66 problems, 57 of them clean, so
+the interval is wide and its lower edge is close to zero. And the free rules
+tested are orderings of the saved text; the obvious remaining competitor, token
+confidence, cannot be computed at all from what is on disk, because the saved
+trajectories carry no logprobs. Until that comparison exists, "beats free" means
+"beats free *length* rules".
+
+Artifacts: `results/onpolicy_tiebreak/tiebreak_results.json` (all 228 cells, with
+source digests), `results/onpolicy_tiebreak/tiebreak_table.md`,
+`src/analysis/onpolicy_tiebreak.py`,
+`tests/analysis/test_onpolicy_tiebreak.py`.
+
+### 20.13 The decision the null left open: is the vote already right?
+
+Best-of-N asks the verifier to out-rank the vote. It cannot. That is a statement
+about ranking, and it leaves a different decision untested: conditional on the
+votes already cast, is the majority answer correct? An abstain, escalate or
+draw-more-samples policy needs exactly that, and it does not require the verifier
+to beat counting at anything. `scripts/analysis/onpolicy_majority_reliability.py`
+fits it as logistic regression, five-fold cross-validated with whole question
+texts held out, always against a vote-only control fitted the same way, because
+agreement predicts correctness well enough that a model reading both would
+otherwise take credit for it.
+
+On the 234 clean problems (228 question texts, prevalence 0.504, trivial
+always-correct F1 0.670), averaged over all 228 cells:
+
+```
+features              AUROC (mean / max over cells)   F1 val-sel   F1 oracle
+vote only                   0.9289 / 0.9289              0.8136      0.8475
+vote + length               0.9242 / 0.9242              0.8167      0.8522
+vote + verifier score       0.9258 / 0.9455              0.8204      0.8540
+vote + length + score       0.9211 / 0.9437              0.8235      0.8536
+verifier score only         0.8178 / 0.8814              0.7660      0.7830
+```
+
+Two things to read here. The vote statistics alone answer this question well:
+AUROC 0.929, F1 0.814 against a trivial 0.670, from five numbers that cost
+nothing to compute. And the hidden-state scores add essentially nothing on top,
++0.0036 mean accuracy over the vote-only control across cells, with the mean
+AUROC slightly *below* it. The scores are not uninformative on their own, 0.818
+AUROC alone, but that information is already in the vote.
+
+The best cell reaches 0.9455 and +0.047 accuracy over the control, with an
+interval clearing zero, and the strongest family is consistent across its three
+seeds (`frozen/verifier/last_token__mlp_h1024x2`, 0.9384 mean AUROC, +0.0356
+accuracy). That is a maximum over 76 families measured on the same 234 problems,
+so it is a candidate for a preregistered test, not a result. Nothing here should
+be quoted as a gain until one family is named in advance and tested on problems
+these fits never touched.
+
+So the answer is no on this dataset: reliability is a real and useful prediction
+target, and the vote is what carries it. Combined with §20.12, what survives of
+the on-policy arm is a tie-breaker worth about three points where the vote is
+tied, and nothing else.
+
+Artifacts: `results/onpolicy_reliability/reliability_results.json`,
+`results/onpolicy_reliability/reliability_table.md`,
+`src/analysis/onpolicy_reliability.py`,
+`tests/analysis/test_onpolicy_reliability.py`.
+
+### 20.14 The verifier pays at small N: what N=10 was hiding
+
+§20.2 asked whether the verifier beats self-consistency at N=10 and answered no.
+§20.12 narrowed what survives to breaking tied votes. Putting those together
+predicts something the arm never measured: the verifier's whole contribution is
+resolving ties, ties get rarer as N grows, so its value should be a decreasing
+function of N and every number in §20 was taken at the point where it is
+smallest. `scripts/analysis/onpolicy_budget_frontier.py` replays the saved
+candidates in random sampling orders and measures the whole curve. The stopping
+rule (how many to draw) and the answer rule (what to return) are varied
+independently, because a tie-break gain is not a sampling gain.
+
+On the 234 clean problems, frozen verifiers, 100 sampling orders, bootstrap
+resampled by question text:
+
+```
+N   tie rate   majority   +shortest   +verifier    gain vs majority       equiv N   scored
+ 2     0.744     0.3543      0.3449     0.4184   +0.0640 [+0.053,+0.076]     3.2     1.49
+ 3     0.560     0.4109      0.4047     0.4617   +0.0508 [+0.039,+0.062]     4.4     1.68
+ 4     0.453     0.4493      0.4411     0.4904   +0.0411 [+0.030,+0.053]     5.6     1.81
+ 5     0.379     0.4773      0.4701     0.5093   +0.0320 [+0.021,+0.043]     6.8     1.86
+ 6     0.326     0.4980      0.4907     0.5247   +0.0267 [+0.016,+0.039]     8.2     1.86
+10     0.244     0.5354      0.5385     0.5641   +0.0287 [+0.008,+0.052]    > 10     1.77
+```
+
+`equiv N` is where plain self-consistency reaches the same accuracy. Three
+samples with a verifier are worth 4.4 without; four are worth 5.6; five are worth
+6.8. That is a **25 to 40 percent reduction in samples** across the regime anyone
+actually deploys, and at N=2 the verifier is worth more than a third sample
+(+0.064 against +0.057 for drawing one more).
+
+The free control holds at every N. Breaking the same ties by preferring the
+shorter solution is at or *below* leaving them to chance (0.3449 against 0.3543
+at N=2), and the verifier beats it by +0.0735 [+0.0565, +0.0911].
+
+**Why it works where it works.** The vote's margin splits the pool into two
+regimes, and they are not the same problems:
+
+```
+vote margin   problems   majority   oracle   verifier AUROC   agreement AUROC
+0-1               111      0.219    0.459        0.764             0.724
+2-3                41      0.512    0.634        0.643             0.858
+4+                 82      0.976    0.988        0.832             0.984
+```
+
+Where the vote is decisive it is also almost always right, so nothing can be won
+there. All of the headroom sits in the margin 0-1 band, 0.219 against an oracle
+of 0.459, and that is the one band where the verifier out-ranks agreement,
+0.764 against 0.724. The two signals are not redundant, they are informative on
+different problems, and the earlier global comparison (agreement AUROC 0.874
+against 0.73) averaged the verifier's regime away.
+
+**It is nearly free.** The verifier only has to run when the vote ties, which is
+1.5 to 1.9 candidates per problem, not N. And the same measurement on
+generation-template scores, which read states the generator has already computed,
+reproduces it: +0.0651 [+0.0535, +0.0769] at N=2. So the cost objection of §20.11
+does not apply to this use.
+
+**Robustness.** Retrained verifiers, +0.0595 at N=2. All 300 problems, +0.0685.
+A single `last_token x linear` cell, the cheapest head in the grid, +0.0439 at
+N=2 and equivalent N 2.8 at N=2, 5.0 at N=4. The effect is not an artifact of
+ensembling 57 cells.
+
+**What did not work**, each tested and dropped before this one. These four were
+measured in the exploration that led to the experiment above and have no
+committed artifact of their own, unlike everything else in this section:
+
+- *Better step aggregation.* The canonical minimum-over-steps saturates: 60% of
+  candidates in one cell have a worst-step score of exactly 1.0. Replacing it
+  with mean, last, log-product or top-2 all rank worse within a problem (max
+  0.732 against log-product 0.716, mean 0.694), so the saturation costs nothing.
+- *Ensembling the readouts.* Averaging all 228 cells in log-odds lifts
+  within-problem AUROC from 0.732 to 0.780 and global AUROC to 0.879, and moves
+  downstream selection accuracy not at all (0.580 against 0.580 for a single
+  cell). Ranking better among candidates does not translate into picking a better
+  answer.
+- *Overriding the vote when it is weak.* Letting the verifier choose the answer
+  whenever the margin is at or below m loses at every m >= 1, on every cell tried:
+  0.5733 at m=0 falling to 0.5133 at m=5 for the best frozen cell. Weighted
+  voting has the same shape, peaking at a weight so small it is a tie-break
+  (n_a + 0.2 sum z gives 0.5833 against 0.5643) and decaying from there.
+- *A verifier-driven stopping rule.* Fitted stopping models reading the score
+  never beat fixed-budget sampling at matched budget under the same answer rule
+  (-0.026 at a budget of 2, -0.029 at 3, +0.012 at 5, all against fixed N). The
+  vote already knows when it has decided; §20.13 said the same thing about
+  reliability.
+
+**Where this sits in the literature.** ReASC, CGES and DeepConf all work this
+axis, gating and stopping self-consistency on *token* confidence. This is the
+same axis with a hidden-state readout instead, and the honest crossover matters:
+the gain is in the answer rule, not the stopping rule, and it decays with N.
+Published best-of-N comparisons at large N, ReProbe's included, are measuring the
+regime where the effect is weakest. The comparison against token confidence
+cannot be made here at all, because the saved trajectories carry no logprobs
+(§20.11); that is now the single most valuable thing to regenerate.
+
+Artifacts: `results/onpolicy_budget/budget_frontier.png`,
+`results/onpolicy_budget/budget_{frozen_ver_clean,frozen_gen_clean,retrained_ver_clean,frozen_ver_all,single_last_linear_clean}.{json,md}`,
+`src/analysis/onpolicy_budget.py`, `tests/analysis/test_onpolicy_budget.py`,
+`scripts/analysis/plot_budget_frontier.py`.
+
+### 20.15 The online arm: abandoning a prefix while it is being written
+
+§20.12 to §20.14 all read *finished* solutions. §20.9 is the only experiment that
+acted during generation, and it spends: five candidate steps per position, 10.7x
+the tokens, and the branching costs more accuracy than the head recovers. That
+leaves the cheaper online move untested. Kill a trajectory whose prefix already
+looks wrong and hand the budget to a fresh sample. Nothing about the sampler
+changes, so neither of §20.9's failure modes applies: no branching, so the policy
+is untouched, and no step is ever selected, so nothing pushes toward
+non-committal continuations.
+
+**The signal is available online, and in one arm it is free.**
+`src/onpolicy/prompts.py` builds each step's context from the problem and the
+steps *before* it, so every saved per-step score is prefix-causal by
+construction; and `generation_prefix` reproduces the states the sampler actually
+held. The score of step k is therefore readable the moment step k is written.
+It discriminates from the first step:
+
+```
+after step k   trajectories   AUROC    ends correct if clean half   if suspicious half
+      1             2873      0.659            0.480                     0.269
+      3             2575      0.727            0.531                     0.217
+      5             2227      0.743            0.550                     0.200
+      7             1730      0.765            0.533                     0.150
+ whole trace        2873      0.850
+```
+
+**And it does not pay.** Replaying the pool with a kill rule and charging tokens
+for everything written, on the 234 clean problems with generation-style scores
+(`scripts/analysis/onpolicy_abandon_frontier.py`):
+
+```
+completions  kill above q   tokens   accuracy    plain tokens  plain acc   acc/1k   plain acc/1k
+     1          0.30          641     0.4117          470       0.3514     0.643      0.748
+     1          0.90          500     0.3623          470       0.3514     0.725      0.748
+     3          0.30         1757     0.5026         1409       0.4615     0.286      0.328
+     5          0.30         2505     0.5413         2346       0.5075     0.216      0.216
+```
+
+At a matched number of completions abandonment always raises accuracy, by about
+the same +0.04 to +0.06 the verifier gives everywhere else. It also always costs
+more tokens, and the token column is the one that decides: plain sampling is more
+token-efficient at every operating point the pool can test cleanly. The
+cross-validated comparison at matched token budgets is a wash, +0.012 [+0.006,
++0.018] at 500 tokens, -0.016 [-0.036, +0.003] at 2000, -0.009 [-0.034, +0.014]
+at 4500.
+
+**Why, in one line of arithmetic.** A kill costs the fraction `f` of a trajectory
+written before the decision, and the extra draws multiply cost by
+`1 + f * k/(1-k)` for a kill rate `k`. The best cell above pays 641 tokens
+against 470, a factor 1.364, for an accuracy ratio of 0.4117/0.3514 = 1.172.
+With the first step costing f = 50/470 = 0.106 of a trace, that cost factor
+implies a kill rate of 77%. The filter is good; there is simply not enough
+trajectory left to save.
+
+**The prediction this makes.** Abandonment's value scales with how much of the
+trace lies *after* the decision point. These solutions average 470 generation
+tokens over 9.3 steps, so a step-1 decision leaves 89% of a very short trace. On
+long-form reasoning of several thousand tokens the same first step is ~1% of the
+trace, the cost factor falls from 1.364 to about 1.036, and the same 1.172
+quality ratio becomes a large win. **The experiment worth running is this rule on
+a long-CoT policy, not on nine-step arithmetic.** Every policy the frontier
+envelope selects is a kill-after-step-1 rule, which is the same statement: the
+only kills that pay are the cheapest ones.
+
+So the ordering across all of §20 is: the verifier is worth most as a tie-breaker
+over finished answers (§20.14, +0.064 at N=2, no extra generation at all), worth
+nothing as a stopping rule (§20.13, §20.14), and worth nothing yet as an
+abandonment rule on traces this short. Its one clean online use costs tokens it
+cannot currently earn back.
+
+Artifacts: `results/onpolicy_abandon/abandon_frozen_generation_clean.{json,md}`,
+`src/analysis/onpolicy_abandon.py`, `tests/analysis/test_onpolicy_abandon.py`.
+
 ---
 
 ## 21. Limitations
+
+*Stage-1 scope. These are the limitations of the SSAE probe work in §14 and were
+never rewritten as the project moved to dense probes and the on-policy arm. The
+live limitations are in §20.11.*
 
 - Only one SSAE checkpoint is evaluated (`gsm8k-385k_Qwen2.5-0.5b_spar-10.pt`). Different SSAE training runs may produce different latent geometries and different probe results.
 - The training pool's final shard (offset 360K–450K) has a slightly elevated correct rate (53.1%), near the dataset tail. The 70/30 subsampling absorbs this, but it is not as clean as earlier offsets.
@@ -2390,6 +2735,13 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 23. Next Steps
+
+*Superseded. Written during the Stage-1 SSAE work; every item below refers to
+that stage. The current plan follows the 2026-09-10 audit: race the majority-bloc
+tie-breaker against cheap tie-breakers, recompute the downstream comparison on
+the 228 uncontaminated questions with bootstrap resampled by question, and
+retarget the head from ranking trajectories to predicting majority reliability.
+See §20.11.*
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

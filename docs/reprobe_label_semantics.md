@@ -264,16 +264,27 @@ classifier forward pass, and for PRMs the full model inference. Training cost is
 given as 4 GH200 GPU-hours over 32K samples.
 
 Ours for comparison: the step_tokens transformer cell is 2,759,681 parameters,
-roughly a third of their 9.8M UHead and about 2,500x smaller than a 7B PRM, and
-it reads a forward pass the generator is already running. Training used 43,837
-labelled steps.
+roughly a third of their 9.8M UHead and about 2,500x smaller than a 7B PRM.
+Training used 43,837 labelled steps.
+
+The clause "it reads a forward pass the generator is already running" used to
+stand here unqualified and is wrong for the protocol that produced our numbers.
+Those scores come from re-encoding the finished solution under the *verifier*
+template, a context the sampler never saw, so they cost a second full 7B forward
+pass over the whole trace. The claim holds only for the generation-template arm,
+and only if the reconstructed context matches what was sampled; 1,018 of 3,000
+solutions do not survive the step-split and rejoin byte-identically, and the
+original token ids were never saved, so even for the rest exact state equality is
+unverified. See REPORT.md §20.11.
 
 Two cost claims follow and they must not be merged, because they point opposite
 ways:
 
 1. **Verifier cost.** A hidden-state head is a rounding error against a second
-   7B forward pass. This is the claim that survives without qualification, and it
-   holds whether or not the verifier is useful.
+   7B forward pass, and this holds whether or not the verifier is useful. It is
+   only the *head* that is free, though: under the reread protocol above the
+   forward pass it reads is an extra one, so the end-to-end saving against a PRM
+   is the PRM's size over 7B, not over 2.8M.
 2. **Generation cost.** Guided decoding branches N ways per step, so it samples
    roughly N times the tokens. A cheap verifier does not make the search cheap.
    The honest comparison is accuracy at a matched token budget against

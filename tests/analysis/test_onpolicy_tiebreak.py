@@ -113,3 +113,58 @@ def test_an_unknown_rule_is_an_error_not_a_zero():
     rows = [cand("2", True, [0.1], 0)]
     with pytest.raises(KeyError):
         selector_accuracy(rows, [0], "vibes")
+
+
+# ---- confidence selectors -------------------------------------------------
+
+def _row(answer, correct, conf, index):
+    return {"answer": answer, "correct": correct, "scores": [0.5],
+            "n_chars": 10, "n_steps": 1, "index": index, "conf": conf}
+
+
+def test_confidence_selector_picks_by_orientation():
+    from src.analysis.onpolicy_tiebreak import (SELECTORS,
+                                                register_confidence_selectors)
+    register_confidence_selectors(["c"])
+    rows = [_row("a", False, {"c": 1.0}, 0), _row("b", True, {"c": 5.0}, 1)]
+    assert SELECTORS["conf:c:high"](rows, [0, 1]) == 1
+    assert SELECTORS["conf:c:low"](rows, [0, 1]) == 0
+
+
+def test_confidence_nan_never_wins():
+    """A failed statistic must lose, not win by comparing first."""
+    from src.analysis.onpolicy_tiebreak import (SELECTORS,
+                                                register_confidence_selectors)
+    register_confidence_selectors(["c"])
+    rows = [_row("a", False, {"c": float("nan")}, 0), _row("b", True, {"c": 1.0}, 1)]
+    assert SELECTORS["conf:c:high"](rows, [0, 1]) == 1
+    assert SELECTORS["conf:c:low"](rows, [0, 1]) == 1
+
+
+def test_confidence_missing_rule_is_treated_as_nan():
+    from src.analysis.onpolicy_tiebreak import (SELECTORS,
+                                                register_confidence_selectors)
+    register_confidence_selectors(["absent"])
+    rows = [_row("a", False, {}, 0), _row("b", True, {"absent": 2.0}, 1)]
+    assert SELECTORS["conf:absent:high"](rows, [0, 1]) == 1
+
+
+def test_confidence_ties_fall_back_to_sampling_order():
+    from src.analysis.onpolicy_tiebreak import (SELECTORS,
+                                                register_confidence_selectors)
+    register_confidence_selectors(["c"])
+    rows = [_row("a", False, {"c": 3.0}, 1), _row("b", True, {"c": 3.0}, 0)]
+    assert SELECTORS["conf:c:high"](rows, [0, 1]) == 1      # index 0 wins
+
+
+def test_best_confidence_rule_takes_the_maximum():
+    from src.analysis.onpolicy_tiebreak import best_confidence_rule
+    summary = {"rules": {"conf:a:high": {"tie_accuracy": 0.2},
+                         "conf:b:low": {"tie_accuracy": 0.4},
+                         "shortest": {"tie_accuracy": 0.9}}}
+    assert best_confidence_rule(summary, ["conf:a:high", "conf:b:low"]) == "conf:b:low"
+
+
+def test_best_confidence_rule_none_when_absent():
+    from src.analysis.onpolicy_tiebreak import best_confidence_rule
+    assert best_confidence_rule({"rules": {}}, ["conf:a:high"]) is None

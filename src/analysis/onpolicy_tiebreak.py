@@ -147,3 +147,66 @@ def cluster_bootstrap(paired: np.ndarray, clusters: Sequence[str],
     return {"delta": float(paired.mean()), "ci95": [float(lo), float(hi)],
             "n_problems": int(paired.size), "n_questions": len(blocks),
             "crosses_zero": bool(lo <= 0.0 <= hi)}
+
+
+# ---- token-confidence selectors -------------------------------------------
+#
+# §20.12's free rules are all orderings of the saved text, so "beats free" meant
+# "beats free length rules". These add the competitor that was missing: the
+# candidate is chosen by a DeepConf-style confidence statistic instead of by a
+# hidden-state score, on the identical draws, so the contrast is paired and
+# isolates the signal.
+
+CONF_PREFIX = "conf"
+
+
+def _conf_key(rule: str, higher_is_better: bool) -> Callable[[dict], float]:
+    """Sort key for one confidence rule, worst-first on a missing value.
+
+    A nan is not a neutral value here. `min` over a list containing nan returns
+    whichever element it happens to compare first, so a trajectory whose
+    statistic failed to compute could silently win the tie-break. It is mapped
+    to +inf, which is last under every orientation.
+    """
+    sign = -1.0 if higher_is_better else 1.0
+    def key(row: dict) -> float:
+        v = row.get(CONF_PREFIX, {}).get(rule, float("nan"))
+        return float("inf") if v != v else sign * float(v)
+    return key
+
+
+def confidence_selector_name(rule: str, higher_is_better: bool) -> str:
+    return f"{CONF_PREFIX}:{rule}:{'high' if higher_is_better else 'low'}"
+
+
+def register_confidence_selectors(rules: Iterable[str]) -> list[str]:
+    """Add both orientations of each confidence rule to SELECTORS.
+
+    Both directions are registered because DeepConf's stated orientation does
+    not follow from its Eq 2 (see src/analysis/token_confidence.py). Which one
+    is reported as *the* confidence baseline is fixed on the exploratory half
+    and recorded; registering both here is what makes that choice explicit
+    rather than an assumption buried in a sign.
+    """
+    names = []
+    for rule in rules:
+        for hib in (True, False):
+            name = confidence_selector_name(rule, hib)
+            key = _conf_key(rule, hib)
+            SELECTORS[name] = (lambda k: lambda r, b: _argmin(r, b, k))(key)
+            names.append(name)
+    return names
+
+
+def best_confidence_rule(summary: dict, names: Sequence[str]) -> str | None:
+    """The confidence rule with the largest tie accuracy, for steelmanning.
+
+    The claim under test is that the verifier beats the *best* free competitor,
+    so the competitor is allowed to be chosen by its own best showing. That is
+    deliberately generous, and it is only legitimate on the exploratory half:
+    picking the maximum over rules and then testing it on the same problems
+    would be the selection error §20.13 already flagged.
+    """
+    scored = [(summary["rules"][n]["tie_accuracy"], n)
+              for n in names if n in summary.get("rules", {})]
+    return max(scored)[1] if scored else None

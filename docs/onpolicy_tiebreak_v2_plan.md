@@ -385,3 +385,84 @@ exists.
 Remaining to close before Phase 0 is frozen: the exact few-shot prompt used for
 the published-prompting arm, and the read layer for the instruct backbone, which
 §15 fixed at L20/L28 for the base model and which the artifact audit may move.
+
+
+---
+
+## 8. Phase 1 result (2026-09-13): the gate fired, and the reason was not confidence
+
+Job 462216 recovered logprobs for 2,995 trajectories in 42 seconds of GPU time,
+2:03 wall. Step-span coverage 2,860/2,995 = 0.955, above the 0.90 gate. The
+pipeline reproduces §20.12's verifier-versus-random number exactly, +0.0488
+[+0.0076, +0.0940] on 57 clean ties, which is what makes the rest readable.
+
+**Against DeepConf proper, the verifier neither wins nor loses.** On the 57
+ties, `bottom10_group_w32` and `verifier_worst_step` both score 0.1930 against
+a random baseline of 0.1279. The paired difference is +0.0000 [-0.1071,
++0.1071]. Every other DeepConf statistic lands between 0.1754 and 0.1930, and
+the windowed rules at the paper's own 1024/2048 collapse onto the trace mean
+exactly as §2.2 predicted they would.
+
+**The rule that beat the verifier was not a confidence rule.**
+`answer_token_margin` scored 0.2807, and in the full 228-cell race beat the
+verifier by -0.1040 [-0.1901, -0.0152]. Decomposing it
+(`scripts/analysis/onpolicy_format_confound.py`) shows the margin is not what
+is working:
+
+```
+random                              0.1279
+verifier_worst_step                 0.1930   +0.0651 [-0.0206, +0.1573]
+deepconf_bottom10_w32               0.1930   +0.0651 [-0.0193, +0.1557]
+has_boxed  (no logprobs at all)     0.2105   +0.0826 [+0.0062, +0.1646]
+answer_margin                       0.2807   +0.1528 [+0.0721, +0.2411]
+has_boxed then verifier             0.2632   +0.1352 [+0.0473, +0.2310]
+```
+
+48 of the 57 tied blocs contain at least one candidate with no `\boxed{}`
+answer, so the margin is nan there and always loses. The indicator alone,
+which costs no logprobs, no forward pass and no model, already carries
++0.0826. On the 9 blocs where every candidate boxed an answer, the margin is
+worth +0.0370 [-0.2037, +0.2778], which is nothing on that n.
+
+**And `has_boxed` is a truncation detector.** The pool was generated with a
+768-token cap:
+
+```
+share of traces at the cap                    21.2%
+P(no boxed answer | truncated)                77.8%
+P(truncated | no boxed answer)                81.7%
+accuracy | truncated                          0.055
+accuracy | not truncated                      0.458
+mean generated tokens, boxed vs unboxed       388 vs 680
+```
+
+A trace that runs out of budget never reaches its box, the grader's fallbacks
+still parse an answer so it still enters the vote, and it is correct 5.5% of
+the time. Any rule that deprioritises those picks up a large free gain that has
+nothing to do with reasoning.
+
+**This reaches back into §20.** The verifier's own score is higher, meaning more
+suspicious, on unboxed traces: 0.8990 against 0.8193, point-biserial
+r = -0.201. So some unknown part of §20.12's +0.0488 and §20.14's +0.064 is the
+verifier detecting truncation rather than detecting wrong reasoning. That is a
+confound §20.11's audit did not test and §20.12's free rules could not have
+caught, because it tested orderings by length and step count and this is
+neither.
+
+### What this changes
+
+1. §20.12's "no cheap ordering reproduces it" is **false as stated**. It is true
+   of length orderings and false of `has_boxed`, which is cheaper still.
+2. Phase 2 cannot run on a 768-token budget. The budget has to be raised until
+   the truncation share is near zero, or truncation has to be handled explicitly,
+   or every tie-break number is partly a budget measurement. ReProbe's own 256
+   tokens would be worse, not better.
+3. The Phase 1 gate as written says a confidence rule matching the verifier means
+   the study reports that and stops. DeepConf matched it at +0.0000 with an
+   interval of ±0.107 on 57 problems, which is not a demonstrated equivalence,
+   it is no power. The gate fired on a number that cannot distinguish the
+   hypotheses, and that is a flaw in how the gate was written, recorded here
+   rather than quietly reinterpreted.
+4. The decision now needs a human: the scientifically honest next step is a
+   re-run at a token budget that removes the confound, which is new compute, not
+   a re-reading of what is on disk.

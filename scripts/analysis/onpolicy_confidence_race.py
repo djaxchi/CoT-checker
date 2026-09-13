@@ -44,7 +44,8 @@ from scripts.analysis.onpolicy_tiebreak_baselines import (  # noqa: E402
     candidates, fitted_questions, load_pool, read_rows, summarise,
 )
 from src.analysis.onpolicy_tiebreak import (  # noqa: E402
-    RANDOM, best_confidence_rule, problem_record, register_confidence_selectors,
+    RANDOM, best_confidence_rule, cluster_bootstrap, problem_record,
+    register_confidence_selectors,
 )
 
 VERIFIER = ["verifier_worst_step", "verifier_mean_step", "verifier_last_step"]
@@ -161,6 +162,49 @@ def main() -> None:
 
     winner = best_confidence_rule({"rules": {r: {"tie_accuracy": v[
         "tie_accuracy_mean_over_cells"]} for r, v in table.items()}}, conf_rules)
+
+    # The gate number. A table of means over cells says which rule scored highest;
+    # it does not say whether the difference survives resampling, and the winner
+    # is a maximum over 32 selectors on the same ~66 ties, which biases it upward.
+    # So the verifier is compared against the winner *paired per problem*, with
+    # each problem first averaged over cells (§20.12's "typical cell") and the
+    # bootstrap resampling question texts (§20.12's 300 ids are 284 questions).
+    def per_problem(rule: str) -> dict[str, list[float]]:
+        acc: dict[str, list[float]] = defaultdict(list)
+        for c in per_cell:
+            s = c["summary"]
+            vals = s.get("tie_accuracy_by_problem", {}).get(rule)
+            if vals is None:
+                continue
+            for pid, v in zip(s["tied_problem_ids"], vals):
+                acc[pid].append(v)
+        return acc
+
+    head_to_head = None
+    if winner:
+        ver, con = per_problem("verifier_worst_step"), per_problem(winner)
+        pids = sorted(set(ver) & set(con))
+        rnd = per_problem(RANDOM)
+        if pids:
+            v = np.array([np.mean(ver[p]) for p in pids])
+            c_ = np.array([np.mean(con[p]) for p in pids])
+            r_ = np.array([np.mean(rnd[p]) for p in pids])
+            clusters = [question[p] for p in pids]
+            head_to_head = {
+                "n_tied_problems": len(pids),
+                "verifier_tie_accuracy": float(v.mean()),
+                "best_confidence_rule": winner,
+                "confidence_tie_accuracy": float(c_.mean()),
+                "random_tie_accuracy": float(r_.mean()),
+                "verifier_minus_confidence": cluster_bootstrap(v - c_, clusters),
+                "verifier_minus_random": cluster_bootstrap(v - r_, clusters),
+                "confidence_minus_random": cluster_bootstrap(c_ - r_, clusters),
+                "note": ("best_confidence_rule is the maximum over "
+                         f"{len(conf_rules)} selectors measured on these same "
+                         "ties, so it is biased upward; a verifier win here is "
+                         "conservative and a verifier loss is not yet a "
+                         "confirmed loss."),
+            }
     report = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "n_cells": len(per_cell), "n_clean_problems": len(clean),
@@ -169,6 +213,7 @@ def main() -> None:
                  "missing": sum(j["missing"] for j in join_stats)},
         "table": table,
         "best_confidence_rule": winner,
+        "head_to_head": head_to_head,
         "verdict": {
             "verifier_worst_step": table.get("verifier_worst_step"),
             "best_confidence": table.get(winner) if winner else None,
@@ -185,7 +230,18 @@ def main() -> None:
         lines.append(f"| {rule} | {v['tie_accuracy_mean_over_cells']:.4f} "
                      f"| {v['n_cells']} |")
     (args.out_dir / "confidence_race.md").write_text("\n".join(lines) + "\n")
-    print("\n".join(lines[:14]))
+    if head_to_head:
+        h = head_to_head
+        lines += ["", f"verifier {h['verifier_tie_accuracy']:.4f} vs "
+                      f"{h['best_confidence_rule']} {h['confidence_tie_accuracy']:.4f} "
+                      f"vs random {h['random_tie_accuracy']:.4f}",
+                  f"verifier - confidence: {h['verifier_minus_confidence']['delta']:+.4f} "
+                  f"{h['verifier_minus_confidence']['ci95']}",
+                  f"verifier - random:     {h['verifier_minus_random']['delta']:+.4f} "
+                  f"{h['verifier_minus_random']['ci95']}",
+                  f"confidence - random:   {h['confidence_minus_random']['delta']:+.4f} "
+                  f"{h['confidence_minus_random']['ci95']}"]
+    print("\n".join(lines[:14] + lines[-5:] if head_to_head else lines[:14]))
     print(f"[out] {args.out_dir/'confidence_race.json'}")
 
 

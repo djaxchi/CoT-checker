@@ -17,14 +17,45 @@ does not show the head did anything, because the search alone could produce it.
 The comparison that isolates the head is guided against *random choice from the
 same candidate pool*, and that arm is not optional here.
 
-Three arms, sharing problems and seeds so the comparison is paired per problem:
+Five arms, sharing problems and seeds so the comparison is paired per problem:
 
-    plain    one step sampled per position, no branching   (the base policy)
-    random   N candidates per position, uniform choice     (search, no checker)
-    guided   N candidates per position, lowest U wins      (search + checker)
+    plain          one step sampled per position, no branching   (the base policy)
+    random         N candidates per position, uniform choice     (search, no checker)
+    guided         N candidates per position, lowest U wins      (search + checker)
+    reject         one step at the POLICY's own temperature; resample that step
+                   only if the checker condemns it, up to --max_retries
+    reject_blind   the same retry loop with the coin flipped at random instead of
+                   by the checker, to price the loop itself
 
 plain -> random measures the search. random -> guided measures the checker. Only
 the second is a claim about the verifier.
+
+WHY A REJECTION ARM. The guided run (REPORT.md §20.9) lost to plain sampling by
+0.091 at 10.7x the tokens, and the post-mortem found two causes, neither of them
+the head's ranking, which was good (+0.213 over random choice):
+
+  1. Branching needs candidate diversity, so it is run at temperature 1.5, and
+     that alone costs 0.304 before the checker sees anything. The head spends
+     itself repairing damage the procedure caused.
+  2. "Lowest uncertainty wins" is the wrong objective for decoding. Restating the
+     problem is never wrong; committing to a number can be. Guided averaged 19.5
+     steps against plain's 9.2 and often never reached an answer.
+
+The rejection arm is the same idea with both causes removed. It samples ONE step
+at the policy's own temperature, so the sampler is untouched and there is no hole
+to climb out of. It only ever asks "is this step condemned", never "which of five
+is safest", so an ordinary committing step is accepted on the first draw and
+nothing rewards stalling. And it pays for a second draw only where the checker
+objects, so the cost is 1 + (rejection rate x retries) rather than a flat N.
+
+WHY IT NEEDS NO SEPARATE RANDOM ARM. The `random` arm exists because branching at
+raised temperature is itself a different sampler. Rejection at the policy's own
+temperature is not: accepting a uniformly chosen one of k i.i.d. draws from the
+same distribution IS one draw from that distribution, so `plain` already is the
+checker-blind control, exactly. `reject_blind` is therefore not an accuracy
+control but a cost one: it runs the identical retry machinery with the accept
+decision made by a coin, which confirms the loop moves no accuracy on its own and
+prices the tokens it spends.
 
 CORRECTNESS. The head was trained on step spans encoded under `verifier_prefix`
 at one layer, so scoring online has to reproduce that exactly or the numbers mean
@@ -54,7 +85,7 @@ from scripts.onpolicy.score_cells_on_split import cell_stats  # noqa: E402
 from src.onpolicy.prompts import generation_prefix, verifier_prefix  # noqa: E402
 from src.eval.math_grade import grade  # noqa: E402
 
-ARMS = ("plain", "random", "guided")
+ARMS = ("plain", "random", "guided", "reject", "reject_blind")
 STEP_SEP = "\n\n"
 
 
@@ -202,8 +233,89 @@ def is_final(step: str) -> bool:
     return "\\boxed{" in step
 
 
+def calibrate_tau(scores_path: Path, quantile: float) -> float:
+    """Kill threshold as a quantile of the cell's OWN offline step scores.
+
+    A raw number would mean something different for every head, since the score
+    distributions differ wildly in shape; a quantile means "reject the worst q of
+    steps this head has seen" whichever head it is. It has to come from the same
+    cell that is doing the scoring.
+    """
+    xs = [v for line in open(scores_path) for v in json.loads(line)["scores"]]
+    if not xs:
+        raise SystemExit(f"{scores_path} carries no step scores to calibrate on")
+    tau = float(np.quantile(xs, quantile))
+    print(f"[reject] tau={tau:.5f} at quantile {quantile} of {len(xs)} offline "
+          f"step scores from {scores_path.name}")
+    return tau
+
+
+def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
+                   args, rng: random.Random) -> dict:
+    """One step at a time at the policy's own temperature; resample a condemned step.
+
+    The final step is treated no differently. A step carrying the boxed answer is
+    the one worth resampling most, and exempting it would exempt the position the
+    checker should be best at.
+    """
+    blind = arm == "reject_blind"
+    temp = args.reject_temperature
+    steps: list[str] = []
+    chosen_scores: list[float] = []
+    pool_scores: list[list[float]] = []
+    gen_tokens, attempts_per_step = 0, []
+    for _ in range(args.max_steps):
+        tried: list[tuple[float, str]] = []
+        accepted: tuple[float, str] | None = None
+        for _attempt in range(args.max_retries + 1):
+            cands, used = sample_candidates(backbone, tok, problem, steps, 1,
+                                            temp, args.top_p, args.max_new_tokens,
+                                            args.device, args.top_k)
+            gen_tokens += used
+            cand = (cands[0] if cands else "").strip()
+            if blind:
+                # A coin, not a score: the retry happens at a fixed rate so the
+                # loop costs what the real one costs while deciding nothing.
+                u = 1.0 if rng.random() < args.blind_retry_rate else 0.0
+            else:
+                u = checker.score_steps(problem, steps, [cand])[0]
+            tried.append((u, cand))
+            passes = (u == 0.0) if blind else (u <= args.reject_tau)
+            if passes:
+                accepted = (u, cand)
+                break
+        if accepted is None:
+            # Retries exhausted. The checker takes the least condemned it saw;
+            # the blind arm takes a uniform one, which is what keeps its output
+            # distribution identical to plain sampling.
+            accepted = (rng.choice(tried) if blind
+                        else min(tried, key=lambda t: t[0]))
+        pool_scores.append([round(u, 5) for u, _ in tried])
+        chosen_scores.append(accepted[0])
+        attempts_per_step.append(len(tried))
+        steps.append(accepted[1])
+        if is_final(accepted[1]) or not accepted[1]:
+            break
+    solution = STEP_SEP.join(steps)
+    g = grade(solution, gold)
+    return {"arm": arm, "steps": steps, "n_steps": len(steps),
+            "correct": bool(g["correct"]), "gradeable": bool(g["gradeable"]),
+            "pred": g["pred"], "chosen_scores": chosen_scores,
+            "pool_scores": pool_scores,
+            "gen_tokens": gen_tokens,
+            # Every draw is scored, so the head runs once per attempt, not once
+            # per step: the retry loop costs checker calls as well as tokens.
+            "checker_calls": 0 if blind else sum(attempts_per_step),
+            "scored_candidates": 0 if blind else sum(attempts_per_step),
+            "attempts_per_step": attempts_per_step,
+            "resample_rate": float(np.mean([n - 1 for n in attempts_per_step]))
+            if attempts_per_step else 0.0}
+
+
 def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
             args, rng: random.Random) -> dict:
+    if arm in ("reject", "reject_blind"):
+        return rollout_reject(arm, problem, gold, backbone, tok, checker, args, rng)
     steps: list[str] = []
     chosen_scores: list[float] = []
     pool_scores: list[list[float]] = []
@@ -380,6 +492,27 @@ def main() -> None:
     p.add_argument("--top_k", type=int, default=50,
                    help="matches scripts/generate_onpolicy_steps.py; the policy's "
                         "own setting")
+    p.add_argument("--reject_temperature", type=float, default=1.0,
+                   help="sampling temperature for the rejection arms. It must be "
+                        "the policy's own (1.0) for `plain` to be the exact "
+                        "checker-blind control; raising it reintroduces the very "
+                        "cost that sank guided decoding.")
+    p.add_argument("--reject_tau", type=float, default=None,
+                   help="condemn a step scoring above this. Set it with "
+                        "--calibrate_from rather than by hand.")
+    p.add_argument("--reject_quantile", type=float, default=0.8,
+                   help="with --calibrate_from, reject the worst q of steps this "
+                        "head has scored offline.")
+    p.add_argument("--calibrate_from", type=Path, default=None,
+                   help="pb_step_scores_*.jsonl from THIS cell, whose step-score "
+                        "distribution sets --reject_tau.")
+    p.add_argument("--max_retries", type=int, default=2,
+                   help="extra draws allowed per step, so 2 means at most three "
+                        "attempts before the least condemned one is taken.")
+    p.add_argument("--blind_retry_rate", type=float, default=None,
+                   help="retry probability for reject_blind. Set it to the "
+                        "measured resample_rate of the reject arm so the two "
+                        "spend the same tokens.")
     p.add_argument("--max_steps", type=int, default=16)
     p.add_argument("--max_new_tokens", type=int, default=160)
     p.add_argument("--max_problems", type=int, default=300)
@@ -426,6 +559,24 @@ def main() -> None:
             "--stats. Scoring without them applies the head to unscaled states "
             "and the numbers would be wrong without looking wrong.")
     checker = Checker(a.cell_dir, backbone, tok, a.layer, stats, a.device)
+
+    if any(arm.startswith("reject") for arm in a.arms):
+        if a.calibrate_from:
+            a.reject_tau = calibrate_tau(a.calibrate_from, a.reject_quantile)
+        elif a.reject_tau is None:
+            raise SystemExit(
+                "the rejection arms need a threshold: pass --calibrate_from with "
+                "this cell's offline step scores, or --reject_tau directly.")
+        if "reject_blind" in a.arms and a.blind_retry_rate is None:
+            raise SystemExit(
+                "reject_blind prices the retry loop, so it needs "
+                "--blind_retry_rate set to the reject arm's measured "
+                "resample_rate; run the reject arm first.")
+        if abs(a.reject_temperature - (a.plain_temperature or 1.0)) > 1e-9:
+            print(f"[reject] WARNING sampling at {a.reject_temperature} while the "
+                  f"plain arm runs at {a.plain_temperature or 1.0}: the two arms "
+                  f"are no longer the same policy and plain stops being the "
+                  f"checker-blind control")
 
     if a.verify_against:
         sys.exit(verify(checker, a.traces, a.verify_against,

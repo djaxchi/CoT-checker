@@ -36,7 +36,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-ARMS = ("plain", "random", "guided")
+ARMS = ("plain", "random", "guided", "reject", "reject_blind")
 
 
 def mcnemar(a: dict[str, bool], b: dict[str, bool]) -> dict:
@@ -74,6 +74,10 @@ def main() -> None:
                         "took bool() of grade()'s dict, which is always True, so "
                         "every rollout was scored correct; the generations "
                         "themselves are fine and re-gradable without rerunning.")
+    p.add_argument("--max_steps", type=int, default=28,
+                   help="the cap the rollouts ran under, so the report can say "
+                        "how often an arm hit it. Guided hit a 28-step cap half "
+                        "the time, which is how its stalling failure surfaced.")
     p.add_argument("--n_boot", type=int, default=2000)
     p.add_argument("--out", type=Path, default=None)
     a = p.parse_args()
@@ -138,7 +142,7 @@ def main() -> None:
         print(f"baselines on these same {b['n_problems']} problems: "
               f"pass@1 {b['pass@1']:.3f}  self-consistency {b['self_consistency']:.3f}  "
               f"oracle {b['oracle']:.3f}\n")
-    print(f"{'arm':8s} {'accuracy':>9s} {'steps':>7s} {'gen tokens':>11s} "
+    print(f"{'arm':13s} {'accuracy':>9s} {'steps':>7s} {'gen tokens':>11s} "
           f"{'acc / 1k tok':>13s} {'checker calls':>14s}")
     for arm in arms:
         rows = [by_arm[arm][k] for k in sorted(common)]
@@ -150,12 +154,21 @@ def main() -> None:
         report["arms"][arm] = {"accuracy": acc, "mean_gen_tokens": tok,
                                "mean_steps": steps, "mean_scored_candidates": calls,
                                "accuracy_per_1k_tokens": eff}
-        print(f"{arm:8s} {acc:9.3f} {steps:7.1f} {tok:11.0f} {eff:13.4f} {calls:14.1f}")
+        print(f"{arm:13s} {acc:9.3f} {steps:7.1f} {tok:11.0f} {eff:13.4f} {calls:14.1f}")
 
     print()
     contrasts = [("plain", "random", "does branching alone help?"),
                  ("random", "guided", "does the CHECKER help? (the real test)"),
-                 ("plain", "guided", "combined, not attributable to the checker")]
+                 ("plain", "guided", "combined, not attributable to the checker"),
+                 # For rejection at the policy's own temperature there is no
+                 # search to subtract: a uniformly chosen one of k i.i.d. draws is
+                 # one draw, so plain IS the checker-blind control and this
+                 # contrast is already the checker's alone.
+                 ("plain", "reject", "does REJECTING a condemned step help?"),
+                 ("plain", "reject_blind", "does the retry loop move anything by "
+                                           "itself? (it should not)"),
+                 ("reject_blind", "reject", "the checker, against the same loop "
+                                            "spending the same tokens")]
     report["contrasts"] = []
     for lo, hi, what in contrasts:
         if lo not in by_arm or hi not in by_arm:
@@ -200,6 +213,29 @@ def main() -> None:
         print(f"  when guided wins ({n_win} problems) it is the shorter solution {rate_w:.2f} of the time")
         print(f"  when guided loses ({n_lose} problems) it is the shorter solution {rate_l:.2f} of the time")
         print("  a large gap between those two rates means the gain tracks length, not verification")
+
+    for arm in ("reject", "reject_blind"):
+        if arm not in by_arm:
+            continue
+        rows = [by_arm[arm][k] for k in sorted(common)]
+        rates = [r.get("resample_rate", 0.0) for r in rows]
+        steps = [r["n_steps"] for r in rows]
+        plain_steps = ([by_arm["plain"][k]["n_steps"] for k in sorted(common)]
+                       if "plain" in by_arm else None)
+        report["arms"][arm]["resample_rate"] = float(np.mean(rates))
+        print(f"\n{arm}: {np.mean(rates):.2f} extra draws per step. "
+              f"{np.mean(steps):.1f} steps per solution" +
+              (f" against plain's {np.mean(plain_steps):.1f}." if plain_steps else "."))
+        if plain_steps:
+            # Guided's real failure was runaway length: 19.5 steps against 9.2,
+            # half of them hitting the cap without ever reaching an answer. A
+            # rejection rule should not do that, and this is where it would show.
+            capped = float(np.mean([s >= a.max_steps for s in steps]))
+            ungraded = float(np.mean([not r["gradeable"] for r in rows]))
+            report["arms"][arm]["hit_step_cap"] = capped
+            report["arms"][arm]["ungradeable"] = ungraded
+            print(f"  hits the step cap {capped:.2f} of the time, ungradeable "
+                  f"{ungraded:.2f}: the stalling failure of §20.9 would show here")
 
     if "guided" in by_arm and "plain" in by_arm:
         g = report["arms"]["guided"]

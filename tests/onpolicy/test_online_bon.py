@@ -265,3 +265,142 @@ def test_sampler_passes_the_policys_top_k(monkeypatch):
                                  1.5, 0.95, 64, "cpu", top_k=50)
     assert seen["top_k"] == 50
     assert seen["temperature"] == 1.5 and seen["top_p"] == 0.95
+
+
+# ---------------------------------------------------------------------------
+# rejection arm
+#
+# The guided arm lost because branching at temperature 1.5 damaged the policy and
+# because "safest of five" rewards steps that never commit (REPORT.md §20.9). The
+# rejection arm removes both, so the properties worth pinning are the ones that
+# would quietly put them back: that it draws one step at a time at the policy's
+# own temperature, that it stops as soon as a step is not condemned, and that
+# every discarded draw is still paid for.
+# ---------------------------------------------------------------------------
+
+def _reject_args(**kw):
+    base = dict(n_candidates=1, temperature=1.5, plain_temperature=1.0,
+                reject_temperature=1.0, top_p=0.95, top_k=50, max_new_tokens=64,
+                max_steps=4, device="cpu", reject_tau=0.5, max_retries=2,
+                blind_retry_rate=0.5)
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+@pytest.fixture
+def draws(monkeypatch):
+    """Each call to the sampler yields the next queued draw, so retries differ."""
+    queue = []
+
+    def fake_sample(backbone, tok, problem, prior_steps, n, temperature, *a, **k):
+        assert n == 1, "the rejection arm must draw one step at a time"
+        fake_sample.temperatures.append(temperature)
+        text = queue.pop(0) if queue else "filler \\boxed{9}"
+        return [text], 7
+
+    fake_sample.temperatures = []
+    monkeypatch.setattr(online_bon, "sample_candidates", fake_sample)
+    monkeypatch.setattr(online_bon, "grade",
+                        lambda sol, gold: {"pred": gold, "gold_norm": gold,
+                                           "correct": "good" in sol,
+                                           "gradeable": True})
+    return queue, fake_sample
+
+
+def test_a_step_the_checker_accepts_is_never_resampled(draws):
+    queue, sampler = draws
+    queue.extend(["good \\boxed{4}"])
+    chk = FakeChecker({"good \\boxed{4}": 0.1})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk, _reject_args(),
+                           random.Random(0))
+    assert r["attempts_per_step"] == [1]
+    assert r["gen_tokens"] == 7        # one draw paid for, no retry
+    assert chk.calls == 1
+
+
+def test_a_condemned_step_is_resampled_and_the_discarded_draw_is_paid_for(draws):
+    queue, _ = draws
+    queue.extend(["bad", "good \\boxed{4}"])
+    chk = FakeChecker({"bad": 0.9, "good \\boxed{4}": 0.1})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk, _reject_args(),
+                           random.Random(0))
+    assert r["attempts_per_step"] == [2]
+    assert r["steps"] == ["good \\boxed{4}"]
+    assert r["gen_tokens"] == 14       # the rejected draw still cost tokens
+    assert r["pool_scores"] == [[0.9, 0.1]]
+
+
+def test_when_every_retry_is_condemned_the_least_bad_is_taken(draws):
+    """Giving up and emitting nothing would be worse than emitting the best of a
+    bad set, and would make the step budget the real policy."""
+    queue, _ = draws
+    queue.extend(["bad1", "bad2 \\boxed{4}", "bad3"])
+    chk = FakeChecker({"bad1": 0.9, "bad2 \\boxed{4}": 0.7, "bad3": 0.8})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk,
+                           _reject_args(max_retries=2), random.Random(0))
+    assert r["attempts_per_step"] == [3]
+    assert r["steps"] == ["bad2 \\boxed{4}"]
+    assert r["gen_tokens"] == 21
+
+
+def test_the_rejection_arm_samples_at_the_policys_own_temperature(draws):
+    """The entire -0.304 hole guided decoding had to climb out of came from
+    sampling at 1.5 for candidate diversity. This arm must not reopen it."""
+    queue, sampler = draws
+    queue.extend(["good \\boxed{4}"])
+    online_bon.rollout("reject", "p?", "4", None, None,
+                       FakeChecker({"good \\boxed{4}": 0.1}),
+                       _reject_args(temperature=1.5), random.Random(0))
+    assert sampler.temperatures == [1.0]
+
+
+def test_the_answer_step_is_resampled_like_any_other(draws):
+    """It is the position the checker should be best at; exempting it would
+    exempt the only step that commits to a number."""
+    queue, _ = draws
+    queue.extend(["think", "wrong \\boxed{7}", "good \\boxed{4}"])
+    chk = FakeChecker({"think": 0.1, "wrong \\boxed{7}": 0.9,
+                       "good \\boxed{4}": 0.1})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk, _reject_args(),
+                           random.Random(0))
+    assert r["steps"] == ["think", "good \\boxed{4}"]
+
+
+def test_the_blind_arm_never_consults_the_checker(draws):
+    queue, _ = draws
+    queue.extend(["a", "b \\boxed{4}"])
+    chk = FakeChecker({})
+    r = online_bon.rollout("reject_blind", "p?", "4", None, None, chk,
+                           _reject_args(), random.Random(0))
+    assert chk.calls == 0
+    assert r["checker_calls"] == 0 and r["scored_candidates"] == 0
+
+
+def test_the_blind_arm_never_retries_when_its_rate_is_zero(draws):
+    """At rate 0 it is plain sampling exactly, which is what makes it a price tag
+    for the retry loop rather than a second policy."""
+    queue, _ = draws
+    queue.extend(["only \\boxed{4}"])
+    r = online_bon.rollout("reject_blind", "p?", "4", None, None, FakeChecker({}),
+                           _reject_args(blind_retry_rate=0.0), random.Random(1))
+    assert r["attempts_per_step"] == [1] and r["gen_tokens"] == 7
+
+
+def test_the_step_budget_still_binds_the_rejection_arm(draws):
+    queue, _ = draws
+    chk = FakeChecker({})
+    chk.score_steps = lambda p, prior, cands: [0.1] * len(cands)
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk,
+                           _reject_args(max_steps=3), random.Random(0))
+    assert r["n_steps"] <= 3
+
+
+def test_the_threshold_is_calibrated_as_a_quantile_of_this_cells_own_scores(tmp_path):
+    """A raw threshold means something different for every head; a quantile means
+    "the worst q of steps this head has seen" whichever head it is."""
+    import json as _json
+    f = tmp_path / "scores.jsonl"
+    f.write_text("\n".join(_json.dumps({"id": str(i), "scores": [i / 10]})
+                           for i in range(11)))
+    assert online_bon.calibrate_tau(f, 0.5) == pytest.approx(0.5)
+    assert online_bon.calibrate_tau(f, 0.8) == pytest.approx(0.8)

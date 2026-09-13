@@ -369,6 +369,19 @@ grader; Qwen3-8B instruct in thinking mode at DeepConf's published settings.
 3. **ReProbe's non-math OOD sets are out of the first run.** Worth having, not
    worth blocking on, and they need an answer grader that does not exist yet.
 
+**Blocker found 2026-09-13, before Phase 0 froze.** Dataset availability was
+checked on the TamIA login node rather than assumed. GSM8K (1,319 test rows)
+and MATH500 (500 rows, carrying `level` and `subject`, so the difficulty
+stratification of §3.2 is available) both download and are now cached.
+**GPQA-Diamond is gated**: `Idavidrein/gpqa` returns `DatasetNotFoundError:
+is a gated dataset on the Hub. You must be authenticated to access it.`
+Unblocking it needs the account holder to accept the terms on the Hub and put
+an `HF_TOKEN` on the cluster; neither can be done from this side. Until then
+Phase 2 runs as a **three-set core** (GSM8K, MATH500, PRM800K test), which
+still spans 0.90 to 0.375 single-sample accuracy and still carries the
+replication. GPQA re-enters as the non-math stress test the moment the token
+exists.
+
 Remaining to close before Phase 0 is frozen: the exact few-shot prompt used for
 the published-prompting arm, and the read layer for the instruct backbone, which
 §15 fixed at L20/L28 for the base model and which the artifact audit may move.

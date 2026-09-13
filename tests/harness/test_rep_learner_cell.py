@@ -262,3 +262,35 @@ def test_sparse_sequence_rep_is_dispatched_before_the_dense_sequence_branch():
         if "seq" in c:
             assert c.index("sparse_seq") < c.index("seq"), \
                 f"sparse_seq must be tested before seq, got {c}"
+
+
+def test_scoring_the_test_split_on_the_validation_split_is_refused(store, tmp_path):
+    """The on-policy grid passed --test_stem val, so its in_domain.auroc was the
+    same number as its own selected val AUROC (0.88300685 in the first cell). A
+    threshold and a hyperparameter configuration are both chosen on val, so that
+    number reports model selection as generalisation."""
+    prm, pb = store
+    refused = _run(prm, pb, tmp_path / "same", "last_token", "linear",
+                   extra=("--val_stem", "val_5k", "--test_stem", "val_5k"))
+    assert refused.returncode != 0
+    assert "--allow_val_as_test" in refused.stderr
+
+    out = tmp_path / "stamped"
+    allowed = _run(prm, pb, out, "last_token", "linear",
+                   extra=("--val_stem", "val_5k", "--test_stem", "val_5k",
+                          "--allow_val_as_test"))
+    assert allowed.returncode == 0, allowed.stderr[-3000:]
+    res = json.loads((out / "results.json").read_text())
+    assert res["in_domain"]["is_validation"] is True
+    assert res["protocol"]["test_is_val"] is True
+
+
+def test_a_real_test_split_is_not_flagged_as_validation(store, tmp_path):
+    prm, pb = store
+    out = tmp_path / "honest"
+    assert _run(prm, pb, out, "last_token", "linear").returncode == 0
+    res = json.loads((out / "results.json").read_text())
+    assert res["in_domain"]["is_validation"] is False
+    assert res["in_domain"]["stem"] == "test_2k"
+    assert res["protocol"]["stems"] == {"train": "probe_train_full",
+                                        "val": "val_5k", "test": "test_2k"}

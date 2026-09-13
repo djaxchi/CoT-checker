@@ -67,3 +67,55 @@ def test_a_fully_correct_trace_gets_minus_one():
     out, _ = join_labels(traces, {"t0": {"parse_ok": True,
                                          "step_labels": [1, 1, 1]}}, 2)
     assert out[0]["label"] == -1 and out[0]["faulty_steps"] == []
+
+
+# ---- question identity, added after the 2026-09-10 split audit ------------
+#
+# The archived split was disjoint by `problem_id` and still shared 27 question
+# texts between train and validation, 49 with the frozen evaluation pool and 16
+# between validation and that pool. Ids are minted from a sample index and a
+# problem hash, so one question can hold several. These tests fix the unit at
+# the question text.
+
+from scripts.onpolicy.build_onpolicy_splits import (  # noqa: E402
+    canonical_question, split_by_question,
+)
+
+
+def qtrace(uid, pid, question, n_steps=3):
+    return {"id": uid, "problem_id": pid, "problem": question,
+            "steps": ["a"] * n_steps, "gold": "4"}
+
+
+def test_one_question_under_two_ids_does_not_cross_the_split():
+    """The failure the id-level split could not see: same text, different id."""
+    traces = [qtrace(f"t{i}", f"p{i}", f"question {i % 10}?") for i in range(60)]
+    train, val, test, info = split_by_question(traces, 0.2, 0.2, seed=0)
+    sides = [{canonical_question(t["problem"]) for t in rows}
+             for rows in (train, val, test)]
+    assert not (sides[0] & sides[1]) and not (sides[0] & sides[2])
+    assert not (sides[1] & sides[2])
+    assert info["n_questions"] == 10 and info["n_problem_ids"] == 60
+    assert len(train) + len(val) + len(test) == 60
+
+
+def test_whitespace_alone_does_not_make_a_second_question():
+    a = qtrace("t0", "p0", "What is 2 + 2?")
+    b = qtrace("t1", "p1", "What is 2  +  2?\n")
+    _, _, _, info = split_by_question([a, b], 0.0, 0.0, seed=0)
+    assert info["n_questions"] == 1
+
+
+def test_the_three_splits_are_deterministic_under_the_seed():
+    traces = [qtrace(f"t{i}", f"p{i}", f"q{i}?") for i in range(40)]
+    a = split_by_question(traces, 0.2, 0.2, seed=7)[3]["question_digests"]
+    b = split_by_question(traces, 0.2, 0.2, seed=7)[3]["question_digests"]
+    c = split_by_question(traces, 0.2, 0.2, seed=8)[3]["question_digests"]
+    assert a == b and a != c
+
+
+def test_a_split_that_leaves_no_training_questions_is_refused():
+    import pytest
+    traces = [qtrace(f"t{i}", f"p{i}", f"q{i}?") for i in range(4)]
+    with pytest.raises(SystemExit):
+        split_by_question(traces, 0.5, 0.5, seed=0)

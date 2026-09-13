@@ -18,9 +18,13 @@
 # and evaluates on the same problems, so training distribution is the only thing
 # that differs. Anything else varying would make the Phase 9 gate unreadable.
 #
-# Splits are by problem, never by trajectory: ten samples of one problem exist in
-# this pool, and splitting by trajectory would let the probe memorise the problem
-# and flatter its own validation curve.
+# Splits are by canonical question text, never by trajectory and no longer by
+# problem id: ten samples of one problem exist in this pool, and the same
+# question text can carry two ids, so an id-level split let 27 question texts sit
+# on both sides of the archived train/val boundary. There is now a third split,
+# test, that neither the fit nor the threshold nor the hyperparameter search
+# touches; the archived run passed --test_stem val and so reported its own
+# selection set as an in-domain test score.
 #
 # NO INTERNET on compute nodes.
 
@@ -61,6 +65,9 @@ python scripts/onpolicy/build_onpolicy_splits.py \
   --labels "$RUN_ROOT"/labels/labels.shard*.jsonl \
   --out_dir "$RUN_ROOT/splits" --stem reprobe_onpolicy \
   --holdout_outcomes "$ONPOLICY_ROOT/onpolicy_stage1_outcomes.jsonl" \
+  --holdout_traces "$ONPOLICY_ROOT"/onpolicy_stage1.shard*_trajectories.jsonl \
+  --drop_holdout_questions \
+  --val_frac 0.15 --test_frac 0.15 \
   --force 2>&1 | tee -a "$LOG"
 
 echo
@@ -72,8 +79,8 @@ python scripts/analysis/onpolicy_label_audit.py \
   --out "$RUN_ROOT/label_audit.json" 2>&1 | tee -a "$LOG"
 
 echo
-echo "=== 3. encode train and val at layer $LAYER ==="
-for split in train val; do
+echo "=== 3. encode train, val and test at layer $LAYER ==="
+for split in train val test; do
   f="$RUN_ROOT/splits/reprobe_onpolicy_${split}.jsonl"
   [[ -f "$f" ]] || { echo "[FATAL] missing $f" >&2; exit 2; }
   if [[ -d "$REP_ROOT/$split/shard_00" ]]; then
@@ -112,7 +119,7 @@ for cell in $CELLS; do
     python scripts/train_rep_learner_cell.py \
       --rep "$rep" --learner "$learner" \
       --prm_store "$REP_ROOT" --pb_store "$EVAL_REP_ROOT" \
-      --train_stem train --val_stem val --test_stem val \
+      --train_stem train --val_stem val --test_stem test \
       --pb_subsets verifier generation \
       --out_dir "$out" --seed "$seed" --rescale zscore \
       $hp 2>&1 | tee -a "$LOG"

@@ -259,6 +259,10 @@ def main() -> None:
     p.add_argument("--train_stem", default="probe_train_full")
     p.add_argument("--val_stem", default="val_5k")
     p.add_argument("--test_stem", default="test_2k")
+    p.add_argument("--allow_val_as_test", action="store_true",
+                   help="Permit --test_stem to name the same split as --val_stem. "
+                        "The number it produces is a validation score, not a test "
+                        "score, and results.json is stamped as such.")
     p.add_argument("--pb_subsets", nargs="+",
                    default=["gsm8k", "math", "olympiadbench", "omnimath"])
     p.add_argument("--train_cap", type=int, default=None,
@@ -305,6 +309,19 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--threshold_grid", default="0.01")
     args = p.parse_args()
+
+    # A threshold and a hyperparameter configuration are both chosen on the
+    # validation split. Scoring the "test" numbers on that same split reports
+    # model selection back as generalisation; the on-policy grid did exactly that
+    # (slurm/reprobe_onpolicy_train_tamia.sh passed --test_stem val) and its
+    # in_domain.auroc equals its own val AUROC for that reason.
+    test_is_val = args.test_stem == args.val_stem
+    if test_is_val and not args.allow_val_as_test:
+        raise SystemExit(
+            f"--test_stem {args.test_stem!r} is the validation split, which is "
+            f"selected on. Build a third split (build_onpolicy_splits.py emits "
+            f"train/val/test), or pass --allow_val_as_test to record the number "
+            f"as validation rather than test.")
 
     seq = is_sequence(args.learner)
     sparse = args.rep in REP_SPARSE
@@ -563,13 +580,17 @@ def main() -> None:
     t_oracle, _, _ = select_threshold(test_scores, y_test, grid)
     in_domain = {
         "auroc": float(test_auroc),
+        "stem": args.test_stem,
+        "is_validation": bool(test_is_val),
         "val_threshold": float(t_val),
         "val_bacc": float(val_bacc),
         "fixed_0.5": step_binary_metrics(y_test, test_scores, 0.5),
         "val_selected": step_binary_metrics(y_test, test_scores, t_val),
         "oracle": step_binary_metrics(y_test, test_scores, t_oracle),
     }
-    print(f"[in_domain] AUROC={test_auroc:.4f} t_val={t_val:.2f}", flush=True)
+    label = "val, NOT a test score" if test_is_val else args.test_stem
+    print(f"[in_domain] AUROC={test_auroc:.4f} t_val={t_val:.2f} on {label}",
+          flush=True)
 
     # ---- ProcessBench ----------------------------------------------------
     pb: dict[str, dict] = {}
@@ -650,6 +671,9 @@ def main() -> None:
         "protocol": {"epochs": args.epochs, "patience": args.patience,
                      "bucketed": bool(seq and not args.no_bucket),
                      "rescale": args.rescale,
+                     "stems": {"train": args.train_stem, "val": args.val_stem,
+                               "test": args.test_stem},
+                     "test_is_val": bool(test_is_val),
                      "batch_size": args.batch_size, "t_max": args.t_max,
                      "dropout": args.dropout,
                      "threshold_grid": args.threshold_grid},

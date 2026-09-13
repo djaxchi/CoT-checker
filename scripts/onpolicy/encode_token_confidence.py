@@ -120,8 +120,19 @@ def main() -> None:
         prompt = generation_prompt(row["problem"])
         solution = row["solution"]
         p_ids = tokzr(prompt, add_special_tokens=False)["input_ids"]
-        enc = tokzr(solution, add_special_tokens=False, return_offsets_mapping=True)
-        s_ids, offsets = enc["input_ids"], enc["offset_mapping"]
+        # Offsets need a fast tokenizer. Qwen ships one, but a slow fallback
+        # would otherwise crash the whole job an hour into the queue, so the
+        # answer-margin rule degrades to nan instead of taking the run down.
+        try:
+            enc = tokzr(solution, add_special_tokens=False, return_offsets_mapping=True)
+            offsets = enc["offset_mapping"]
+        except (NotImplementedError, ValueError, KeyError):
+            enc = tokzr(solution, add_special_tokens=False)
+            offsets = []
+            if i == 0:
+                print("[conf] WARNING no offset mapping; answer margin disabled",
+                      flush=True)
+        s_ids = enc["input_ids"]
         if not s_ids:
             continue
         ids = torch.tensor([p_ids + s_ids], device=device)
@@ -144,7 +155,7 @@ def main() -> None:
         span_total += 1
         span_ok += int(verify_spans_cover(spans, len(s_ids), tol=3))
         ch = answer_char_span(solution)
-        ans = char_span_to_token_span(offsets, ch) if ch else (0, 0)
+        ans = char_span_to_token_span(offsets, ch) if (ch and offsets) else (0, 0)
 
         uid = row["traj_uid"]
         store[f"{uid}::conf"] = conf.astype(np.float32)

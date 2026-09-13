@@ -466,3 +466,68 @@ neither.
 4. The decision now needs a human: the scientifically honest next step is a
    re-run at a token budget that removes the confound, which is new compute, not
    a re-reading of what is on disk.
+
+
+## 9. Phase 1 verdict, after removing the confound
+
+Re-running the race with truncated candidates dropped before the vote is formed
+(`--drop_truncated_at 766`) is the closest the saved pool comes to "what if the
+budget had been adequate". It removes information as well as the confound, so it
+bounds the answer rather than settling it. On 234 problems, 2,238 surviving
+candidates, 65 ties, random 0.0943:
+
+```
+answer_token_margin          0.2154   +0.1211 [+0.0534, +0.1932]
+verifier_worst_step          0.1846   +0.0903 [+0.0168, +0.1717]
+mean_token_conf              0.1692   +0.0750 [+0.0111, +0.1447]
+mean_sampled_logprob         0.1692   +0.0750 [+0.0197, +0.1380]
+deepconf_bottom10_w32        0.1538   +0.0596 [+0.0032, +0.1232]
+deepconf_lowest_group_w32    0.1538   +0.0596 [+0.0093, +0.1187]
+
+verifier paired against each, all crossing zero:
+  vs deepconf_bottom10_w32      +0.0308 [-0.0476, +0.1194]
+  vs mean_token_conf            +0.0154 [-0.0625, +0.0938]
+  vs mean_sampled_logprob       +0.0154 [-0.0625, +0.0923]
+  vs answer_token_margin        -0.0308 [-0.1061, +0.0462]
+```
+
+Three things follow, and they do not all point the same way.
+
+**The §20 headline is not a truncation artifact.** With the contaminated
+candidates gone the verifier's gain does not shrink, it grows, from +0.0651
+[-0.0206, +0.1573] to +0.0903 [+0.0168, +0.1717], and the interval now clears
+zero. Truncated traces are correct 5.5% of the time and were adding noise to the
+decision rather than carrying it. This is the opposite of what §8 feared.
+
+**Nothing separates the verifier from token confidence.** Every paired interval
+crosses zero. The verifier is numerically ahead of all four DeepConf-family
+rules and numerically behind answer-token margin, and none of it is
+distinguishable at this n. The registered prediction of §2.4, that answer-token
+margin would fail, is **not supported**: it is the numerically strongest free
+rule even after the confound is removed. That prediction was drawn from a
+multiple-choice GPQA setting, and open-numeric answers evidently behave
+differently.
+
+**The gate fired on no power, not on a result.** 65 ties, and the differences
+that matter are one to four problems. The preregistered stopping rule of Phase 1
+says a confidence rule matching the verifier means the study reports that and
+stops. It matches, at plus or minus 0.08. Treating that as a demonstrated
+equivalence would be the same error the rest of this plan is built to avoid, so
+the gate is recorded as fired and as uninformative, and the decision to
+continue is escalated rather than taken here.
+
+### What the scaled study must change
+
+1. **Token budget.** 768 is not enough for Qwen3-8B-Base at T=1.0 on MATH:
+   21.2% of traces hit it. Phase 2 raises it until the truncation share is
+   near zero and reports that share as a gate. ReProbe's 256 would be worse.
+2. **The co-primary endpoint changes.** It was "verifier versus the best Tier-1
+   confidence rule" with that rule to be selected later. Phase 1 has selected it:
+   **answer-token log-probability margin**, which is now named in advance, is
+   the competitor to beat, and is currently ahead.
+3. **Power is the point.** The reason to run the four-set core is no longer
+   robustness. It is that 65 ties cannot separate two hypotheses that differ by
+   three points, and nothing on disk can fix that.
+4. **§20 needs a correction notice** for the truncation confound regardless of
+   what happens next, since §20.12's "no cheap ordering reproduces it" is false
+   as stated.

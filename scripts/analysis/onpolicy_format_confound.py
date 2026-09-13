@@ -37,7 +37,14 @@ from src.eval.math_grade import normalize_answer  # noqa: E402
 
 
 def build(onpolicy_root: Path, reprobe_root: Path, conf_files: list[Path],
-          max_cells: int, seed: int, val_frac: float):
+          max_cells: int, seed: int, val_frac: float,
+          drop_truncated_at: int = 0):
+    """`drop_truncated_at` removes candidates at or above that generated-token
+    count before the vote is formed. It is the closest thing the saved pool
+    offers to "what if the budget had been adequate", and it is a filter rather
+    than a regeneration: it removes information as well as the confound, so it
+    bounds the answer rather than settling it.
+    """
     pool, question = load_pool(onpolicy_root)
     fitted = fitted_questions(reprobe_root / "reprobe_train_judge_traces.jsonl",
                               sorted(reprobe_root.glob("labels.shard*.jsonl")),
@@ -52,14 +59,20 @@ def build(onpolicy_root: Path, reprobe_root: Path, conf_files: list[Path],
             worst.setdefault(r["id"], []).append(max(float(s) for s in r["scores"]))
     wmean = {k: float(np.mean(v)) for k, v in worst.items()}
 
+    ntok = {r["traj_uid"]: r["n_gen_tokens"] for f in conf_files for r in read_rows(f)}
     by_problem: dict[str, list[dict]] = {}
     for uid, o in pool["outcomes"].items():
+        if drop_truncated_at and ntok.get(uid, 0) >= drop_truncated_at:
+            continue
         c = conf.get(uid, {})
         m = c.get("answer_token_margin", float("nan"))
         by_problem.setdefault(o["problem_id"], []).append({
             "uid": uid, "answer": normalize_answer(o.get("pred")),
             "correct": bool(o["correct"]), "margin": m, "boxed": has_boxed(m),
             "dc": c.get("bottom10_group_w32", float("nan")),
+            "lg": c.get("lowest_group_w32", float("nan")),
+            "mt": c.get("mean_token_conf", float("nan")),
+            "ml": c.get("mean_sampled_logprob", float("nan")),
             "w": wmean.get(uid, float("nan"))})
 
     ties = []
@@ -86,13 +99,17 @@ def main() -> None:
     p.add_argument("--out_dir", type=Path,
                    default=ROOT / "results/onpolicy_format_confound")
     p.add_argument("--max_cells", type=int, default=24)
+    p.add_argument("--drop_truncated_at", type=int, default=0,
+                   help="Drop candidates with >= this many generated tokens "
+                        "before voting. 766 removes the 768-cap traces.")
     p.add_argument("--split_seed", type=int, default=0)
     p.add_argument("--split_val_frac", type=float, default=0.15)
     args = p.parse_args()
 
     by_problem, ties, question, n_cells = build(
         args.onpolicy_root, args.reprobe_root, args.confidence,
-        args.max_cells, args.split_seed, args.split_val_frac)
+        args.max_cells, args.split_seed, args.split_val_frac,
+        args.drop_truncated_at)
     clusters = [question[p] for p, _, _ in ties]
     rnd = np.array([np.mean([rows[i]["correct"] for i in b]) for _, rows, b in ties])
 
@@ -109,6 +126,9 @@ def main() -> None:
     rules = {
         "verifier_worst_step": low("w"),
         "deepconf_bottom10_w32": high("dc"),
+        "deepconf_lowest_group_w32": high("lg"),
+        "mean_token_conf": high("mt"),
+        "mean_sampled_logprob": high("ml"),
         "has_boxed": select_has_boxed,
         "answer_margin": high("margin"),
         "has_boxed_then_verifier": lambda r, b: select_boxed_then(r, b, "w"),
@@ -117,6 +137,7 @@ def main() -> None:
     report = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "n_ties": len(ties), "n_cells_averaged": n_cells,
+        "drop_truncated_at": args.drop_truncated_at,
         "random_tie_accuracy": float(rnd.mean()),
         "bloc_purity": {k: sum(1 for _, rows, b in ties if bloc_purity(rows, b) == k)
                         for k in ("all_boxed", "mixed", "none_boxed")},
@@ -127,6 +148,10 @@ def main() -> None:
     }
     for x, y in [("verifier_worst_step", "has_boxed"),
                  ("verifier_worst_step", "deepconf_bottom10_w32"),
+                 ("verifier_worst_step", "deepconf_lowest_group_w32"),
+                 ("verifier_worst_step", "mean_token_conf"),
+                 ("verifier_worst_step", "mean_sampled_logprob"),
+                 ("verifier_worst_step", "answer_margin"),
                  ("has_boxed_then_verifier", "has_boxed"),
                  ("answer_margin", "has_boxed")]:
         report["paired"][f"{x} - {y}"] = cluster_bootstrap(acc[x] - acc[y], clusters)

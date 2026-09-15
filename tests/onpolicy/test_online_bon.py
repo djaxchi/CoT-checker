@@ -404,3 +404,21 @@ def test_the_threshold_is_calibrated_as_a_quantile_of_this_cells_own_scores(tmp_
                            for i in range(11)))
     assert online_bon.calibrate_tau(f, 0.5) == pytest.approx(0.5)
     assert online_bon.calibrate_tau(f, 0.8) == pytest.approx(0.8)
+
+
+def test_the_default_arms_are_the_three_the_gate_expects():
+    """Job 462208 died in 33 seconds because the rejection arms were added to
+    ARMS, which was also the default for --arms, so the verification gate
+    silently enrolled in arms it never asked for and demanded a threshold it
+    would never use."""
+    assert online_bon.DEFAULT_ARMS == ("plain", "random", "guided")
+    assert set(online_bon.DEFAULT_ARMS) < set(online_bon.ARMS)
+
+
+def test_the_gate_is_checked_before_any_generation_argument():
+    """The gate generates nothing, so nothing about generation may gate it."""
+    src = (online_bon.__file__).replace(".pyc", ".py")
+    body = open(src).read()
+    verify_at = body.index("if a.verify_against:\n        sys.exit(verify(")
+    reject_at = body.index('if any(arm.startswith("reject") for arm in a.arms):')
+    assert verify_at < reject_at

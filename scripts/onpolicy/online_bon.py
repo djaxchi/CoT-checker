@@ -86,6 +86,10 @@ from src.onpolicy.prompts import generation_prefix, verifier_prefix  # noqa: E40
 from src.eval.math_grade import grade  # noqa: E402
 
 ARMS = ("plain", "random", "guided", "reject", "reject_blind")
+# What runs when a caller names no arms. Not every arm: adding the rejection arms
+# to ARMS quietly enrolled every existing caller in them, including the gate,
+# which asks for no arms at all.
+DEFAULT_ARMS = ("plain", "random", "guided")
 STEP_SEP = "\n\n"
 
 
@@ -476,7 +480,8 @@ def main() -> None:
     p.add_argument("--stats_cache", type=Path, default=None)
     p.add_argument("--train_stem", default=None)
     p.add_argument("--assume_rescale", default=None)
-    p.add_argument("--arms", nargs="+", default=list(ARMS), choices=ARMS)
+    p.add_argument("--arms", nargs="+", default=list(DEFAULT_ARMS),
+                   choices=ARMS)
     p.add_argument("--n_candidates", type=int, default=5)
     p.add_argument("--temperature", type=float, default=1.5,
                    help="sampling temperature for the BRANCHING arms; ReProbe uses "
@@ -560,6 +565,14 @@ def main() -> None:
             "and the numbers would be wrong without looking wrong.")
     checker = Checker(a.cell_dir, backbone, tok, a.layer, stats, a.device)
 
+    # The gate generates nothing, so it is checked and exited before any
+    # generation-time argument is validated. Validating first made the gate
+    # demand a rejection threshold it would never use, and job 462208 died in 33
+    # seconds without ever scoring a step.
+    if a.verify_against:
+        sys.exit(verify(checker, a.traces, a.verify_against,
+                        a.verify_traces, a.verify_tol, a.verify_max_tol))
+
     if any(arm.startswith("reject") for arm in a.arms):
         if a.calibrate_from:
             a.reject_tau = calibrate_tau(a.calibrate_from, a.reject_quantile)
@@ -577,10 +590,6 @@ def main() -> None:
                   f"plain arm runs at {a.plain_temperature or 1.0}: the two arms "
                   f"are no longer the same policy and plain stops being the "
                   f"checker-blind control")
-
-    if a.verify_against:
-        sys.exit(verify(checker, a.traces, a.verify_against,
-                        a.verify_traces, a.verify_tol, a.verify_max_tol))
 
     problems: dict[str, dict] = {}
     for line in open(a.traces):

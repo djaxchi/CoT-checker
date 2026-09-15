@@ -40,6 +40,8 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.encode_prm800k_hidden_states import git_commit, read_jsonl, write_jsonl  # noqa: E402
 from src.eval.math_grade import grade  # noqa: E402
+from src.onpolicy.fewshot import (STOP_STRING, fewshot_prompt,  # noqa: E402
+                                  truncate_at_delimiter)
 from src.onpolicy.prompts import generation_prompt  # noqa: E402
 
 _BLANKLINE = re.compile(r"\n\s*\n")
@@ -74,7 +76,16 @@ def unique_problems(fork_items: list[dict], id_field: str = "fork_id") -> list[d
         if fid is None or not gt or fid in seen:
             continue
         seen[fid] = {"fork_id": str(fid), "problem": it["problem"],
-                     "ground_truth_answer": gt}
+                     "ground_truth_answer": gt,
+                     # Carried through so the few-shot exemplar set, the
+                     # exploratory/confirmatory assignment and the question
+                     # identity survive into every trajectory row. Dropping
+                     # these is how a per-problem field silently becomes a
+                     # global default.
+                     "dataset": it.get("dataset", ""),
+                     "split": it.get("split"),
+                     "question_hash": it.get("question_hash"),
+                     "level": it.get("level")}
     return list(seen.values())
 
 
@@ -114,10 +125,23 @@ def shard_problems(problems: list[dict], shard_idx: int, num_shards: int) -> lis
     return problems[shard_idx::num_shards]
 
 
-def build_prompt(problem: str) -> str:
-    """The sampling prompt. Defined in src/onpolicy/prompts.py so the encoder can
-    rebuild the exact context this sampler ran under (--prompt_style generation)."""
-    return generation_prompt(problem)
+def build_prompt(problem: str, style: str = "zero", dataset: str = "",
+                 n_shot: int = 4) -> str:
+    """The sampling prompt, rebuildable by the encoder from the trajectory row.
+
+    `style="zero"` is the original prompt and stays the default so every caller
+    written before tts_roster_v1 keeps its behaviour byte for byte; the encoder
+    reconstructs states by calling this with the style the trajectory records.
+
+    `style="fewshot"` is the tts_roster_v1 prompt. It exists because the zero-shot
+    prompt shows the model nothing about finishing, which is why 21.2% of the
+    previous pool ran to its token cap (REPORT.md §20.16).
+    """
+    if style == "zero":
+        return generation_prompt(problem)
+    if style == "fewshot":
+        return fewshot_prompt(problem, dataset, n_shot)
+    raise ValueError(f"unknown prompt style {style!r}")
 
 
 def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, list]:
@@ -129,7 +153,8 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
     t0 = time.perf_counter()
     n = len(problems)
     for pi, prob in enumerate(problems):
-        prompt = build_prompt(prob["problem"])
+        ds = prob.get("dataset", args.dataset)
+        prompt = build_prompt(prob["problem"], args.prompt_style, ds, args.n_shot)
         enc = tokenizer(prompt, return_tensors="pt").to(device)
         prompt_len = enc["input_ids"].shape[1]
         gen_kwargs = dict(max_new_tokens=args.max_new_tokens,
@@ -142,10 +167,32 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
                 gen_kwargs["top_k"] = args.top_k
         else:
             gen_kwargs.update(do_sample=False)
+        if args.stop_strings and args.prompt_style == "fewshot":
+            # Early stopping only fires when every sequence in the batch has hit
+            # the string, so this saves time when it can and is never relied on
+            # for correctness: the text is cut unconditionally below.
+            try:
+                gen_kwargs["stop_strings"] = [STOP_STRING]
+                gen_kwargs["tokenizer"] = tokenizer
+            except Exception:
+                pass
         with torch.no_grad():
-            out = model.generate(**enc, **gen_kwargs)
+            try:
+                out = model.generate(**enc, **gen_kwargs)
+            except (TypeError, ValueError):
+                gen_kwargs.pop("stop_strings", None); gen_kwargs.pop("tokenizer", None)
+                out = model.generate(**enc, **gen_kwargs)
         for s in range(out.shape[0]):
-            text = tokenizer.decode(out[s, prompt_len:], skip_special_tokens=True)
+            raw_ids = out[s, prompt_len:]
+            raw_text = tokenizer.decode(raw_ids, skip_special_tokens=True)
+            text = (truncate_at_delimiter(raw_text)
+                    if args.prompt_style == "fewshot" else raw_text)
+            n_raw = int((raw_ids != tokenizer.pad_token_id).sum()) if \
+                tokenizer.pad_token_id is not None else int(raw_ids.numel())
+            n_kept = len(tokenizer(text, add_special_tokens=False)["input_ids"])
+            # A trace is truncated only if it ran out of budget without the model
+            # signalling an end. Cutting at a delimiter means it DID end.
+            hit_cap = (n_raw >= args.max_new_tokens - 2) and (text == raw_text)
             g = grade(text, prob["ground_truth_answer"])
             traj_uid = f"onpolicy::{prob['fork_id']}::g{s}"
             trajectories.append({
@@ -153,6 +200,13 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
                 "problem": prob["problem"], "gold": prob["ground_truth_answer"],
                 "pred": g["pred"], "correct": g["correct"],
                 "gradeable": g["gradeable"], "solution": text,
+                # Everything the encoder needs to rebuild this exact context.
+                "prompt_style": args.prompt_style, "dataset": ds,
+                "n_shot": args.n_shot,
+                "n_gen_tokens": n_kept, "n_gen_tokens_raw": n_raw,
+                "hit_token_cap": bool(hit_cap),
+                "sample_idx": s, "split": prob.get("split"),
+                "question_hash": prob.get("question_hash"),
             })
             if not g["gradeable"]:
                 continue                          # cannot label -> drop from probe test
@@ -161,8 +215,10 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
                 g["correct"]))
         if (pi + 1) % 20 == 0 or pi + 1 == n:
             done = sum(t["correct"] for t in trajectories)
+            cap = sum(t.get("hit_token_cap", False) for t in trajectories)
             print(f"[gen] {pi+1}/{n} problems  ({time.perf_counter()-t0:.0f}s)  "
-                  f"correct-so-far={done}/{len(trajectories)}", flush=True)
+                  f"correct-so-far={done}/{len(trajectories)}  "
+                  f"hit_cap={cap}/{len(trajectories)}", flush=True)
     return step_items, trajectories
 
 
@@ -197,6 +253,16 @@ def main() -> None:
     p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
                    default="float16",
                    help="Use the backbone's training dtype; Qwen3 ships bfloat16.")
+    p.add_argument("--prompt_style", choices=["zero", "fewshot"], default="zero",
+                   help="zero is the original prompt; fewshot is tts_roster_v1's, "
+                        "which teaches the model to stop.")
+    p.add_argument("--dataset", type=str, default="",
+                   help="Exemplar set for --prompt_style fewshot. Overridden "
+                        "per problem by a 'dataset' field when present.")
+    p.add_argument("--n_shot", type=int, default=4)
+    p.add_argument("--stop_strings", action="store_true",
+                   help="Ask generate() to stop on the next-problem delimiter. "
+                        "Best effort; the text is cut regardless.")
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
 
@@ -247,7 +313,10 @@ def main() -> None:
         "run_name": args.run_name, "model": args.model_name_or_path,
         "n_problems": len(problems), "n_problems_all_shards": len(all_problems),
         "shard_idx": args.shard_idx, "num_shards": args.num_shards,
-        "n_samples": args.n_samples, "prompt_style": "generation",
+        "n_samples": args.n_samples,
+        "prompt_style": args.prompt_style, "n_shot": args.n_shot,
+        "dataset": args.dataset, "stop_strings": bool(args.stop_strings),
+        "n_hit_token_cap": sum(t.get("hit_token_cap", False) for t in trajectories),
         "temperature": args.temperature, "top_p": args.top_p, "top_k": args.top_k,
         "max_new_tokens": args.max_new_tokens,
         "n_trajectories": len(trajectories), "n_gradeable": n_grad,

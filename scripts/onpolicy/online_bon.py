@@ -82,7 +82,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from src.harness.learners import build_learner  # noqa: E402
 from scripts.onpolicy.score_cells_on_split import cell_stats  # noqa: E402
-from src.onpolicy.prompts import generation_prefix, verifier_prefix  # noqa: E402
+from src.onpolicy.prompts import (context, generation_prefix,  # noqa: E402
+                                  verifier_prefix)
 from src.eval.math_grade import grade  # noqa: E402
 
 ARMS = ("plain", "random", "guided", "reject", "reject_blind")
@@ -197,14 +198,19 @@ class Checker:
 def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
                       n: int, temperature: float, top_p: float,
                       max_new_tokens: int, device: str,
-                      top_k: int = 50) -> tuple[list[str], int]:
+                      top_k: int = 50, prompt_style: str = "zero",
+                      dataset: str = "", n_shot: int = 4) -> tuple[list[str], int]:
     """n candidate next steps, each cut at the first blank line.
 
     The step splitter downstream segments on blank lines, so a candidate must be
     exactly one step; generating past the boundary and truncating keeps the
     sampler's own distribution rather than forcing an early stop token.
     """
-    ctx = generation_prefix(problem, STEP_SEP.join(prior_steps))
+    # The context must match the sampler that wrote the offline pool byte for
+    # byte, and there are now two sampler prompts. Defaulting to "zero" keeps
+    # every pre-tts_roster_v1 caller identical.
+    ctx = context(prompt_style, problem, STEP_SEP.join(prior_steps),
+                  dataset, n_shot)
     # add_special_tokens defaults to True, matching what
     # scripts/generate_onpolicy_steps.py sends to model.generate. Dropping the
     # BOS here would sample from a different distribution than the policy whose
@@ -268,13 +274,17 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
     chosen_scores: list[float] = []
     pool_scores: list[list[float]] = []
     gen_tokens, attempts_per_step = 0, []
+    rejected_drafts: list[list[str]] = []
+    kept_attempt: list[int] = []
     for _ in range(args.max_steps):
         tried: list[tuple[float, str]] = []
-        accepted: tuple[float, str] | None = None
+        kept: int | None = None
         for _attempt in range(args.max_retries + 1):
-            cands, used = sample_candidates(backbone, tok, problem, steps, 1,
-                                            temp, args.top_p, args.max_new_tokens,
-                                            args.device, args.top_k)
+            cands, used = sample_candidates(
+                backbone, tok, problem, steps, 1, temp, args.top_p,
+                args.max_new_tokens, args.device, args.top_k,
+                getattr(args, "prompt_style", "zero"),
+                getattr(args, "dataset", ""), getattr(args, "n_shot", 4))
             gen_tokens += used
             cand = (cands[0] if cands else "").strip()
             if blind:
@@ -286,17 +296,23 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
             tried.append((u, cand))
             passes = (u == 0.0) if blind else (u <= args.reject_tau)
             if passes:
-                accepted = (u, cand)
+                kept = len(tried) - 1
                 break
-        if accepted is None:
+        if kept is None:
             # Retries exhausted. The checker takes the least condemned it saw;
             # the blind arm takes a uniform one, which is what keeps its output
             # distribution identical to plain sampling.
-            accepted = (rng.choice(tried) if blind
-                        else min(tried, key=lambda t: t[0]))
+            kept = (rng.randrange(len(tried)) if blind
+                    else min(range(len(tried)), key=lambda j: tried[j][0]))
+        accepted = tried[kept]
         pool_scores.append([round(u, 5) for u, _ in tried])
         chosen_scores.append(accepted[0])
         attempts_per_step.append(len(tried))
+        # The text that was thrown away, not just its score. Without it a reader
+        # can see that a draft was condemned at 0.94 but not what it said, which
+        # is the one thing needed to judge whether the checker was right.
+        kept_attempt.append(kept)
+        rejected_drafts.append([c for j, (_, c) in enumerate(tried) if j != kept])
         steps.append(accepted[1])
         if is_final(accepted[1]) or not accepted[1]:
             break
@@ -312,6 +328,11 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
             "checker_calls": 0 if blind else sum(attempts_per_step),
             "scored_candidates": 0 if blind else sum(attempts_per_step),
             "attempts_per_step": attempts_per_step,
+            # rejected_drafts[i] holds every draft of step i that was not kept, in
+            # the order drawn; kept_attempt[i] indexes pool_scores[i] so the two
+            # can be aligned without guessing which score belongs to the winner.
+            "rejected_drafts": rejected_drafts,
+            "kept_attempt": kept_attempt,
             "resample_rate": float(np.mean([n - 1 for n in attempts_per_step]))
             if attempts_per_step else 0.0}
 
@@ -329,10 +350,11 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
         temp = args.plain_temperature
     gen_tokens = 0
     for _ in range(args.max_steps):
-        cands, used = sample_candidates(backbone, tok, problem, steps, n,
-                                        temp, args.top_p,
-                                        args.max_new_tokens, args.device,
-                                        getattr(args, "top_k", 50))
+        cands, used = sample_candidates(
+            backbone, tok, problem, steps, n, temp, args.top_p,
+            args.max_new_tokens, args.device, getattr(args, "top_k", 50),
+            getattr(args, "prompt_style", "zero"),
+            getattr(args, "dataset", ""), getattr(args, "n_shot", 4))
         gen_tokens += used
         cands = [c for c in cands if c] or [""]
         if arm == "guided":

@@ -44,7 +44,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.encode_prm800k_hidden_states import git_commit, read_jsonl, write_jsonl  # noqa: E402
 from scripts.generate_onpolicy_steps import split_into_steps  # noqa: E402
 from src.analysis import token_confidence as tc  # noqa: E402
-from src.onpolicy.prompts import generation_prompt  # noqa: E402
+from src.onpolicy.prompts import context_from_row  # noqa: E402
 from src.onpolicy.spans import (answer_char_span, char_span_to_token_span,  # noqa: E402
                                 step_token_spans, verify_spans_cover)
 
@@ -117,7 +117,9 @@ def main() -> None:
     t0 = time.perf_counter()
 
     for i, row in enumerate(mine):
-        prompt = generation_prompt(row["problem"])
+        # Dispatches on the row's own recorded prompt style; hardcoding
+        # one would reconstruct a context the model never saw.
+        prompt = context_from_row(row)
         solution = row["solution"]
         p_ids = tokzr(prompt, add_special_tokens=False)["input_ids"]
         # Offsets need a fast tokenizer. Qwen ships one, but a slow fallback

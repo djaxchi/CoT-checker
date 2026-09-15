@@ -31,6 +31,9 @@ from __future__ import annotations
 
 STYLES = ("verifier", "generation")
 
+# Prompt styles a *sampler* can have run under, as recorded per trajectory.
+SAMPLER_STYLES = ("zero", "fewshot")
+
 
 def generation_prompt(problem: str) -> str:
     """The sampling prompt. Byte-identical to what the generator sends."""
@@ -63,3 +66,37 @@ def build_prefix(style: str, problem: str, prefix: str) -> str:
     if style == "generation":
         return generation_prefix(problem, prefix)
     raise ValueError(f"unknown prompt style {style!r}; expected one of {STYLES}")
+
+
+def context(style: str, problem: str, prefix: str = "", dataset: str = "",
+            n_shot: int = 4) -> str:
+    """The exact string the model had in front of it at the start of a step.
+
+    Every consumer that reconstructs generative states has to agree with the
+    sampler byte for byte, and there are now two sampler prompts rather than one.
+    Hardcoding either is a silent failure: the forward pass still runs, the
+    logprobs and step scores still look plausible, and they describe a context
+    the model never saw. So the style travels on the trajectory row and every
+    reconstruction dispatches through here.
+
+    `style` is the sampler style recorded by scripts/generate_onpolicy_steps.py,
+    not the encoder-side `verifier`/`generation` distinction above.
+    """
+    if style == "zero":
+        return generation_prefix(problem, prefix)
+    if style == "fewshot":
+        from src.onpolicy.fewshot import fewshot_prompt
+        base = fewshot_prompt(problem, dataset, n_shot)
+        return base if not prefix else f"{base}{prefix}\n\n"
+    raise ValueError(f"unknown sampler prompt style {style!r}; "
+                     f"expected one of {SAMPLER_STYLES}")
+
+
+def context_from_row(row: dict, prefix: str = "") -> str:
+    """`context` driven by a trajectory row's own recorded fields.
+
+    Defaults to "zero" so a row written before tts_roster_v1, which carries no
+    style at all, reconstructs exactly as it always did.
+    """
+    return context(row.get("prompt_style", "zero"), row["problem"], prefix,
+                   row.get("dataset", ""), int(row.get("n_shot", 4)))

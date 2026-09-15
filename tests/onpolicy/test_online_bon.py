@@ -422,3 +422,125 @@ def test_the_gate_is_checked_before_any_generation_argument():
     verify_at = body.index("if a.verify_against:\n        sys.exit(verify(")
     reject_at = body.index('if any(arm.startswith("reject") for arm in a.arms):')
     assert verify_at < reject_at
+
+
+def test_the_rejected_draft_text_is_kept_not_just_its_score(draws):
+    """Without the text a reader can see that a draft was condemned at 0.94 but
+    not what it said, which is the one thing needed to judge the checker."""
+    queue, _ = draws
+    queue.extend(["bad opening", "good \\boxed{4}"])
+    chk = FakeChecker({"bad opening": 0.9, "good \\boxed{4}": 0.1})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk, _reject_args(),
+                           random.Random(0))
+    assert r["rejected_drafts"] == [["bad opening"]]
+    assert r["steps"] == ["good \\boxed{4}"]
+
+
+def test_kept_attempt_indexes_the_score_of_the_winner(draws):
+    """pool_scores holds every draft's score, so the winner has to be identified
+    by index or the alignment is a guess."""
+    queue, _ = draws
+    queue.extend(["a", "b", "c \\boxed{4}"])
+    chk = FakeChecker({"a": 0.9, "b": 0.8, "c \\boxed{4}": 0.1})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk, _reject_args(),
+                           random.Random(0))
+    assert r["kept_attempt"] == [2]
+    assert r["pool_scores"][0][r["kept_attempt"][0]] == 0.1
+    assert r["rejected_drafts"] == [["a", "b"]]
+
+
+def test_an_exhausted_step_records_the_drafts_it_beat(draws):
+    """When retries run out the least condemned wins, and it is not the last one
+    drawn, so the index must follow the winner rather than the order."""
+    queue, _ = draws
+    queue.extend(["worst", "best \\boxed{4}", "middling"])
+    chk = FakeChecker({"worst": 0.9, "best \\boxed{4}": 0.7, "middling": 0.8})
+    r = online_bon.rollout("reject", "p?", "4", None, None, chk,
+                           _reject_args(max_retries=2), random.Random(0))
+    assert r["kept_attempt"] == [1]
+    assert r["rejected_drafts"] == [["worst", "middling"]]
+    assert r["steps"] == ["best \\boxed{4}"]
+
+
+def test_a_step_kept_first_try_records_no_rejected_draft(draws):
+    queue, _ = draws
+    queue.extend(["fine \\boxed{4}"])
+    r = online_bon.rollout("reject", "p?", "4", None, None,
+                           FakeChecker({"fine \\boxed{4}": 0.1}), _reject_args(),
+                           random.Random(0))
+    assert r["rejected_drafts"] == [[]] and r["kept_attempt"] == [0]
+
+
+def test_the_blind_arm_also_records_what_its_coin_threw_away(draws):
+    """Comparing what the checker rejects against what a coin rejects is the
+    whole point of having the blind arm's text too."""
+    queue, _ = draws
+    queue.extend(["x", "y \\boxed{4}"])
+    r = online_bon.rollout("reject_blind", "p?", "4", None, None, FakeChecker({}),
+                           _reject_args(blind_retry_rate=1.0, max_retries=1),
+                           random.Random(0))
+    assert sum(len(v) for v in r["rejected_drafts"]) >= 1
+
+
+def test_sample_candidates_defaults_to_the_zero_shot_context():
+    """Every caller written before tts_roster_v1 must stay byte-identical."""
+    import scripts.onpolicy.online_bon as ob
+    from src.onpolicy.prompts import generation_prefix
+    seen = {}
+
+    class Tok:
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, text, **kw):
+            seen["ctx"] = text
+            import torch
+
+            class E(dict):
+                def to(self, d):
+                    return self
+            return E(input_ids=torch.zeros((1, 3), dtype=torch.long))
+
+        def decode(self, ids, **kw):
+            return "a step"
+
+    class Backbone:
+        def generate(self, **kw):
+            import torch
+            return torch.zeros((kw["num_return_sequences"], 5), dtype=torch.long)
+
+    ob.sample_candidates(Backbone(), Tok(), "P", ["s1"], 1, 1.0, 0.95, 32, "cpu")
+    assert seen["ctx"] == generation_prefix("P", "s1")
+
+
+def test_sample_candidates_builds_the_fewshot_context_when_asked():
+    """A hardcoded prompt here fails silently: the pass runs and the scores
+    describe a context the model never saw."""
+    import scripts.onpolicy.online_bon as ob
+    from src.onpolicy.fewshot import fewshot_prompt
+    seen = {}
+
+    class Tok:
+        pad_token_id = 0
+        eos_token_id = 0
+
+        def __call__(self, text, **kw):
+            seen["ctx"] = text
+            import torch
+
+            class E(dict):
+                def to(self, d):
+                    return self
+            return E(input_ids=torch.zeros((1, 3), dtype=torch.long))
+
+        def decode(self, ids, **kw):
+            return "a step"
+
+    class Backbone:
+        def generate(self, **kw):
+            import torch
+            return torch.zeros((kw["num_return_sequences"], 5), dtype=torch.long)
+
+    ob.sample_candidates(Backbone(), Tok(), "P", ["s1"], 1, 1.0, 0.95, 32, "cpu",
+                         50, "fewshot", "math", 4)
+    assert seen["ctx"] == fewshot_prompt("P", "math") + "s1\n\n"

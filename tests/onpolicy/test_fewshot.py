@@ -77,3 +77,48 @@ def test_truncation_never_returns_empty_for_a_leading_delimiter():
     caller needs to see the degenerate text and record it.
     """
     assert truncate_at_delimiter(f"{DELIMITER}\nsomething") != ""
+
+
+# ---- prompt-style dispatch ------------------------------------------------
+#
+# Two consumers reconstruct the sampler's context to recover generative states:
+# the logprob encoder and the online rejection loop. Both used to hardcode the
+# zero-shot prompt. That failure is silent, since the forward pass still runs
+# and the numbers still look plausible while describing a context the model
+# never saw, so it gets its own tests.
+
+def test_context_zero_style_is_byte_identical_to_the_old_path():
+    from src.onpolicy.prompts import context, generation_prefix
+    assert context("zero", "P", "s1") == generation_prefix("P", "s1")
+    assert context("zero", "P") == generation_prefix("P", "")
+
+
+def test_context_fewshot_starts_from_the_fewshot_prompt():
+    from src.onpolicy.prompts import context
+    got = context("fewshot", "P", "", "gsm8k")
+    assert got == fewshot_prompt("P", "gsm8k")
+
+
+def test_context_fewshot_appends_prior_steps_with_the_step_separator():
+    from src.onpolicy.prompts import context
+    got = context("fewshot", "P", "step one\n\nstep two", "gsm8k")
+    assert got == fewshot_prompt("P", "gsm8k") + "step one\n\nstep two\n\n"
+
+
+def test_context_from_row_defaults_to_zero_for_legacy_rows():
+    """Rows written before tts_roster_v1 carry no style and must not change."""
+    from src.onpolicy.prompts import context_from_row, generation_prefix
+    assert context_from_row({"problem": "P"}) == generation_prefix("P", "")
+
+
+def test_context_from_row_uses_the_rows_own_dataset():
+    from src.onpolicy.prompts import context_from_row
+    row = {"problem": "P", "prompt_style": "fewshot", "dataset": "math", "n_shot": 4}
+    assert context_from_row(row) == fewshot_prompt("P", "math")
+    assert context_from_row(row) != fewshot_prompt("P", "gsm8k")
+
+
+def test_context_rejects_an_unknown_style_rather_than_defaulting():
+    from src.onpolicy.prompts import context
+    with pytest.raises(ValueError):
+        context("chatml", "P")

@@ -607,3 +607,48 @@ def test_score_plain_defaults_off_so_the_control_stays_free():
                    __import__("random").Random(0))
     finally:
         ob.sample_candidates = orig
+
+
+# ---- blind-arm retry rate --------------------------------------------------
+#
+# The blind arm prices the retry loop: same machinery, accept decided by a coin.
+# It only prices anything if it draws as often as the real arm. §20.17 passed the
+# reject arm's measured extra-draws-per-step straight in as the per-draw
+# probability, so 0.6399 became p + p^2 = 1.05 extra draws against reject's 0.54.
+
+def test_blind_probability_solves_the_geometric_sum():
+    from scripts.onpolicy.online_bon import blind_probability
+    p = blind_probability(0.54, 2)
+    assert abs((p + p ** 2) - 0.54) < 1e-6
+    assert abs(p - 0.3888) < 1e-3          # the value §20.17 said it should be
+
+
+def test_blind_probability_reproduces_the_bug_it_replaces():
+    """Passing the rate straight through, as the old launcher did, overshoots."""
+    from scripts.onpolicy.online_bon import blind_probability
+    naive = 0.6399
+    assert naive + naive ** 2 > 1.0        # 1.05 extra draws
+    fixed = blind_probability(0.54, 2)
+    assert fixed + fixed ** 2 < naive + naive ** 2
+
+
+def test_blind_probability_generalises_past_two_retries():
+    from scripts.onpolicy.online_bon import blind_probability
+    for k in (1, 3, 4):
+        p = blind_probability(0.5, k)
+        got = sum(p ** i for i in range(1, k + 1))
+        assert abs(got - 0.5) < 1e-6, f"k={k} gave {got}"
+
+
+def test_blind_probability_clamps_at_the_ends():
+    from scripts.onpolicy.online_bon import blind_probability
+    assert blind_probability(0.0, 2) == 0.0
+    assert blind_probability(-1.0, 2) == 0.0
+    assert blind_probability(5.0, 2) == 1.0      # unreachable target
+
+
+def test_blind_probability_rejects_zero_retries():
+    import pytest
+    from scripts.onpolicy.online_bon import blind_probability
+    with pytest.raises(ValueError):
+        blind_probability(0.3, 0)

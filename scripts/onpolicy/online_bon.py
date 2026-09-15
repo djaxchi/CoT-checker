@@ -243,6 +243,38 @@ def is_final(step: str) -> bool:
     return "\\boxed{" in step
 
 
+def blind_probability(target_extra_draws: float, max_retries: int) -> float:
+    """Per-draw retry probability giving `target_extra_draws` extra draws a step.
+
+    The blind arm exists to price the retry loop: same machinery, accept decided
+    by a coin, so any accuracy it moves is the loop rather than the checker.
+    That only works if it draws as often as the real arm does.
+
+    §20.17 passed the reject arm's measured extra-draws-per-step straight in as
+    the per-draw probability. With two retries a probability p yields p + p^2
+    extra draws, so 0.6399 became 1.05 against reject's 0.54, and the blind arm
+    retried roughly twice as often as the thing it was pricing. The null it
+    reported was therefore conservative rather than wrong, but it was not the
+    matched control it claimed to be.
+
+    Expected extra draws for k retries is p + p^2 + ... + p^k, monotone in p on
+    [0, 1], so bisection is exact enough and works for any k rather than only
+    the quadratic case.
+    """
+    if target_extra_draws <= 0:
+        return 0.0
+    if max_retries < 1:
+        raise ValueError(f"max_retries must be >= 1, got {max_retries}")
+    if target_extra_draws >= max_retries:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        draws = sum(mid ** i for i in range(1, max_retries + 1))
+        lo, hi = (mid, hi) if draws < target_extra_draws else (lo, mid)
+    return (lo + hi) / 2
+
+
 def calibrate_tau(scores_path: Path, quantile: float) -> float:
     """Kill threshold as a quantile of the cell's OWN offline step scores.
 
@@ -251,7 +283,14 @@ def calibrate_tau(scores_path: Path, quantile: float) -> float:
     steps this head has seen" whichever head it is. It has to come from the same
     cell that is doing the scoring.
     """
-    xs = [v for line in open(scores_path) for v in json.loads(line)["scores"]]
+    # Offline score files call the field "scores"; a calibration rollout written
+    # by the plain arm calls it "chosen_scores". Accept either, so a threshold
+    # can be calibrated from this dataset's own distribution without an
+    # intermediate conversion step that could silently reorder anything.
+    xs = []
+    for line in open(scores_path):
+        row = json.loads(line)
+        xs.extend(row.get("scores") or row.get("chosen_scores") or [])
     if not xs:
         raise SystemExit(f"{scores_path} carries no step scores to calibrate on")
     tau = float(np.quantile(xs, quantile))
@@ -547,6 +586,13 @@ def main() -> None:
                    help="retry probability for reject_blind. Set it to the "
                         "measured resample_rate of the reject arm so the two "
                         "spend the same tokens.")
+    p.add_argument("--blind_target_extra_draws", type=float, default=None,
+                   help="Extra draws per step the blind arm should make, "
+                        "normally the reject arm's measured resample_rate. "
+                        "Converted to a per-draw probability by solving "
+                        "p + p^2 + ... = rate; passing the rate directly as a "
+                        "probability is the §20.17 bug that made blind retry "
+                        "twice as often as the arm it was pricing.")
     p.add_argument("--score_plain", action="store_true",
                    help="Score the plain arm's kept steps without using the "
                         "score. Changes no decision, so plain stays the exact "
@@ -624,6 +670,14 @@ def main() -> None:
             raise SystemExit(
                 "the rejection arms need a threshold: pass --calibrate_from with "
                 "this cell's offline step scores, or --reject_tau directly.")
+        # A target expressed in extra draws per step is what the reject arm
+        # actually reports, so convert it here rather than making the launcher
+        # do the algebra in bash.
+        if a.blind_target_extra_draws is not None and a.blind_retry_rate is None:
+            a.blind_retry_rate = blind_probability(a.blind_target_extra_draws,
+                                                   a.max_retries)
+            print(f"[blind] {a.blind_target_extra_draws:.4f} extra draws/step "
+                  f"with {a.max_retries} retries -> p={a.blind_retry_rate:.4f}")
         if "reject_blind" in a.arms and a.blind_retry_rate is None:
             raise SystemExit(
                 "reject_blind prices the retry loop, so it needs "
@@ -638,6 +692,11 @@ def main() -> None:
     problems: dict[str, dict] = {}
     for line in open(a.traces):
         r = json.loads(line)
+        # The judge-trace schema calls it "gold"; the tts_roster_v1 splits call
+        # it "ground_truth_answer". Accept either rather than silently KeyError
+        # a whole run at problem one.
+        if "gold" not in r and "ground_truth_answer" in r:
+            r["gold"] = r["ground_truth_answer"]
         problems.setdefault(r["problem_id"], r)
     keys = sorted(problems)[: a.max_problems]
     # Shard round-robin, not in contiguous blocks: the problem ids sort into
@@ -664,6 +723,10 @@ def main() -> None:
         for arm in a.arms:
             if (pid, arm) in done:
                 continue
+            # The exemplar set is a property of the problem, not of the run:
+            # a GSM8K prompt on a MATH problem is a different sampler. Set per
+            # problem rather than left as a global default.
+            a.dataset = rec.get("dataset") or getattr(a, "dataset", "")
             rng = random.Random(f"{a.seed}:{pid}:{arm}")
             torch.manual_seed(abs(hash((a.seed, pid, arm))) % (2**31))
             r = rollout(arm, rec["problem"], rec["gold"], backbone, tok,

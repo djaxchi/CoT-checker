@@ -89,7 +89,7 @@ run_sharded () {   # $1 = tag, rest = args to online_bon.py
       --prompt_style fewshot --n_shot 4 \
       --plain_temperature 1.0 --reject_temperature 1.0 \
       --top_p 0.95 --top_k 50 \
-      --shard_idx "$i" --num_shards 4 --force "$@" >>"$LOG" 2>&1 &
+      --shard_idx "$i" --num_shards 4 "$@" >>"$LOG" 2>&1 &
     pids+=($!)
   done
   local fail=0
@@ -105,8 +105,8 @@ echo "=== stage 0: per-scorer calibration on this dataset ==="
 for CELL in $CELLS; do
   NAME=$(basename "$CELL")
   run_sharded "calib:$NAME" --arms plain --score_plain \
-    --cell "$CELL" --max_problems "$CALIB_PROBLEMS" \
-    --out_dir "$OUT_DIR/calib_$NAME"
+    --cell_dir "$CELL" --max_problems "$CALIB_PROBLEMS" \
+    --out "$OUT_DIR/calib_$NAME/rollouts.jsonl"
 done
 
 echo "=== stage 0 gate: does the scorer discriminate on THIS data? ==="
@@ -117,17 +117,17 @@ out = os.environ["OUT_DIR"]
 ok = True
 for d in sorted(glob.glob(f"{out}/calib_*")):
     rows = [json.loads(l) for f in glob.glob(f"{d}/*rollouts*.jsonl") for l in open(f)]
-    rows = [r for r in rows if r.get("step_scores")]
+    rows = [r for r in rows if r.get("chosen_scores")]
     if not rows:
         print(f"[FAIL] {os.path.basename(d)}: no scored rollouts"); ok = False; continue
-    s = np.array([max(r["step_scores"]) for r in rows])      # worst-step, the primary
+    s = np.array([max(r["chosen_scores"]) for r in rows])      # worst-step, the primary
     y = np.array([bool(r["correct"]) for r in rows])
     if y.all() or not y.any():
         print(f"[WARN] {os.path.basename(d)}: outcome has no variance"); continue
     from scipy.stats import rankdata
     rk = rankdata(-s); n1 = y.sum(); n0 = len(y) - n1
     auroc = (rk[y].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
-    qs = {q: float(np.quantile(np.concatenate([r["step_scores"] for r in rows]), q))
+    qs = {q: float(np.quantile(np.concatenate([r["chosen_scores"] for r in rows]), q))
           for q in (0.50, 0.65, 0.80)}
     print(f"  {os.path.basename(d)}: n={len(rows)} AUROC(worst-step -> correct)={auroc:.3f} "
           f"taus={ {k: round(v,4) for k,v in qs.items()} }")
@@ -149,10 +149,10 @@ for CELL in $CELLS; do
   CAL="$OUT_DIR/calib_$NAME"
   for Q in $QUANTILES; do
     run_sharded "reject:$NAME:q$Q" --arms reject \
-      --cell "$CELL" --max_problems "$MAX_PROBLEMS" \
+      --cell_dir "$CELL" --max_problems "$MAX_PROBLEMS" \
       --max_retries "$MAX_RETRIES" \
-      --calibrate_from "$CAL" --reject_quantile "$Q" \
-      --out_dir "$OUT_DIR/reject_${NAME}_q${Q}"
+      --calibrate_from "$CAL/rollouts.jsonl" --reject_quantile "$Q" \
+      --out "$OUT_DIR/reject_${NAME}_q${Q}/rollouts.jsonl"
   done
 done
 
@@ -162,10 +162,11 @@ done
 # p + p^2 = rate is what matches them.
 echo "=== stage 2: blind control ==="
 FIRST=$(echo $CELLS | awk '{print $1}')
-run_sharded "blind" --arms reject_blind --cell "$FIRST" \
+BLIND_RATE="${BLIND_RATE:-0.54}"   # the reject arm's measured extra draws/step
+run_sharded "blind" --arms reject_blind --cell_dir "$FIRST" \
   --max_problems "$MAX_PROBLEMS" --max_retries "$MAX_RETRIES" \
-  --calibrate_from "$OUT_DIR/calib_$(basename $FIRST)" --reject_quantile 0.65 \
-  --blind_rate_solve_quadratic \
-  --out_dir "$OUT_DIR/reject_blind"
+  --calibrate_from "$OUT_DIR/calib_$(basename $FIRST)/rollouts.jsonl" --reject_quantile 0.65 \
+  --blind_target_extra_draws "$BLIND_RATE" \
+  --out "$OUT_DIR/reject_blind/rollouts.jsonl"
 
 echo "[$(date)] tts_online done"

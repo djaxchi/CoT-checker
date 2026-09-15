@@ -28,6 +28,8 @@ so there is no path by which a test problem can reach the prompt.
 
 from __future__ import annotations
 
+import re
+
 # The string that begins every problem. The model emits it when it thinks the
 # current solution is over, which is what makes it usable as a stop string.
 DELIMITER = "Problem:"
@@ -132,3 +134,45 @@ def truncate_at_delimiter(text: str) -> str:
         if idx > 0:
             return text[:idx]
     return text
+
+
+ANSWER_PHRASE = re.compile(r"answer is\s*\$?\\boxed\{", re.I)
+
+
+def truncate_at_answer(text: str) -> str:
+    """Cut after the line on which the model first states its answer.
+
+    Few-shot prompting taught the model to finish; it did not teach it to stop.
+    The smoke put the median solution at 112 tokens against the old pool's 337,
+    and then found traces that box an answer at character 235 and carry on for
+    another 5,600 characters, hallucinating a fresh problem and solving that one
+    too, never emitting the literal delimiter `truncate_at_delimiter` looks for.
+
+    Three things follow, and the third is why this cut is not optional.
+
+    1. `n_gen_tokens` reads 2048 where the solution was 80 tokens.
+    2. The step splitter yields dozens of junk steps after the answer, every one
+       of which gets scored.
+    3. `src/eval/math_grade.py` takes the **last** boxed answer (rfind), so the
+       trace is graded on its answer to a question nobody asked. Measured on the
+       240-trace smoke: 16 traces graded on a hallucinated problem, and 4 more
+       that stated a wrong answer, restarted, re-solved, and were credited for
+       the do-over.
+
+    That last class is the reason this belongs in the sampler and not in an
+    analysis flag. A trace that restarts and re-solves is running its own
+    informal best-of-2, which contaminates the one comparison this study exists
+    to make: verifier-guided test-time scaling against simply sampling more.
+
+    The anchor is the phrase the exemplars teach, "The answer is \\boxed{...}",
+    rather than the first \\boxed{} of any kind: cutting at any box eats
+    solutions that box an intermediate result first, which cost 1 extra bad flip
+    when measured. Cutting at end of line rather than at the closing brace keeps
+    the trailing "$." the exemplars end on, so the step splitter sees a complete
+    sentence.
+    """
+    m = ANSWER_PHRASE.search(text)
+    if not m:
+        return text
+    nl = text.find("\n", m.end())
+    return text if nl < 0 else text[:nl]

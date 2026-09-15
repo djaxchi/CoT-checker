@@ -122,3 +122,54 @@ def test_context_rejects_an_unknown_style_rather_than_defaulting():
     from src.onpolicy.prompts import context
     with pytest.raises(ValueError):
         context("chatml", "P")
+
+
+# ---- answer truncation ----------------------------------------------------
+#
+# The sampler must cut a trace at the answer it states, because math_grade takes
+# the LAST boxed answer. Measured on a 240-trace smoke: 16 traces were graded on
+# a hallucinated second problem, and 4 stated a wrong answer, restarted,
+# re-solved and were credited for the do-over. The second class is why this
+# belongs in the sampler: a trace running its own informal best-of-2 contaminates
+# the comparison this study exists to make.
+
+def test_answer_cut_keeps_the_stated_answer_and_drops_the_restart():
+    from src.onpolicy.fewshot import truncate_at_answer
+    text = ("x = 4.\n\nThe answer is \\boxed{4}.\n\n"
+            "The given equation is different.\n\nSo x = 2.\n\nThe answer is \\boxed{2}.")
+    assert truncate_at_answer(text) == "x = 4.\n\nThe answer is \\boxed{4}."
+
+
+def test_answer_cut_keeps_trailing_punctuation_on_the_line():
+    """Cutting at the closing brace would leave a sentence fragment for the
+    step splitter."""
+    from src.onpolicy.fewshot import truncate_at_answer
+    assert truncate_at_answer("The answer is $\\boxed{7}$.").endswith("$.")
+
+
+def test_answer_cut_is_inert_without_the_taught_phrase():
+    from src.onpolicy.fewshot import truncate_at_answer
+    text = "We compute \\boxed{5} as an intermediate.\n\nThen more work."
+    assert truncate_at_answer(text) == text
+
+
+def test_answer_cut_does_not_fire_on_a_bare_intermediate_box():
+    """Anchoring on any \\boxed{} instead of the phrase ate real solutions that
+    box an intermediate first; it cost one extra bad flip when measured."""
+    from src.onpolicy.fewshot import truncate_at_answer
+    text = ("Area is \\boxed{12} so far.\n\nContinuing.\n\n"
+            "The answer is \\boxed{24}.\n\nJunk after.")
+    assert truncate_at_answer(text) == ("Area is \\boxed{12} so far.\n\nContinuing.\n\n"
+                                        "The answer is \\boxed{24}.")
+
+
+def test_answer_cut_leaves_an_unfinished_trace_alone():
+    from src.onpolicy.fewshot import truncate_at_answer
+    text = "step one.\n\nstep two.\n\nstill working"
+    assert truncate_at_answer(text) == text
+
+
+def test_answer_cut_handles_no_trailing_newline():
+    from src.onpolicy.fewshot import truncate_at_answer
+    text = "The answer is \\boxed{3}."
+    assert truncate_at_answer(text) == text

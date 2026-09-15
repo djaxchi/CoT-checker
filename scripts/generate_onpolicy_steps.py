@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.encode_prm800k_hidden_states import git_commit, read_jsonl, write_jsonl  # noqa: E402
 from src.eval.math_grade import grade  # noqa: E402
 from src.onpolicy.fewshot import (STOP_STRING, fewshot_prompt,  # noqa: E402
-                                  truncate_at_delimiter)
+                                  truncate_at_answer, truncate_at_delimiter)
 from src.onpolicy.prompts import generation_prompt  # noqa: E402
 
 _BLANKLINE = re.compile(r"\n\s*\n")
@@ -185,8 +185,15 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
         for s in range(out.shape[0]):
             raw_ids = out[s, prompt_len:]
             raw_text = tokenizer.decode(raw_ids, skip_special_tokens=True)
-            text = (truncate_at_delimiter(raw_text)
-                    if args.prompt_style == "fewshot" else raw_text)
+            # Two cuts, in order. The delimiter cut catches a trace that opens
+            # a literal next problem; the answer cut catches the commoner case
+            # where it just starts a new question in prose. Both run before
+            # grading, because math_grade takes the LAST boxed answer and would
+            # otherwise score the trace on a problem nobody asked.
+            if args.prompt_style == "fewshot":
+                text = truncate_at_answer(truncate_at_delimiter(raw_text))
+            else:
+                text = raw_text
             n_raw = int((raw_ids != tokenizer.pad_token_id).sum()) if \
                 tokenizer.pad_token_id is not None else int(raw_ids.numel())
             n_kept = len(tokenizer(text, add_special_tokens=False)["input_ids"])
@@ -204,6 +211,7 @@ def generate_solutions(problems, tokenizer, model, device, args) -> tuple[list, 
                 "prompt_style": args.prompt_style, "dataset": ds,
                 "n_shot": args.n_shot,
                 "n_gen_tokens": n_kept, "n_gen_tokens_raw": n_raw,
+                "n_chars_dropped": len(raw_text) - len(text),
                 "hit_token_cap": bool(hit_cap),
                 "sample_idx": s, "split": prob.get("split"),
                 "question_hash": prob.get("question_hash"),

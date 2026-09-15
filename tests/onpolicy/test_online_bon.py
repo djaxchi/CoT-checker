@@ -544,3 +544,66 @@ def test_sample_candidates_builds_the_fewshot_context_when_asked():
     ob.sample_candidates(Backbone(), Tok(), "P", ["s1"], 1, 1.0, 0.95, 32, "cpu",
                          50, "fewshot", "math", 4)
     assert seen["ctx"] == fewshot_prompt("P", "math") + "s1\n\n"
+
+
+def test_score_plain_records_scores_without_changing_the_kept_step():
+    """Calibrating a rejection threshold needs scores from the dataset it will
+    run on: a quantile of PRM800K scores is a different rejection RATE on GSM8K,
+    and unmatched rates compare compute rather than skill.
+
+    The scoring must be inert. If it moved the plain arm's choice, plain would
+    stop being the checker-blind control the whole design rests on.
+    """
+    import types
+    import scripts.onpolicy.online_bon as ob
+
+    calls = []
+
+    class Checker:
+        def score_steps(self, problem, prior, cands):
+            calls.append(list(cands))
+            return [0.9] * len(cands)
+
+    def fake_sample(*a, **k):
+        n = a[4] if len(a) > 4 else 1
+        return (["a step" for _ in range(n)], 7)
+
+    orig = ob.sample_candidates
+    ob.sample_candidates = fake_sample
+    try:
+        args = types.SimpleNamespace(
+            max_steps=2, temperature=1.0, plain_temperature=1.0, top_p=0.95,
+            top_k=50, max_new_tokens=32, device="cpu", n_candidates=1,
+            score_plain=True, prompt_style="zero", dataset="", n_shot=4)
+        out = ob.rollout("plain", "P", "1", None, None, Checker(), args,
+                         __import__("random").Random(0))
+    finally:
+        ob.sample_candidates = orig
+
+    assert calls, "checker was never consulted"
+    assert all(len(c) == 1 for c in calls), "plain must score one candidate, not a pool"
+    assert all(s == "a step" for s in out["steps"]), "the kept step changed"
+
+
+def test_score_plain_defaults_off_so_the_control_stays_free():
+    import types
+    import scripts.onpolicy.online_bon as ob
+
+    class Checker:
+        def score_steps(self, *a):
+            raise AssertionError("plain must not score unless asked")
+
+    def fake_sample(*a, **k):
+        return (["a step"], 7)
+
+    orig = ob.sample_candidates
+    ob.sample_candidates = fake_sample
+    try:
+        args = types.SimpleNamespace(
+            max_steps=1, temperature=1.0, plain_temperature=1.0, top_p=0.95,
+            top_k=50, max_new_tokens=32, device="cpu", n_candidates=1,
+            prompt_style="zero", dataset="", n_shot=4)
+        ob.rollout("plain", "P", "1", None, None, Checker(), args,
+                   __import__("random").Random(0))
+    finally:
+        ob.sample_candidates = orig

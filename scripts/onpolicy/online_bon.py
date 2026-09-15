@@ -357,6 +357,13 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
             getattr(args, "dataset", ""), getattr(args, "n_shot", 4))
         gen_tokens += used
         cands = [c for c in cands if c] or [""]
+        if arm == "plain" and getattr(args, "score_plain", False):
+            # Scores the step it was going to keep anyway, changing no decision.
+            # This is how a rejection threshold gets calibrated on the dataset it
+            # will run on: a quantile of PRM800K scores means a different
+            # rejection RATE on GSM8K, and unmatched rates compare compute rather
+            # than skill.
+            chosen_scores.append(float(checker.score_steps(problem, steps, [cands[0]])[0]))
         if arm == "guided":
             u = checker.score_steps(problem, steps, cands)
             k = int(np.argmin(u))

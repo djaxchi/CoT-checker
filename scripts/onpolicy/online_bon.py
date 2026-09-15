@@ -547,6 +547,21 @@ def main() -> None:
                    help="retry probability for reject_blind. Set it to the "
                         "measured resample_rate of the reject arm so the two "
                         "spend the same tokens.")
+    p.add_argument("--score_plain", action="store_true",
+                   help="Score the plain arm's kept steps without using the "
+                        "score. Changes no decision, so plain stays the exact "
+                        "checker-blind control; it exists so a later run can "
+                        "calibrate its rejection threshold on this dataset's own "
+                        "score distribution rather than on PRM800K's, where the "
+                        "same quantile is a different rejection rate.")
+    p.add_argument("--prompt_style", choices=["zero", "fewshot"], default="zero",
+                   help="Must match the sampler that wrote the pool, or every "
+                        "reconstructed context is one the model never saw.")
+    p.add_argument("--dataset", type=str, default="",
+                   help="Exemplar set for --prompt_style fewshot.")
+    p.add_argument("--n_shot", type=int, default=4)
+    p.add_argument("--id_field", type=str, default="trace_id",
+                   help="Field grouping rows into problems in --traces.")
     p.add_argument("--max_steps", type=int, default=16)
     p.add_argument("--max_new_tokens", type=int, default=160)
     p.add_argument("--max_problems", type=int, default=300)

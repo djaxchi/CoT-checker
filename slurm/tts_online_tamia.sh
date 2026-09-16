@@ -104,6 +104,7 @@ run_sharded () {   # $1 = tag, rest = args to online_bon.py
       --traces "$SPLITS/online_subset.jsonl" --id_field problem_id \
       --model_name_or_path "$MODEL_NAME_OR_PATH" --local_files_only \
       --layer "$LAYER" --max_steps "$MAX_STEPS" \
+      --prm_store "$REP_ROOT" --stats_cache "$STATS_CACHE" \
       --max_new_tokens "$MAX_NEW_TOKENS" \
       --prompt_style fewshot --n_shot 4 \
       --plain_temperature 1.0 --reject_temperature 1.0 \

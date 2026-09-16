@@ -57,6 +57,14 @@ QUANTILES="${QUANTILES:-0.50 0.65 0.80}"
 # unverified overnight would produce numbers nobody should trust. Recorded as
 # the first follow-up rather than quietly dropped.
 CELLS="${CELLS:-$REPROBE_ROOT/cells/step_tokens__transformer_d256_l2_f1024_h4__seed42}"
+# The head was fitted on rescaled states, so scoring needs the same rescaling
+# statistics. online_bon refuses to run without them, and it is right to:
+# "scoring without them applies the head to unscaled states and the numbers
+# would be wrong without looking wrong." The statistics are a property of the
+# cell's TRAINING distribution, not of what it is being pointed at, so they come
+# from the existing repstore even though this run evaluates GSM8K and MATH500.
+REP_ROOT="${REP_ROOT:-$REPROBE_ROOT/repstore/onpolicy_train_spans}"
+STATS_CACHE="${STATS_CACHE:-$REPROBE_ROOT/stats_cache}"
 
 export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
@@ -69,6 +77,8 @@ LOG="$LOG_DIR/tts_online-${SLURM_JOB_ID:-$$}.log"
 for C in $CELLS; do
   [[ -d "$C" ]] || { echo "[FATAL] no cell at $C" >&2; exit 2; }
 done
+[[ -d "$REP_ROOT" ]] || { echo "[FATAL] no repstore at $REP_ROOT; the cell's "\
+  "rescaling statistics are refit from it and scoring without them is wrong" >&2; exit 2; }
 
 cd "$PROJECT_ROOT"
 cat <<BANNER

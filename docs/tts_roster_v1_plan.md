@@ -106,7 +106,7 @@ and is not counted as truncated.
 | id | what | cost per step |
 |---|---|---|
 | `probe_last_linear` | our verifier, `last_token x linear`, cheapest cell | reuses sampler states |
-| `probe_steptok_tf` | our verifier, `step_tokens x transformer d512`, top of the leaderboard | reuses sampler states |
+| `probe_steptok_tf` | our verifier, `step_tokens x transformer`, top of the leaderboard | reuses sampler states |
 | `prm_qwen25_math_7b` | Qwen2.5-Math-PRM-7B, off the shelf | separate 7B pass |
 | `conf_bottom10_w32` | DeepConf bottom-10% group confidence | free, from logprobs |
 
@@ -245,3 +245,26 @@ this run is the first to measure it. If it wins on MATH500 and not GSM8K, the
 finding is that the mechanism pays in proportion to how often the policy is
 wrong, which is the same shape §20.14 found for the tie-break and would be the
 second independent sighting of it.
+
+
+## 11. Scope correction before launch (2026-09-15)
+
+**The online arm runs one scorer, not two.** `online_bon.Checker` rebuilds a
+per-step sequence head and raises on a pooled readout: "online decoding needs a
+per-step sequence head; cell rep is 'last_token'. Pooled readouts score a step
+too, but this script has only been verified for step_tokens." So
+`last_token x linear`, the cheapest cell and the one §20.12 and §20.14 used for
+the tie-break, cannot drive the rejection loop until Checker grows pooled
+support. Caught by reading the class before the job ran rather than by the job
+failing at stage 0.
+
+It stays in the **offline** arm, where scoring is a batch pass and the same
+restriction does not apply, so the representation comparison survives for every
+offline selection rule and is missing only for online rejection.
+
+**The PRM is deferred out of v1.** Qwen2.5-Math-PRM-7B is downloading, but it
+needs a scoring adapter that does not exist, and its cost is the one large
+enough to move the token axis. Wiring it half-tested overnight would spend a
+node for numbers nobody should quote.
+
+Both are the first two follow-ups, in that order.

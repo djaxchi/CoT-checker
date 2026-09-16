@@ -45,9 +45,18 @@ MAX_STEPS="${MAX_STEPS:-28}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-2048}"
 MAX_RETRIES="${MAX_RETRIES:-2}"
 QUANTILES="${QUANTILES:-0.50 0.65 0.80}"
-# Two probes that differ in representation, not just in seed, so "the verifier"
-# is not one architecture's quirk.
-CELLS="${CELLS:-$REPROBE_ROOT/cells/step_tokens__transformer_d256_l2_f1024_h4__seed42 $REPROBE_ROOT/cells/last_token__linear__seed42}"
+# One scorer, not the two the plan asked for. online_bon's Checker rebuilds a
+# per-step sequence head and raises on a pooled readout:
+#
+#   "online decoding needs a per-step sequence head; cell rep is 'last_token'.
+#    Pooled readouts score a step too, but this script has only been verified
+#    for step_tokens."
+#
+# So last_token x linear, the cheapest cell and the one the tie-break work used,
+# cannot drive the online loop until Checker grows pooled support. Shipping it
+# unverified overnight would produce numbers nobody should trust. Recorded as
+# the first follow-up rather than quietly dropped.
+CELLS="${CELLS:-$REPROBE_ROOT/cells/step_tokens__transformer_d256_l2_f1024_h4__seed42}"
 
 export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1

@@ -116,11 +116,41 @@ def _fix_a_slash_b(string: str) -> str:
 
 
 def _remove_right_units(string: str) -> str:
-    # remove a trailing "\\text{ ... }" unit annotation
-    if "\\text{" in string:
-        splits = string.split("\\text{")
-        return splits[0].rstrip()
-    return string
+    """Strip a trailing unit annotation such as "5 \\text{ cm}" -> "5".
+
+    The wrapper is only a unit when something precedes it. When the answer *is*
+    the text, as in MATH's "\\text{Evelyn}" or "\\text{even}", the old rule
+    returned everything before "\\text{", which is the empty string: every text
+    answer then compared equal to every other one and to a blank prediction.
+    On MATH500 that silently randomised the label on the 10 problems whose gold
+    answer is a word, and marked "\\text{Carla}" correct against a gold of
+    "\\text{Evelyn}".
+
+    So a leading wrapper is unwrapped rather than stripped, and only a wrapper
+    with content before it is treated as a unit.
+    """
+    if "\\text{" not in string:
+        return string
+    head, _, rest = string.partition("\\text{")
+    if head.strip():
+        return head.rstrip()          # "5 \\text{ cm}" -> "5"
+    # The whole answer is the wrapper: return its contents, brace-matched.
+    depth, out = 1, []
+    for ch in rest:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        out.append(ch)
+    if depth:
+        return string                 # unbalanced: leave it alone
+    tail = rest[len(out) + 1:]
+    unwrapped = ("".join(out) + tail).strip()
+    # A repeated wrapper unwraps again; recursion terminates because each pass
+    # removes one "\\text{".
+    return _remove_right_units(unwrapped) if "\\text{" in unwrapped else unwrapped
 
 
 def _fix_sqrt(string: str) -> str:

@@ -2531,9 +2531,281 @@ Artifacts: `results/onpolicy_confidence_race/confidence_race.{json,md}`,
 `slurm/onpolicy_token_confidence_tamia.sh`,
 `docs/onpolicy_tiebreak_v2_plan.md`, job 462216.
 
+### 20.17 Step-level rejection sampling: the online arm that pays (online_reject_v1)
+
+§20.9 ran the checker during generation the way ReProbe defines it, branching
+five ways per step and keeping the best, and lost: -0.091 against plain sampling
+at 10.7x the tokens. The post-mortem blamed the procedure. The head ranked
+candidate steps well, +0.213 over choosing among the same five at random. What
+sank it was that branching needs diversity so it ran at temperature 1.5, costing
+0.304 before the checker acted, and that "lowest uncertainty of five" rewards
+steps that defer rather than commit, so it wrote 19.5 steps against plain's 9.2
+and often reached no answer.
+
+This asks the checker a smaller question. Write one step at the policy's own
+temperature 1.0. Score it. If it is condemned, **throw that step away and write it
+again**, up to two retries; otherwise keep it and continue. The sampler is never
+touched, so there is no hole to climb out of, and no step is ever *selected*, so
+nothing pushes toward stalling. A second draft is paid for only where the checker
+objects.
+
+**There is deliberately no random arm.** §20.9 needed one because branching at
+raised temperature is a different sampler. Rejection at the policy's own
+temperature is not: accepting a uniformly chosen one of k i.i.d. draws is one
+draw, so `plain` already is the exact checker-blind control. `reject_blind` is a
+price tag instead, the identical retry loop with the accept decision made by a
+coin, and it has to come out null or the loop is not distribution-preserving and
+the run is void rather than interesting.
+
+**Gate.** Live scoring reproduced the cell's offline scores over 107 steps of 20
+traces: median 0.000898 against a 0.002 bound, max 0.010947 against 0.02, with
+the bf16 batch-shape floor measured first at median 0.000487 and max 0.006439.
+The median is what matters; a wrong span, layer or rescaling shifts every step.
+
+**Results**, 296 held-out problems, every arm on the same problems and seeds.
+
+```
+q=0.70 (reject the worst 30% of steps, tau=0.394)
+arm             accuracy   steps   gen tokens   acc/1k   resample   hits cap
+plain              0.351     8.1        1,126   0.3119          .          .
+reject             0.449    11.3        2,591   0.1734       0.54       0.11
+reject_blind       0.375     8.4        2,420   0.1549       1.05       0.06
+
+plain        -> reject        +0.098 [+0.030, +0.162]  McNemar p=0.005
+plain        -> reject_blind  +0.024 [-0.037, +0.078]  p=0.49     <- the null it had to be
+reject_blind -> reject        +0.074 [+0.014, +0.139]  p=0.025    <- the checker, priced
+
+q=0.85 (tau=0.730)
+reject             0.416     9.8        1,755   0.2367       0.26       0.09
+plain        -> reject        +0.064 [-0.000, +0.128]  p=0.070
+reject_blind -> reject        +0.057 [-0.007, +0.122]  p=0.111
+```
+
+The blind arm is null at both thresholds, so the retry loop moves nothing by
+itself and the gain is the checker knowing *which* step to rewrite: +0.074 at
+q=0.70. The aggressive threshold is the better operating point; q=0.85's interval
+touches zero.
+
+**The comparison §20.9 lost, this one wins.** Guided spent 13,401 tokens to score
+0.274 where self-consistency at the same budget scored 0.554, a gap of 0.281
+against it. Rejection spends 2,591 tokens, which is 2.30 plain samples, and
+scores 0.449 where self-consistency at N=2.30 interpolates to 0.394 (N=2 0.3769,
+N=3 0.4339 on the 300-problem pool). **That is about +0.055 in favour of
+rejecting.** Treat it as an estimate, not a measurement: this run draws one plain
+sample per problem so no vote can be taken inside it, and the curve comes from
+the offline pool. A plain arm with N samples is the cheapest way to settle it and
+should run before the number is quoted anywhere.
+
+Note that accuracy per thousand tokens still favours plain single sampling
+(0.312 against 0.173). Both statements are true and not in conflict: accuracy is
+concave in tokens, so per-token efficiency always favours the smallest budget,
+while the question a practitioner faces is what to do with a budget already
+chosen. At 2,591 tokens, rejecting beats voting.
+
+**A worked example** (`p21714_7ab03e01`), because the aggregate hides where the
+rewrites land. The problem asks for the ordered pair (a,b) making
+(ax+b)(x^5+1)-(5x+1) divisible by x^2+1. Plain wrote four steps and answered
+(1/4, -1/4). Rejection's first draft of step 1 scored **0.94**, was thrown away,
+and its replacement scored **0.05**; from there the solution substituted x=i,
+expanded, solved b=a+1 and a+b=5, and boxed (2,3), which is correct. Steps 2, 3,
+4, 7, 8 and 9 passed on the first draft, the routine ones. The rewrites landed on
+step 1, framing the whole approach, and steps 5 and 6, the complex-arithmetic
+expansion. Step 6 exhausted its retries at 0.54, 0.46, 0.60 and kept the least
+condemned, so the cap binds and whether raising `--max_retries` helps is untested.
+
+**Three caveats, two of them mine.**
+
+*The stalling failure is back, weakly.* Rejection writes 11.3 steps against
+plain's 8.1, 39% longer, and hits the 28-step cap 11% of the time. The blind arm
+writes 8.4, so it is the checker's rejections causing it, not the loop: rejecting
+a step that commits to a number sometimes replaces it with one that does not. It
+is far milder than guided's 19.5 steps and every solution stayed gradeable where
+guided often reached no answer, but **the gain and the inflation are not yet
+separated and part of +0.098 could be length rather than verification**. §20.9's
+length control (is the winner the shorter solution more often than chance?) is
+the test to run.
+
+*A units bug in the blind arm.* The launcher measures extra draws per step
+(0.6399) and passes it as a per-draw retry *probability*. With two retries that
+yields p + p^2 = 1.05 extra draws per step, which is exactly what the blind arm
+recorded, against reject's 0.54. Tokens still landed within 7% (2,420 against
+2,591) so the price-tag comparison holds and the null is conservative, since
+blind got more retries rather than fewer. To match on draws the launcher should
+solve p + p^2 = rate, giving p = 0.40 here. Unfixed at the time of this run.
+
+*The rejected drafts were not saved.* The rollouts recorded every draft's score
+but only the kept text, so a reader can see that step 1's first attempt was
+condemned at 0.94 without being able to read what it said, which is the one thing
+needed to judge whether the checker was right. `rejected_drafts` and
+`kept_attempt` are now written for both rejection arms, but this run's data
+predates them.
+
+Artifacts: `cot-checker-results/online_reject_v1/online_reject_report_q0{70,85}.json`,
+rollouts in `$SCRATCH/cot_mech/reprobe_v1/online_reject_v1/`,
+`scripts/onpolicy/online_bon.py` (arms `reject`, `reject_blind`),
+`slurm/online_reject_tamia.sh`, plan and preregistered predictions in
+`docs/online_reject_v1_plan.md`. Jobs: 462208 failed at argument validation
+before the gate, 464867 completed in 4:31:38.
+
 ---
 
-## 21. Limitations
+## 21. What To Do With a Token Budget (tts_roster_v1)
+
+*Updated: 2026-09-16*
+
+### Context
+
+§20 measured the verifier as a reranker and as a tie-breaker on one MATH-derived
+pool, and §20.17 measured it during generation. Neither asked the question a
+practitioner faces: given a budget of generated tokens, is it better to draw more
+samples and count, or to spend the same tokens letting a checker act? And does
+the answer depend on who the checker is, or on how hard the problems are?
+
+### What Was Done
+
+Qwen3-8B-Base on the full GSM8K test set (1,319 problems) and MATH500 (500), ten
+samples each, 18,190 trajectories. Three jobs, two of them concurrent on separate
+nodes: generation plus token logprobs (465696, 3h09m), the online rejection sweep
+(465754, 3h49m), and per-step verifier scoring (465706). Plan and preregistered
+gates in `docs/tts_roster_v1_plan.md`.
+
+**The prompt had to be fixed first, and fixing it found a grading bug.** §20.16
+traced a confound to the 768-token cap, which truncated 21.2% of the old pool.
+Raising the cap is the expensive fix, since a cap costs nothing for a trace that
+terminates and its whole price falls on traces that never do. The cap was also
+not the cause: the zero-shot prompt ended "Solution:\n" and showed a base model
+nothing about finishing. Four-shot CoT exemplars that end, a stop string on the
+next-problem delimiter, and a 2,048 cap as insurance rather than as mechanism
+took truncation to 0.19% on GSM8K and 0.94% on MATH500, cut the median solution
+from 337 tokens to 103 and 132, and took the boxed-answer rate from 79.3% to over
+99%.
+
+The smoke then showed few-shot taught the model to finish but not to stop. Traces
+box an answer at character 235 and continue for another 5,600 characters,
+hallucinating a fresh problem and solving that one too, never emitting the
+literal delimiter. Because `math_grade` takes the **last** boxed answer, those
+traces were graded on a question nobody asked. Over a 240-trace smoke: 16 graded
+on a hallucinated problem, and 4 that stated a wrong answer, restarted,
+re-solved and were credited for the do-over. All four were inspected
+individually; every one is spurious credit removed, not a real solution eaten.
+The second class is why the cut belongs in the sampler rather than in an
+analysis flag: a trace that restarts and re-solves is running its own informal
+best-of-2, which contaminates the exact comparison this study exists to make.
+
+### Results
+
+**The verifier beats free token confidence, and only where the vote is weak.**
+Paired on identical draws, verifier tie-break minus the best confidence
+tie-break:
+
+```
+GSM8K     N=2    +0.0119 [+0.0070, +0.0168]   n=1319
+          N=4    +0.0028 [+0.0003, +0.0055]
+          N=10   +0.0023 [-0.0015, +0.0068]
+
+MATH500   N=2    +0.0309 [+0.0213, +0.0406]   n=500
+          N=4    +0.0168 [+0.0086, +0.0247]
+          N=10   -0.0060 [-0.0181, +0.0060]
+```
+
+In absolute terms on MATH500, at N=2 the verifier tie-break scores 0.5053
+against confidence at 0.4742 and majority voting at 0.4467, with an oracle of
+0.567. By N=10 all three sit within 0.007 of each other at about 0.615 against an
+oracle of 0.781. GSM8K is the same shape compressed: 0.8451 / 0.8303 / 0.7885 at
+N=2, and 0.9295 / 0.9272 / 0.9247 at N=10.
+
+This is the comparison §20.16 could not make. At 65 ties the verifier and token
+confidence were indistinguishable in both directions; at 1,319 and 500 problems
+the verifier's lead is real at small N, decays exactly as §20.14's mechanism
+predicts, and is gone by N=10.
+
+**The tie-break stays cheap.** Candidates the rule actually consults run 0.60 per
+problem at N=2 falling to 0.15 at N=10 on GSM8K, and 1.27 to 1.49 on MATH500. It
+is the tied bloc, not N, which is what §20.14 claimed and this measures at scale.
+
+**Reranking loses to counting, and loses by more as N grows.** At N=10 the best
+verifier reranker scores 0.892 on GSM8K against majority voting's 0.925, and
+0.548 on MATH500 against 0.614. §20.2's finding, reproduced on two new datasets
+with two new signals.
+
+**Rejection during generation replicates and strengthens.** On the 300-problem
+online subset, with thresholds calibrated per scorer on this data rather than on
+PRM800K (stage-0 AUROC 0.666, above the 0.55 gate):
+
+```
+arm      acc      steps   gen tok   resample   delta vs plain
+plain   0.7667     4.7      759      0.000
+blind   0.7750     4.8     1238      0.520     +0.008 [-0.083, +0.100]
+q0.50   0.8417     5.0     1461      0.816     +0.075 [+0.000, +0.150]
+q0.65   0.8917     5.4     1349      0.585     +0.125 [+0.058, +0.200]
+q0.80   0.8583     4.9     1064      0.309     +0.092 [+0.017, +0.167]
+
+q0.65 - blind, the checker priced:              +0.117 [+0.067, +0.175]
+```
+
+The blind control is null, so the retry loop moves nothing by itself. §20.17
+reported +0.074 for the checker; this reports +0.117 with the blind arm's units
+bug corrected, and the corrected arm now resamples 0.520 times per step against
+reject's 0.585 where §20.17 had 1.05 against 0.54. The middle threshold wins,
+which is what a sweep is for: §20.17's hand-picked q=0.70 sat near but not at the
+optimum.
+
+### Interpretation
+
+Two mechanisms, and they occupy opposite ends of the budget axis. **Rejection
+acts at N=1, where voting has nothing to count, and is worth about twelve points
+at 1.8x the tokens. Tie-breaking acts where the vote is split, is worth three
+points on MATH500 at N=2, and decays to nothing by N=10.** Reranking is worth
+less than counting everywhere and the gap widens with budget. A practitioner with
+a small budget should reject; one with a large budget should count; nobody should
+rerank.
+
+The difficulty axis behaves as §20.14's arithmetic predicts. MATH500 leaves 17
+points of headroom between majority voting and the oracle at N=10 where GSM8K
+leaves 5, and every effect is two to three times larger on MATH500. Pairing a
+near-saturated set with a harder one was what let the decay be read as a decay
+rather than as noise.
+
+### Next Step
+
+Four limitations, in the order they should be closed.
+
+The online comparison rests on **120 problems**, because the plain arm doubled as
+the calibration pass while the rejection arms ran on 300. A proper plain arm at
+full size is the cheapest fix and it also settles the matched-budget comparison,
+which §20.17 could only interpolate.
+
+The online arm ran **one scorer**. `online_bon.Checker` rebuilds a per-step
+sequence head and refuses a pooled readout, so `last_token x linear` cannot drive
+the rejection loop until Checker grows pooled support. The offline arm has no
+such restriction, so the representation comparison survives everywhere except
+online rejection.
+
+**The PRM never ran.** Qwen2.5-Math-PRM-7B is downloaded but needs a scoring
+adapter, and its cost is the only one large enough to move the token axis. Until
+it runs, this study compares a hidden-state probe against free signals and not
+against what a practitioner would actually reach for.
+
+The verifier scores steps under the **verifier template**, not the generation
+context, because that is what these cells were fitted under. §20.2 reports both
+and they are not the same experiment.
+
+Artifacts: `results/tts_roster_v1/frontier.json` (816 curve rows),
+`cot-checker-results/tts_roster_v1/` (traces, confidence, per-step scores, online
+rollouts), `src/analysis/tts_frontier.py`,
+`scripts/analysis/tts_build_frontier.py`,
+`scripts/onpolicy/{score_traces_with_cell,build_tts_splits,encode_token_confidence}.py`,
+`src/onpolicy/{fewshot,spans}.py`,
+`slurm/tts_{smoke,offline,online,score_cells}_tamia.sh`,
+`docs/tts_roster_v1_plan.md`. Explorer:
+https://claude.ai/artifact/L1XLAqkdxfEyXy9dkPbmR3
+Jobs: 465649 smoke (gate failed, found the grading bug), 465671 smoke (passed),
+465696 generation, 465754 online, 465706 scoring (scored all 18,188 traces, then
+exited on a missing scipy import in its summary block).
+
+---
+
+## 22. Limitations
 
 *Stage-1 scope. These are the limitations of the SSAE probe work in §14 and were
 never rewritten as the project moved to dense probes and the on-policy arm. The
@@ -2546,7 +2818,7 @@ live limitations are in §20.11.*
 
 ---
 
-## 22. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
+## 23. Literature Survey: Mechanistic Signals for Step-Level CoT Validity (May 2026)
 
 ### 17.1 Overview
 
@@ -2870,14 +3142,39 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ---
 
-## 23. Next Steps
+## 24. Next Steps
+
+*Current plan, 2026-09-16, after tts_roster_v1 (§21). Everything below the
+horizontal rule is the superseded Stage-1 list, kept for the record.*
+
+The study now has two working mechanisms at opposite ends of the budget axis and
+four gaps between it and a claim anyone should act on, in priority order.
+
+1. **A full-size plain arm for the online comparison.** §21's rejection result
+   rests on 120 problems, because the plain arm doubled as the calibration pass.
+   This is the cheapest job on the list and it also settles the matched-budget
+   comparison against self-consistency, which §20.17 could only interpolate and
+   §21 still cannot measure.
+2. **The PRM.** Qwen2.5-Math-PRM-7B is downloaded and unwired. Until it runs,
+   every result here compares a hidden-state probe against free signals rather
+   than against what a practitioner would actually deploy, and its scoring cost
+   is the only one large enough to move the token axis.
+3. **Pooled-readout support in `online_bon.Checker`,** so the representation
+   axis exists online as well as offline. One scorer drove the whole rejection
+   sweep.
+4. **Rejection composed with voting.** §21 shows rejection wins at N=1 and
+   counting wins by N=10. Nobody has run the obvious composition: improve each
+   sample by rejection, then vote over the improved samples. If the two are
+   complementary the way rejection and plain sampling are, that is the result.
+
+Deferred rather than dropped: GPQA-Diamond needs an `HF_TOKEN` and accepted
+terms; AIME as a floor-difficulty point; and the Qwen3-8B instruct arm with the
+activation-artifact audit of `docs/onpolicy_tiebreak_v2_plan.md` §3.1.
+
+---
 
 *Superseded. Written during the Stage-1 SSAE work; every item below refers to
-that stage. The current plan follows the 2026-09-10 audit: race the majority-bloc
-tie-breaker against cheap tie-breakers, recompute the downstream comparison on
-the 228 uncontaminated questions with bootstrap resampled by question, and
-retarget the head from ranking trajectories to predicting majority reliability.
-See §20.11.*
+that stage.*
 
 **Step 1 follow-up (strengthen the current result):**
 - Investigate why seed 44 consistently underperforms at threshold=0.5; check whether it is a training instability or a real distributional effect

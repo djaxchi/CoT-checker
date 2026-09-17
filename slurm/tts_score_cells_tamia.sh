@@ -89,8 +89,13 @@ for f in sorted(glob.glob(f"{root}/scores/*.shard00.jsonl")):
     worst = np.array([max(r["scores"]) for r in rows])
     y = np.array([r["correct"] for r in rows])
     if y.any() and not y.all():
-        from scipy.stats import rankdata
-        rk = rankdata(-worst); n1 = y.sum(); n0 = len(y) - n1
+            # Ranks by hand, not scipy.stats: the compute-node venv installs torch,
+        # transformers, numpy and sympy. Importing scipy here marked job 465706
+        # FAILED after it had already scored all 18,188 traces, which is the same
+        # bug that killed 465703 and was fixed in the online launcher only.
+        order = np.argsort(-worst, kind="mergesort")
+        rk = np.empty(len(worst), float); rk[order] = np.arange(1, len(worst) + 1)
+        n1 = y.sum(); n0 = len(y) - n1
         auroc = (rk[y].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
     else:
         auroc = float("nan")

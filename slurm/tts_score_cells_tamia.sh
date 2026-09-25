@@ -33,6 +33,11 @@ LAYER="${LAYER:-35}"
 # Offline scoring is a batch pass, so the pooled readout that Checker refuses to
 # drive online is fine here. This is where the representation comparison lives.
 CELLS="${CELLS:-$REPROBE_ROOT/cells/step_tokens__transformer_d256_l2_f1024_h4__seed42}"
+# Only consulted for a cell whose results.json predates protocol.rescale. The
+# PRM800K-trained Qwen3-8B-Base grid (qwen3_8b_v1/runs/rep_grid_q3) is such a
+# grid and trained on raw states, so score it with ASSUME_RESCALE=none; the
+# zscore default would rescale its inputs by statistics it never saw.
+ASSUME_RESCALE="${ASSUME_RESCALE:-zscore}"
 
 export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
@@ -64,6 +69,7 @@ for CELL in $CELLS; do
         --trajectories "$RUN_ROOT"/"$STEM".shard*_trajectories.jsonl \
         --cell_dir "$CELL" --layer "$LAYER" \
         --prm_store "$REP_ROOT" --stats_cache "$STATS_CACHE" \
+        --assume_rescale "$ASSUME_RESCALE" \
         --model_name_or_path "$MODEL_NAME_OR_PATH" --local_files_only \
         --model_dtype bfloat16 \
         --out "$RUN_ROOT/scores/${STEM}__${NAME}.shard0${i}.jsonl" \

@@ -42,7 +42,7 @@ from scripts.encode_prm800k_hidden_states import git_commit, read_jsonl, write_j
 from src.eval.math_grade import grade  # noqa: E402
 from src.onpolicy.fewshot import (STOP_STRING, fewshot_prompt,  # noqa: E402
                                   truncate_at_answer, truncate_at_delimiter)
-from src.onpolicy.prompts import generation_prompt  # noqa: E402
+from src.onpolicy.prompts import chat_prompt, generation_prompt  # noqa: E402
 
 _BLANKLINE = re.compile(r"\n\s*\n")
 
@@ -141,6 +141,8 @@ def build_prompt(problem: str, style: str = "zero", dataset: str = "",
         return generation_prompt(problem)
     if style == "fewshot":
         return fewshot_prompt(problem, dataset, n_shot)
+    if style == "chat":
+        return chat_prompt(problem)
     raise ValueError(f"unknown prompt style {style!r}")
 
 
@@ -261,9 +263,10 @@ def main() -> None:
     p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
                    default="float16",
                    help="Use the backbone's training dtype; Qwen3 ships bfloat16.")
-    p.add_argument("--prompt_style", choices=["zero", "fewshot"], default="zero",
+    p.add_argument("--prompt_style", choices=["zero", "fewshot", "chat"], default="zero",
                    help="zero is the original prompt; fewshot is tts_roster_v1's, "
-                        "which teaches the model to stop.")
+                        "which teaches the model to stop; chat is the Instruct "
+                        "policy's non-thinking template (instruct_arm_v1).")
     p.add_argument("--dataset", type=str, default="",
                    help="Exemplar set for --prompt_style fewshot. Overridden "
                         "per problem by a 'dataset' field when present.")

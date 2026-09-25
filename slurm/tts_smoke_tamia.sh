@@ -31,6 +31,9 @@ RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/tts_roster_v1}"
 SPLITS="${SPLITS:-$RUN_ROOT/splits}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-8B-Base}"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
+# fewshot for the Base policy; chat for Qwen/Qwen3-8B (instruct_arm_v1), which
+# runs the non-thinking template and ignores --n_shot and --stop_strings.
+PROMPT_STYLE="${PROMPT_STYLE:-fewshot}"
 N_SAMPLES="${N_SAMPLES:-4}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-2048}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -76,7 +79,7 @@ for i in $(seq 0 $((NUM_SHARDS-1))); do
     --max_problems 0 --n_samples "$N_SAMPLES" \
     --temperature "$TEMPERATURE" --top_p 0.95 --top_k 50 \
     --max_new_tokens "$MAX_NEW_TOKENS" \
-    --prompt_style fewshot --n_shot 4 --stop_strings \
+    --prompt_style "$PROMPT_STYLE" --n_shot 4 --stop_strings \
     --shard_idx "$i" --num_shards "$NUM_SHARDS" --force >>"$LOG_FILE" 2>&1 &
   pids+=($!)
 done

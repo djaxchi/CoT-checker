@@ -56,3 +56,37 @@ def test_the_two_styles_are_different_and_dispatch_by_name():
     except ValueError:
         return
     raise AssertionError("an unknown style must not silently pick a template")
+
+
+# ---- chat: the Instruct policy's sampler prompt (instruct_arm_v1) ----------
+
+def test_chat_prompt_is_qwen3_non_thinking_template():
+    """Byte-identical to Qwen3-8B's apply_chat_template(enable_thinking=False).
+
+    Pinned as a literal so the encoder can rebuild it without a tokenizer. The
+    string and its tokenisation were checked against the real template on
+    TamIA (transformers 5.6.2): same text, same ids.
+    """
+    from src.onpolicy.prompts import CHAT_INSTRUCTION, chat_prompt
+    assert chat_prompt(PROBLEM) == (
+        "<|im_start|>user\n" + PROBLEM + "\n" + CHAT_INSTRUCTION + "<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert build_prompt(PROBLEM, "chat") == chat_prompt(PROBLEM)
+
+
+def test_chat_context_reconstructs_the_sampled_context():
+    from src.onpolicy.prompts import chat_prompt, context
+    solution = "We add two and two.\n\nThat gives four.\n\nSo \\boxed{4}."
+    steps = split_into_steps(solution)
+    full = chat_prompt(PROBLEM) + solution
+    for k, step in enumerate(steps):
+        ctx = context("chat", PROBLEM, "\n\n".join(steps[:k]))
+        assert full.startswith(ctx), k
+        assert full[len(ctx):].startswith(step), k
+
+
+def test_chat_is_a_recorded_sampler_style():
+    from src.onpolicy.prompts import SAMPLER_STYLES, context_from_row
+    assert "chat" in SAMPLER_STYLES
+    row = {"prompt_style": "chat", "problem": PROBLEM}
+    assert context_from_row(row).startswith("<|im_start|>user\n")

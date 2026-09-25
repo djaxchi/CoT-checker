@@ -32,7 +32,7 @@ from __future__ import annotations
 STYLES = ("verifier", "generation")
 
 # Prompt styles a *sampler* can have run under, as recorded per trajectory.
-SAMPLER_STYLES = ("zero", "fewshot")
+SAMPLER_STYLES = ("zero", "fewshot", "chat")
 
 
 def generation_prompt(problem: str) -> str:
@@ -40,6 +40,25 @@ def generation_prompt(problem: str) -> str:
     return (f"Problem:\n{problem}\n\n"
             "Solve the problem step by step. Put each step on its own line, and write "
             "the final answer inside \\boxed{}.\n\nSolution:\n")
+
+
+# The Instruct policy's prompt (instruct_arm_v1). Qwen's own math instruction,
+# the one its model cards and ReProbe's Qwen3-8B numbers use.
+CHAT_INSTRUCTION = "Please reason step by step, and put your final answer within \\boxed{}."
+
+
+def chat_prompt(problem: str) -> str:
+    """Qwen3's chat template for one user turn, non-thinking mode, as a literal.
+
+    Byte-identical to `apply_chat_template(..., add_generation_prompt=True,
+    enable_thinking=False)` on Qwen/Qwen3-8B, and tokenises to the same ids.
+    Written out rather than rendered so the confidence encoder can rebuild the
+    context from a trajectory row without a tokenizer in hand. The empty think
+    block is what non-thinking mode emits; leaving it out lets the model open
+    one itself.
+    """
+    return (f"<|im_start|>user\n{problem}\n{CHAT_INSTRUCTION}<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n</think>\n\n")
 
 
 def generation_prefix(problem: str, prefix: str) -> str:
@@ -87,6 +106,9 @@ def context(style: str, problem: str, prefix: str = "", dataset: str = "",
     if style == "fewshot":
         from src.onpolicy.fewshot import fewshot_prompt
         base = fewshot_prompt(problem, dataset, n_shot)
+        return base if not prefix else f"{base}{prefix}\n\n"
+    if style == "chat":
+        base = chat_prompt(problem)
         return base if not prefix else f"{base}{prefix}\n\n"
     raise ValueError(f"unknown sampler prompt style {style!r}; "
                      f"expected one of {SAMPLER_STYLES}")

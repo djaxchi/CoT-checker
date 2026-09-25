@@ -55,7 +55,10 @@ CELLS="${CELLS:-}"
 cd "$PROJECT_ROOT"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
-export HF_HOME="$HF_CACHE" TRANSFORMERS_CACHE="$HF_CACHE"
+# HF_HOME only. transformers 4.x treats TRANSFORMERS_CACHE as the hub directory
+# itself, so pointing it at the cache root hides hub/models--* (job 487017).
+export HF_HOME="$HF_CACHE"
+unset TRANSFORMERS_CACHE
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 

@@ -78,7 +78,9 @@ def score_one(model, tok, problem: str, steps: list[str], device: str) -> list[f
     ]
     text = tok.apply_chat_template(convo, tokenize=False, add_generation_prompt=False)
     ids = tok(text, return_tensors="pt").input_ids.to(device)
-    out = model(input_ids=ids)
+    # use_cache=False: the released remote code calls DynamicCache.get_usable_length,
+    # which transformers 4.57 no longer has. A single prefill needs no cache.
+    out = model(input_ids=ids, use_cache=False)
     logits = out[0] if isinstance(out, tuple) else out.logits
     sep_id = tok.encode(SEP)[0]
     mask = (ids == sep_id)
@@ -128,9 +130,16 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = AutoTokenizer.from_pretrained(a.prm_name_or_path,
                                         local_files_only=a.local_files_only)
-    model = AutoModel.from_pretrained(
+    # The remote code needs transformers < 5 (it reads config.pad_token_id, which
+    # 5.x configs no longer carry). A key mismatch would load a randomly
+    # initialised head that still emits plausible probabilities, so refuse it.
+    model, info = AutoModel.from_pretrained(
         a.prm_name_or_path, torch_dtype=dtype, trust_remote_code=True,
-        local_files_only=a.local_files_only).to(device).eval()
+        local_files_only=a.local_files_only, output_loading_info=True)
+    if info.get("missing_keys"):
+        sys.exit(f"[prm] FAILED: {len(info['missing_keys'])} weights not loaded, e.g. "
+                 f"{info['missing_keys'][:3]}")
+    model = model.to(device).eval()
 
     # --- gate 1: orientation. A PRM wired backwards, or fed a malformed
     # template, fails this in seconds and costs nothing. ---

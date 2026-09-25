@@ -64,7 +64,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 virtualenv --no-download "$SLURM_TMPDIR/env"
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip
-pip install --no-index torch transformers numpy sympy 2>&1 | tail -1
+# transformers < 5: the PRM's remote code breaks on 5.x (checked on the login
+# node with a 1-layer copy of its config; 4.57.6 runs it with use_cache=False).
+pip install --no-index torch "transformers<5" numpy sympy 2>&1 | tail -1
 
 # Fail in seconds, not after the first shard has loaded, if an input is missing.
 for STEM in $STEMS; do

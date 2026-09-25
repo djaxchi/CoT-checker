@@ -140,3 +140,44 @@ cost us accuracy, and the paper should say so.
 If Instruct wins **and** the audit is dirty, the constraint was right, and that is
 the most publishable of the three outcomes because nobody else in this literature
 has measured it.
+
+## 8. As launched (2026-09-25)
+
+Top cell confirmed from `qwen3_8b_v1/runs/rep_grid_q3`: `step_tokens x
+transformer:d512,l2,f2048,h8`, in-domain AUROC 0.8978 / 0.8970 / 0.8889 over
+seeds 42 / 43 / 44.
+
+Matching details that were not in §3 and were checked rather than assumed:
+
+- **Rescaling.** The Base cell trained on 2026-08-26 (job 429667), before
+  `--rescale` existed (983c890, 2026-08-28), so it read raw states. The grid
+  script now defaults to zscore, so the Instruct run pins `RESCALE=none`.
+- **Tokenisation.** Qwen3-8B and Qwen3-8B-Base share vocab and merges; their
+  tokenizer.json files differ, but the verifier-template prefix and the step
+  text tokenise identically on all 2,000 PRM800K test rows (0 differences).
+- **Walltimes** come from the Base arm's measured jobs, not §5's estimates:
+  PRM800K encode 52m, ProcessBench encode 6m, d512 cell about 2h at seed 42.
+
+Jobs: encode 487175 (PRM800K) and 487176 (ProcessBench), then train 487177.
+The audit is `slurm/instruct_audit_tamia.sh`, one run per arm (Base: 487199).
+
+## 9. The test-time-scaling comparison
+
+The §21 testbed was scored by `reprobe_v1/.../transformer_d256...seed42`, which
+was trained on 43,837 **on-policy** Qwen3-8B-Base steps with GPT-OSS-120B
+labels. An Instruct twin of that cell would need a new on-policy pool and a new
+annotation pass. The matched comparison is therefore built on the verifier this
+plan retrains, the PRM800K-trained d512 cell, on both sides:
+
+| | Base pool | Instruct pool |
+|---|---|---|
+| policy | Qwen3-8B-Base, 4-shot (`fewshot`) | Qwen3-8B, non-thinking chat (`chat`) |
+| problems | GSM8K test 1,319 + MATH-500, x10 | identical splits |
+| sampling | T=1.0, top-p 0.95, top-k 50, cap 2,048 | identical |
+| verifier | Base d512 cell (PRM800K) | Instruct d512 cell (PRM800K) |
+| scoring context | verifier template | verifier template |
+
+Sampling is held at the Base arm's settings rather than Qwen's recommended
+non-thinking ones (T=0.7, top-p 0.8, top-k 20), so the policy is the only thing
+that changes. Instruct pass@1 will therefore sit somewhat below the published
+non-thinking greedy numbers.

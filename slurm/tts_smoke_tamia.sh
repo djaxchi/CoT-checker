@@ -112,6 +112,12 @@ for ds in sorted({r.get("dataset", "?") for r in rows}):
         print(f"  [WARN] {ds} accuracy {acc:.3f} is {abs(acc-target):.3f} from "
               f"published {target}; sampling at T=1.0 sits below greedy few-shot, "
               f"so judge this against the plain arm rather than failing on it")
+    if os.environ.get("STRICT_GATE") == "1" and boxed < 0.95:
+        print(f"  [FAIL] {ds} boxed-answer rate {boxed:.1%} below 95%"); ok = False
 print("GATE:", "PASS" if ok else "FAIL")
+# STRICT_GATE=1 turns a failed gate into a failed job, so a generation run
+# chained on this one with --dependency=afterok never starts on a bad prompt.
+if os.environ.get("STRICT_GATE") == "1" and not ok:
+    raise SystemExit(1)
 PY
 echo "[$(date)] tts_smoke done"

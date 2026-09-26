@@ -191,3 +191,36 @@ restarting. So the full Instruct pool runs with a 4,096-token cap (job
 truncated 0.94% of MATH-500 at 2,048, so this is not a lever the Base arm was
 denied. Generated tokens per trace differ between the arms regardless (MATH
 median 445 against 132), which the matched-compute comparison has to use.
+
+## 10. Results (2026-09-26)
+
+**Retrain, 3 seeds, matched architecture (8,665,089 params, raw states).**
+PRM800K test AUROC 0.8946 Base against 0.9128 Instruct; ProcessBench F1_PB avg
+val-selected 0.469 against 0.560, oracle 0.607 against 0.655. Every Instruct
+seed beats every Base seed on AUROC and oracle F1. The first attempt (487177)
+trained `transformer:d512` with the default f1024/h4 head because `--export`
+split the spec on commas; it is kept at `runs/rep_grid_q3/step_tokens__transformer_d512__seed4*`
+and is not the matched arm.
+
+**Audit: clean.** No rise in outlier-dimension mass, no massive tokens, the same
+step-token attention split, occlusion at the uniform baseline, and the gain
+survives length/position residualisation on every split. The one difference is
+token 0's norm (6.56x the median against 4.03x), which the probe never reads.
+Table: `$SCRATCH/cot_mech/qwen3_8b_instruct_v1/audit/compare.md`.
+
+**TTS, verifier tie-break minus majority (points, 95% paired CI).**
+
+| | Base | Instruct |
+|---|---|---|
+| GSM8K N=2 | +6.66 [+6.19, +7.14] | +0.37 [+0.16, +0.59] |
+| GSM8K N=4 | +1.74 | +0.18 |
+| MATH-500 N=2 | +6.08 [+5.27, +6.92] | +1.67 [+1.10, +2.25] |
+| MATH-500 N=4 | +3.55 | +0.65 |
+| MATH-500 N=10 | +0.07 (spans 0) | -0.17 (spans 0) |
+
+Headroom (oracle minus majority) at N=2 is 10.9/12.0 on Base and 2.6/5.5 on
+Instruct. The verifier captures about half of it on Base MATH (51%) and 30% on
+Instruct MATH. It still beats DeepConf's tie-break at N=2 on Instruct MATH
+(+1.67 against +0.95), and ties it on GSM8K (+0.37 against +0.33). Files:
+`results/instruct_arm_v1/contrast_{base,instruct}.json`,
+`results/instruct_arm_v1/tiebreak_lift_base_vs_instruct.png`.

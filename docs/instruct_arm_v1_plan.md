@@ -181,3 +181,13 @@ Sampling is held at the Base arm's settings rather than Qwen's recommended
 non-thinking ones (T=0.7, top-p 0.8, top-k 20), so the policy is the only thing
 that changes. Instruct pass@1 will therefore sit somewhat below the published
 non-thinking greedy numbers.
+
+**Smoke (487217, 2026-09-25), 60 problems x 4 samples at T=1.0:** GSM8K
+pass@1 0.933, truncation 0%, boxed 100%; MATH pass@1 0.833, truncation 6.67%,
+boxed 93.3%. The 8 truncated MATH traces come from 4 hard problems and are
+still reasoning at 2,048 tokens (trying cases, re-deriving), not looping or
+restarting. So the full Instruct pool runs with a 4,096-token cap (job
+489707). The cap only binds traces that never finish, and the Base pool
+truncated 0.94% of MATH-500 at 2,048, so this is not a lever the Base arm was
+denied. Generated tokens per trace differ between the arms regardless (MATH
+median 445 against 132), which the matched-compute comparison has to use.

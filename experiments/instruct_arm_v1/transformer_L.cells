@@ -1,0 +1,4 @@
+# instruct_arm_v1: the top Qwen3-8B-Base cell, retrained on Qwen3-8B.
+# A file rather than CELLS=..., because sbatch --export splits on commas and
+# "transformer:d512,l2,f2048,h8" silently became "transformer:d512" (job 487177).
+step_tokens transformer:d512,l2,f2048,h8

@@ -32,7 +32,11 @@ RUN_ROOT="${RUN_ROOT:-$SCRATCH/cot_mech/qwen3_8b_instruct_v1}"
 # backbone.
 DATA_DIR="${DATA_DIR:-$SCRATCH/cot_mech/dense_full_7b_v1/data}"
 LAYER="${LAYER:-35}"          # hidden-states index for block 34 of 36
-CELLS="${CELLS:-step_tokens transformer:d512,l2,f2048,h8}"
+# Passed as a file: sbatch --export splits its value on commas, so
+# CELLS="step_tokens transformer:d512,l2,f2048,h8" arrives as
+# "transformer:d512" with the rest dropped, and the default head (f1024, h4,
+# 6.57M params instead of 8.67M) trains without complaint. Job 487177 did that.
+CELLS_FILE="${CELLS_FILE:-$HOME/CoT-checker/experiments/instruct_arm_v1/transformer_L.cells}"
 SEEDS="${SEEDS:-42 43 44}"
 OUT_ROOT="${OUT_ROOT:-$RUN_ROOT/runs/rep_grid_q3}"
 # The Base cells ran with a 300 GB per-cell preload budget and the 163 GB train
@@ -66,7 +70,7 @@ echo "  job $J2"
 echo "=== 3. train transformer L, $SEEDS, after both encodes ==="
 J3=$(sbatch --parsable --time=05:30:00 --dependency=afterok:"$J1":"$J2" \
       --job-name=train_instruct_L \
-      --export=ALL,RUN_ROOT="$RUN_ROOT",PRM_STORE="$RUN_ROOT/repstore/step_spans",PB_STORE="$RUN_ROOT/repstore/pb_step_spans",OUT_ROOT="$OUT_ROOT",VEC_CACHE="$RUN_ROOT/cache/grid_vectors",CELLS="$CELLS",SEEDS="$SEEDS",RESCALE=none,PRELOAD_BUDGET_GB="$PRELOAD_BUDGET_GB" \
+      --export=ALL,RUN_ROOT="$RUN_ROOT",PRM_STORE="$RUN_ROOT/repstore/step_spans",PB_STORE="$RUN_ROOT/repstore/pb_step_spans",OUT_ROOT="$OUT_ROOT",VEC_CACHE="$RUN_ROOT/cache/grid_vectors",CELLS_FILE="$CELLS_FILE",SEEDS="$SEEDS",RESCALE=none,PRELOAD_BUDGET_GB="$PRELOAD_BUDGET_GB" \
       slurm/train_rep_grid_7b_tamia.sh)
 echo "  job $J3"
 

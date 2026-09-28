@@ -1,0 +1,23 @@
+# Frozen Instruct roster: 19 core cells, then 3 lengthfree extensions.
+last_token linear
+last_token mlp:h1024
+last_token mlp:h1024x2
+step_mean linear
+step_mean mlp:h1024
+step_mean mlp:h1024x2
+step_delta linear
+step_delta mlp:h1024
+step_delta mlp:h1024x2
+step_stats linear
+step_stats mlp:h1024
+step_stats mlp:h1024x2
+boundary_stats linear
+boundary_stats mlp:h1024
+boundary_stats mlp:h1024x2
+step_tokens attn_query
+step_tokens transformer:d128,l1,f512,h4
+step_tokens transformer:d256,l2,f1024,h4
+step_tokens transformer:d512,l2,f2048,h8
+lengthfree_geom linear
+lengthfree_geom mlp:h1024
+lengthfree_geom mlp:h1024x2

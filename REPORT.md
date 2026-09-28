@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-09-10. Sections are appended in the order the work ran; §21 (Limitations) and §23 (Next Steps) describe the Stage-1 SSAE work and have not been rewritten since, so read §20 for the current state.*
+*Last updated: 2026-09-28. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §24 holds the current plan.*
 
 ---
 
@@ -1677,6 +1677,12 @@ follows from both.
 
 ## 20. On-Policy Transfer: Does the Leaderboard Predict Usefulness? (onpolicy_v1)
 
+> **Policy: Qwen3-8B-Base, superseded.** §21.10 makes Qwen3-8B (Instruct) the
+> primary policy. Nothing in this section has been rerun on Instruct yet: the
+> 19-cell frozen and on-policy grids (§20.2 to §20.8), the GPT-OSS-120B-labelled
+> on-policy d256 cell, guided decoding (§20.9) and online rejection (§20.17).
+> Read every number here as a Base-policy result.
+
 §19 built a controlled leaderboard of step representations measured entirely
 **off-policy**: trained on PRM800K, whose solutions a GPT-4 fine-tune wrote, and
 evaluated on ProcessBench, whose solutions other models wrote. Nobody deploys a
@@ -2651,6 +2657,12 @@ before the gate, 464867 completed in 4:31:38.
 
 ## 21. What To Do With a Token Budget (tts_roster_v1)
 
+> **Policy: Qwen3-8B-Base, superseded by §21.10** for the offline comparison
+> (majority, tie-break, rerank, weighted votes, DeepConf). The online rejection
+> sweep below has no Instruct counterpart yet. MATH-500 accuracies here predate
+> the grader fix of §21.10, which raises Base pass@1 from 45.0 to 46.4 and
+> leaves every paired lift within 0.3 points.
+
 *Updated: 2026-09-16*
 
 ### Context
@@ -2802,6 +2814,319 @@ https://claude.ai/artifact/L1XLAqkdxfEyXy9dkPbmR3
 Jobs: 465649 smoke (gate failed, found the grading bug), 465671 smoke (passed),
 465696 generation, 465754 online, 465706 scoring (scored all 18,188 traces, then
 exited on a missing scipy import in its summary block).
+
+### 21.8 The Rest of the Family: Our Rules Against the Field's Aggregators
+
+*Updated: 2026-09-21*
+
+**Context.** §21 compared three rules: count the answers, let the verifier break
+ties, or let the verifier choose. The test-time-scaling literature uses none of
+those three as its headline aggregator. It uses a weighted vote, with the
+verifier's reward as the weight (Lightman et al. 2023; Uesato et al. 2022) or
+the trace's own confidence (DeepConf arXiv:2508.15260 Eq 8). §21's result was
+therefore a comparison against a field that was not in the room.
+
+**What was done.** `src/analysis/tts_frontier.py` grew four rules:
+`weighted_vote` (the literature's rule, with a non-negative reward),
+`softmax_vote` (the same vote with weights tempered by a standardised quality,
+so beta = 0 is the plain count and large beta is rerank), `filtered_vote`
+(DeepConf's rule, discarding the worst eta of the pool before voting, optionally
+weighting the survivors), and `softmax_weights` behind them. The probe emits a
+sigmoid suspicion, so 1 - suspicion is already the reward scale a weighted vote
+wants; DeepConf's C is minus a mean log-probability and so is non-negative by
+construction, while a mean sampled log-probability is not, which is why
+`CONF_WITH_REWARD` in `scripts/analysis/tts_build_frontier.py` names the two
+confidence statistics that carry a weighted vote and leaves the other two with
+the tempered vote alone.
+
+Nothing was regenerated. The 18,188 saved trajectories, their per-step verifier
+scores and their token-confidence statistics were already on disk, so the whole
+comparison is a rebuild of the frontier: `frontier_v2.json`, 4,464 curve rows
+against the old 816, from 93 rules across 8 budgets, 3 splits and 2 datasets.
+
+Because every rule here is applied to the *same* draws on the *same* problems,
+the per-curve interval is the wrong uncertainty. `scripts/analysis/tts_rule_contrast.py`
+bootstraps the paired difference instead, resampling question text.
+
+**Results.** Final-answer accuracy, split `all`, verifier
+`step_tokens x transformer_d256_l2_f1024_h4` seed 42 aggregated by `worst`,
+confidence `bottom10_group_w32`:
+
+| rule | gsm8k N=2 | N=4 | N=10 | math500 N=2 | N=4 | N=10 |
+|---|---|---|---|---|---|---|
+| self-consistency | 0.789 | 0.882 | 0.925 | 0.449 | 0.529 | 0.614 |
+| verifier tie-break (§21) | 0.845 | 0.895 | 0.929 | 0.509 | 0.561 | 0.615 |
+| verifier weighted vote | 0.845 | 0.893 | 0.926 | 0.509 | 0.558 | 0.611 |
+| verifier best-of-N | 0.845 | 0.872 | 0.892 | 0.509 | 0.545 | 0.550 |
+| DeepConf weighted vote | 0.827 | 0.892 | 0.928 | 0.479 | 0.544 | 0.621 |
+| best possible choice | 0.898 | 0.949 | 0.978 | 0.569 | 0.670 | 0.779 |
+
+Paired gaps, tie-break minus the named rule, 95% cluster bootstrap:
+
+| contrast | gsm8k N=4 | gsm8k N=10 | math500 N=4 | math500 N=10 |
+|---|---|---|---|---|
+| vs self-consistency | +0.0137 [+0.0110, +0.0167] | +0.0048 [+0.0011, +0.0090] | +0.0318 [+0.0244, +0.0393] | +0.0007 [-0.0096, +0.0112] |
+| vs verifier weighted vote | +0.0026 [+0.0010, +0.0043] | +0.0038 [+0.0000, +0.0083] | +0.0029 [-0.0012, +0.0070] | +0.0040 [-0.0100, +0.0181] |
+| vs verifier best-of-N | +0.0236 [+0.0186, +0.0286] | +0.0371 [+0.0258, +0.0493] | +0.0161 [+0.0076, +0.0247] | +0.0646 [+0.0349, +0.0944] |
+| vs DeepConf weighted vote | +0.0037 [+0.0013, +0.0063] | +0.0015 [-0.0030, +0.0061] | +0.0171 [+0.0091, +0.0252] | -0.0060 [-0.0201, +0.0060] |
+
+No rule in the family beats the tie-break anywhere with an interval clear of
+zero. The one negative entry is DeepConf's weighted vote on math500 at N=10,
+-0.0060 [-0.0201, +0.0060], which spans zero.
+
+The tempered vote makes the ordering mechanical rather than anecdotal. On gsm8k
+at N=10 the dial runs 0.9247 at a plain count, 0.9257 at beta = 0.5, 0.9143 at
+beta = 1, 0.9083 at beta = 2, 0.9007 at beta = 4, 0.8939 at beta = 8, against
+0.8923 for rerank. Accuracy falls monotonically in how much authority the
+verifier is given, and `filtvote0.9` reproduces rerank exactly at N=10 because
+discarding nine tenths of ten candidates leaves the single best one.
+
+**Interpretation.** The verifier's usable information is in its ranking *inside
+a tie*, not in its magnitude *across candidates*. Every rule that lets the score
+move votes the count had already decided loses accuracy, and the loss grows with
+the weight given. That is a structural claim about this policy and this
+verifier, and it explains §21's rerank result rather than restating it: rerank
+is not a badly chosen rule, it is the endpoint of a dial whose optimum sits at
+the other end.
+
+The comparison is still against free signals. Both scorers here read states or
+logprobs the sampler already computed, so the finding "weighting never pays"
+may be a statement about weak weights rather than about weighting. A stronger
+verifier is the test, and that is the PRM.
+
+**Next step.** Score the same 18,188 saved trajectories with
+Qwen2.5-Math-PRM-7B and rerun this comparison unchanged. Design in
+`docs/tts_sota_v1_plan.md`.
+
+Artifacts: `results/tts_roster_v1/frontier_v2.json` (4,464 curve rows),
+`results/tts_roster_v1/rule_contrast.json`,
+`results/tts_roster_v1/figs/family_n_tokens.png`,
+`src/analysis/tts_frontier.py`, `scripts/analysis/tts_rule_contrast.py`,
+`scripts/analysis/tts_plot_family.py`, `tests/analysis/test_tts_frontier.py`
+(30 tests). No GPU time was used.
+
+
+### 21.9 Situating the Curves: What the Field Reports and at What Budget
+
+*Updated: 2026-09-22*
+
+**Context.** §21.8 established an ordering among rules using our own verifier.
+Whether that ordering means anything depends on where the field sits, which
+required reading it rather than assuming it. Full pass with every quoted number
+in `docs/tts_related_work_v1.md`.
+
+**The bar is majority voting, and most published verifiers do not clear it.**
+Best-of-8 with Qwen2.5-Math-7B-Instruct (arXiv 2501.07301, Table): maj@8 averages
+66.2 across seven benchmarks. Math-Shepherd-PRM-7B 64.2, RLHFlow-PRM-Mistral-8B
+64.2, RLHFlow-PRM-Deepseek-8B 64.9, Skywork-PRM-7B 64.8, EurusPRM-Stage1 61.6,
+EurusPRM-Stage2 62.0. Only Qwen2.5-Math-PRM-7B beats it, at 67.6, by 1.4 points.
+Six of seven published process reward models lose to counting.
+
+**HSRM is concurrent work on a different verifier.** HSRM (arXiv 2608.30841,
+EMNLP 2026) uses a 2-layer transformer encoder, hidden width 256, 4 attention
+heads, feed-forward width 4x256, on the same Qwen3 backbone family, and its v1
+was submitted **31 August 2026**. `transformer_d256_l2_f1024_h4` was committed
+here on **24 August 2026 13:15:36 -0400** (`01978ce`), one week earlier, so this
+is independent concurrent work and is cited as such.
+
+The encoder size coincides; the model does not. HSRM runs its encoder over the
+**steps** of a trace (S <= 100 step vectors, final layer) and emits one rank per
+candidate. `TransformerPool` in `src/harness/learners.py` runs over the
+**tokens** inside one step (block 34 `resid_post`, masked mean pool) and emits
+one suspicion score per step, which is what lets it drive §21's online rejection
+loop. Labels differ too: outcome labels propagated onto self-generated
+trajectories against PRM800K human step labels. Its Qwen3-8B Best-of-8 numbers
+are GSM8K 93.8 at AUROC 0.682 and MATH-500 85.3 at AUROC 0.577, and those AUROCs
+are not comparable to ours: theirs ranks candidates, ours discriminates steps.
+
+**Lightman et al. found what §21.8 found.** arXiv 2305.20050 reports
+experimenting with reward-model-weighted voting to combine a PRM with majority
+voting, and that it did not noticeably improve performance. Their PRM
+nonetheless beats majority voting at every N with a gap that widens in N, which
+is the opposite of our rerank. The difference is verifier quality and the PRM
+run prices it.
+
+**The regime is ours.** Every comparable paper reports at N >= 8: HSRM N=8,
+ReProbe N=10, the Lessons paper N=8, self-certainty N=8 to 64, STEP N=64,
+DeepConf N=512, Lightman up to N=1860. None reports N=2 to 4. Published lifts
+over self-consistency at those budgets: +0.2 points for both Qwen2.5-Math-PRM-7B
+and ReProbe on GSM8K at N=10 (97.8 against 97.6, ReProbe Table 3); +0.08 on
+GSM8K and +0.70 on MATH at N=64 for self-certainty Borda; +0.4 to +5.0 at N=64
+for STEP; +1.4 average at N=8 for the best PRM.
+
+Ours, on the Qwen3-8B (Instruct) policy (§21.10, verifier tie-break, points,
+regraded). The Base column is the superseded §21.8 number, kept for the record:
+
+| lift over self-consistency | gsm8k | math500 | Base gsm8k / math500 (superseded) |
+|---|---|---|---|
+| N=2 | +0.54 [+0.33, +0.74] | +1.67 [+1.12, +2.24] | +5.66 / +6.02 |
+| N=4 | +0.22 [+0.09, +0.36] | +0.65 [+0.27, +1.07] | +1.37 / +3.18 |
+| N=10 | +0.08 [-0.19, +0.38] | -0.17 [-0.70, +0.41] | +0.48 / +0.07 |
+
+**Interpretation.** On the policy the field evaluates, the lift sits inside the
+published band at every budget. At N=10 it matches ReProbe's +0.2 on GSM8K
+within its interval. At N=2 the MATH-500 lift of +1.67 is real but no longer an
+order of magnitude above anything reported: the Base policy's +6 came from a
+vote with 65% of MATH-500 problems tied at N=2, against 22% on Instruct. The
+small-N regime claim of the Base analysis does not survive the change of policy
+in the form it was made.
+
+**Corrections to our own framing.** §21's online rejection arm is close to LATTS
+(arXiv 2509.20368): a per-step verifier acceptance criterion that
+resamples, backtracks, restarts or stops. It must be cited, and the honest
+difference is that we price the retry loop with a blind control and our verifier
+is three orders of magnitude smaller than their 7B PRM. Separately, the Base pool's
+MATH-500 pass@1 of 45.0 was partly a grading artifact: the grader missed
+`\dfrac`, thousands separators, `\mbox` units, base subscripts and unordered
+solution lists (§21.10), and regrading raises it to 46.4. The rest of the gap to
+the 67 to 69 published for Base is not explained, and Base is no longer the
+primary policy.
+
+**Next step.** Unchanged and now better motivated: Qwen2.5-Math-PRM-7B on the
+saved traces, reported at N=2 through 10, which is the cell of the table nobody
+has filled.
+
+
+### 21.10 The Instruct Policy Replaces Base (instruct_arm_v1)
+
+*Updated: 2026-09-28*
+
+**Context.** Every result in §20 and §21 used Qwen3-8B-Base, chosen to keep
+instruction-tuning artifacts out of the probe's input. The published
+test-time-scaling results we compare against (ReProbe, HSRM, DeepConf) use the
+instruction-tuned Qwen3-8B, so our curves started from a policy nobody deploys.
+This section reruns the leaderboard's top verifier and the offline
+test-time-scaling comparison on Qwen/Qwen3-8B, non-thinking mode, and makes it
+the primary policy from here on.
+
+**What was done.** Four stages, plan and as-launched notes in
+`docs/instruct_arm_v1_plan.md` §8 to §10.
+
+1. *Retrain.* `step_tokens x transformer:d512,l2,f2048,h8` (8,665,089 params)
+   on Qwen3-8B states at hidden_states index 35, with the Base arm's frozen
+   PRM800K splits, lr x wd search, 30 epochs, patience 3, seeds 42/43/44 (TamIA
+   487175/487176 encode, 490413 train). The Base cell predates `--rescale`, so
+   the Instruct run pins `RESCALE=none`. The verifier-template prefix and step
+   text tokenise identically under both tokenizers on all 2,000 PRM800K test
+   rows. A first attempt (487177) trained a 6.57M-param head because
+   `sbatch --export` split the learner spec on commas; it is not reported.
+2. *Artifact audit.* `scripts/analysis/instruct_artifact_audit.py` runs the
+   four checks of `docs/onpolicy_tiebreak_v2_plan.md` §3.1 on both arms through
+   identical code: outlier-dimension mass, step-token attention by category at
+   block 34, per-position occlusion of the probe, and length/position
+   residualisation, on PRM800K test and every ProcessBench subset.
+3. *Pool.* GSM8K test (1,319) and MATH-500, ten samples each, under the
+   `chat` sampler style (Qwen3's non-thinking template, pinned byte- and
+   token-identical in `src/onpolicy/prompts.py`), sampling held at the Base
+   settings (T=1.0, top-p 0.95, top-k 50). The smoke (487217) truncated 6.7% of
+   MATH at 2,048 tokens with the model still reasoning, so the pool (489707)
+   runs with a 4,096 cap. Each pool is scored by its own backbone's d512 cell
+   under the verifier template (Base 487205, Instruct 490415).
+4. *Grader fix.* Listing MATH-500 problems where 8 or more of 10 Instruct
+   samples agreed on an answer graded wrong gave 15 problems, 12 of them grader
+   misses: `\frac{17}{50}` against gold `\dfrac{17}{50}`, `10080` against
+   `10,\!080`, `864` against `864 \mbox{ inches}^2`, `4210_5` against
+   `4210_{5}`, `[-2, 7]` against `x \in [-2,7]`, `1, -2` against `-2,1`.
+   `src/eval/math_grade.py` now normalises those forms, with a regression test
+   per case and six guards against over-matching (ordered pairs stay ordered, a
+   thousands group is not a list). `scripts/analysis/regrade_trajectories.py`
+   regraded both pools into `cot-checker-results/tts_regraded_v1/`: 0 answers
+   went right to wrong; wrong to right were 215 (Instruct GSM8K), 129 (Instruct
+   MATH-500), 120 (Base GSM8K) and 62 (Base MATH-500). The 3 MATH-500 problems
+   still flagged are real errors (gold 13/4, model 3).
+
+**Results.** The Instruct verifier is better on every metric, over three seeds:
+
+| | Base (42 / 43 / 44) | Instruct (42 / 43 / 44) |
+|---|---|---|
+| PRM800K test AUROC | 0.8946 (0.8978 / 0.8970 / 0.8889) | **0.9128** (0.9123 / 0.9116 / 0.9146) |
+| ProcessBench F1_PB val-selected, avg 4 | 0.469 (0.427 / 0.486 / 0.494) | **0.560** (0.575 / 0.587 / 0.519) |
+| ProcessBench F1_PB oracle, avg 4 | 0.607 (0.576 / 0.617 / 0.628) | **0.655** (0.647 / 0.656 / 0.663) |
+| ProcessBench F1_PB calib-20, avg 4, seed 42 | 0.539 | **0.607** |
+
+Every Instruct seed beats every Base seed on AUROC and on oracle F1_PB. The
+audit is clean. The top residual coordinate carries 0.404 of a step token's
+squared norm on Base against 0.399 on Instruct; neither arm has a step token
+above 5x the median norm; step tokens at block 34 send 0.608 against 0.610 of
+their attention to token 0 and 0.035 against 0.030 to template text; the first
+step token's occlusion share stays at its uniform baseline on PRM800K (0.037
+Base, 0.042 Instruct, uniform 0.037). The gain survives residualisation on log step length, step index
+and log context length on every split, for example ProcessBench math 0.8839
+to 0.9157 and omnimath 0.8243 to 0.8711. The one difference found is token 0's
+norm at the read layer, 6.56x the median against 4.03x, and the step_tokens
+probe never reads token 0.
+
+The Instruct pool, regraded: pass@1 0.936 on GSM8K and 0.840 on MATH-500,
+against 0.797 and 0.463 for Base. Final-answer accuracy, both verifiers the
+PRM800K-trained d512 of their own backbone, aggregated by `worst`:
+
+| Instruct | gsm8k N=2 | N=4 | N=10 | math500 N=2 | N=4 | N=10 |
+|---|---|---|---|---|---|---|
+| self-consistency | 0.936 | 0.946 | 0.950 | 0.841 | 0.880 | 0.900 |
+| verifier tie-break | 0.941 | 0.948 | 0.951 | 0.857 | 0.886 | 0.898 |
+| verifier weighted vote | 0.941 | 0.948 | 0.950 | 0.857 | 0.885 | 0.904 |
+| verifier best-of-N | 0.941 | 0.946 | 0.952 | 0.857 | 0.867 | 0.870 |
+| DeepConf tie-break | 0.940 | 0.947 | 0.951 | 0.851 | 0.882 | 0.900 |
+| DeepConf weighted vote | 0.940 | 0.946 | 0.949 | 0.851 | 0.882 | 0.896 |
+| best possible choice | 0.958 | 0.971 | 0.979 | 0.895 | 0.926 | 0.952 |
+
+Verifier tie-break minus self-consistency, points, 95% paired cluster bootstrap:
+
+| | Base (superseded) | Instruct |
+|---|---|---|
+| gsm8k N=2 | +6.63 [+6.16, +7.11] | +0.54 [+0.33, +0.74] |
+| gsm8k N=4 | +1.66 [+1.38, +1.98] | +0.22 [+0.09, +0.36] |
+| gsm8k N=10 | +0.32 [-0.03, +0.71] | +0.08 [-0.19, +0.38] |
+| math500 N=2 | +6.30 [+5.47, +7.16] | +1.67 [+1.12, +2.24] |
+| math500 N=4 | +3.65 [+2.86, +4.47] | +0.65 [+0.27, +1.07] |
+| math500 N=10 | +0.18 [-0.79, +1.19] | -0.17 [-0.70, +0.41] |
+
+At N=2 on MATH-500 the headroom between self-consistency and the best choice
+is 12.3 points on Base and 5.4 on Instruct; the verifier recovers 51% of it on
+Base and 31% on Instruct. At N=2 the Instruct vote is tied on 22% of MATH-500
+problems against 65% for Base.
+
+Against the literature on the same backbone:
+
+| Qwen3-8B instruct | ours | published |
+|---|---|---|
+| GSM8K pass@1 | 93.6 | 95.6 (ReProbe Table 3) |
+| GSM8K self-consistency, N=10 | 95.0 | 97.6 (ReProbe Table 3) |
+| GSM8K best verifier minus self-consistency, N=10 | +0.1 (spans 0) | +0.2 (Qwen2.5-Math-PRM-7B and ReProbe) |
+| GSM8K pass@10 | 97.9 | 99.2 (ReProbe Table 3) |
+| MATH-500 pass@1 | 84.0 | 92.4 (as recorded in `docs/tts_related_work_v1.md` §0) |
+| MATH-500, best reported selection | 90.4 (verifier weighted vote, N=10) | 85.3 (HSRM best-of-8, T=0.7, top-p 0.9) |
+
+**Interpretation.** Base was the wrong default. It cost 0.018 in-domain AUROC
+and 0.048 oracle F1_PB on ProcessBench, and the audit finds none of the
+artifacts that motivated it. The verifier-driven gains on the scaling curves
+were mostly a property of the weak policy: with the Instruct model a
+single sample is already right 84% of the time on MATH-500, a pair of samples
+rarely disagrees, and the tie-break has 1.7 points to win at N=2 and nothing by
+N=10. Best-of-N is still the worst verifier rule by N=10 (-3.0 points on
+MATH-500). The tie-break no longer leads the weighted vote everywhere: at N=10
+on MATH-500 the weighted vote scores 0.904 against 0.898, and both lifts over
+self-consistency span zero (+0.43 [-0.27, +1.27] and -0.17 [-0.70, +0.41]). The
+verifier still edges DeepConf's tie-break at N=2 on MATH-500 (0.857 against
+0.851). Our GSM8K
+curve reproduces the shape ReProbe reports on the same backbone, about 2 points
+lower throughout. MATH-500 pass@1 stays 8 points under the recorded 92.4. The
+sampling temperature (1.0 here, 0.7 in HSRM) is the first candidate, and it is
+unverified.
+
+**Next step.** Resample the Instruct pool at Qwen's recommended non-thinking
+settings (T=0.7, top-p 0.8, top-k 20) and read whether MATH-500 pass@1 closes on
+the published number. That single job settles whether the remaining gap is
+sampling or a pipeline difference.
+
+Artifacts: `results/instruct_arm_v1/contrast_regraded_{base,instruct}.json`,
+`results/instruct_arm_v1/tiebreak_lift_base_vs_instruct.png`,
+`$SCRATCH/cot_mech/qwen3_8b_instruct_v1/audit/compare.md`,
+`src/analysis/instruct_audit.py`, `scripts/analysis/instruct_artifact_audit.py`,
+`scripts/analysis/regrade_trajectories.py`, `slurm/instruct_audit_tamia.sh`,
+`slurm/submit_instruct_arm.sh`, `tests/analysis/test_instruct_audit.py`,
+`tests/eval/test_math_grade.py`.
+
 
 ---
 
@@ -3144,8 +3469,30 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ## 24. Next Steps
 
-*Current plan, 2026-09-16, after tts_roster_v1 (§21). Everything below the
-horizontal rule is the superseded Stage-1 list, kept for the record.*
+*Current plan, 2026-09-28, after §21.10. Qwen3-8B (Instruct) is the primary
+policy. The 2026-09-21 list that follows it was written for Base.*
+
+Each item reruns on Instruct a Base result that §21.10 did not cover, most
+decisive first.
+
+1. **Resample the Instruct pool at T=0.7, top-p 0.8, top-k 20.** MATH-500 pass@1
+   is 84.0 against a recorded 92.4. One generation job decides whether sampling
+   explains the gap before any other number is compared to the literature.
+2. **Qwen2.5-Math-PRM-7B on the Instruct pool.** The field's strongest verifier,
+   at N=2 to 10, on the policy it is usually reported with.
+3. **Online rejection with the Instruct d512 cell.** §21's rejection result
+   (+12.5 points at N=1 on Base) was the one mechanism that acted where voting
+   cannot. At Instruct pass@1 of 84% its headroom is smaller, and it is untested.
+4. **The 19-cell grid on Instruct states,** so the representation ranking of
+   §19 and §20.8 is restated on the primary policy.
+
+*Plan of 2026-09-21, after §21.8, written for the Base policy.*
+
+Sprint 8's scope is a single question: do the sprint 7 curves survive against
+what the field deploys. Half of it landed without compute (§21.8): the
+literature's weighted-vote aggregators lose to the tie-break or tie it, on the
+same draws. The half that remains is the verifier, not the rule, and it is item
+2 below. Design in `docs/tts_sota_v1_plan.md`.
 
 The study now has two working mechanisms at opposite ends of the budget axis and
 four gaps between it and a claim anyone should act on, in priority order.
@@ -3158,7 +3505,10 @@ four gaps between it and a claim anyone should act on, in priority order.
 2. **The PRM.** Qwen2.5-Math-PRM-7B is downloaded and unwired. Until it runs,
    every result here compares a hidden-state probe against free signals rather
    than against what a practitioner would actually deploy, and its scoring cost
-   is the only one large enough to move the token axis.
+   is the only one large enough to move the token axis. §21.8 sharpens this from
+   a gap into a test: weighting a vote by the probe never paid, and whether that
+   is a fact about weighting or about a weak weight is exactly what a stronger
+   verifier settles. Now the top of the list.
 3. **Pooled-readout support in `online_bon.Checker`,** so the representation
    axis exists online as well as offline. One scorer drove the whole rejection
    sweep.

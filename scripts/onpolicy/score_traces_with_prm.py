@@ -102,7 +102,9 @@ def main() -> None:
                         "PRM shards stride the pool differently); asserts the "
                         "same n_steps per trace")
     p.add_argument("--orientation_traces", type=int, default=20,
-                   help="traces used for the sign gate before scoring starts")
+                   help="traces per class used for the sign gate before scoring starts")
+    p.add_argument("--orientation_scan", type=int, default=3000,
+                   help="most traces read while collecting the gate's two classes")
     p.add_argument("--max_traces", type=int, default=0)
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
@@ -144,7 +146,12 @@ def main() -> None:
     # --- gate 1: orientation. A PRM wired backwards, or fed a malformed
     # template, fails this in seconds and costs nothing. ---
     pos, neg = [], []
-    for r in mine[: a.orientation_traces * 4]:
+    # Scan until both classes have enough traces, not a fixed prefix: on the
+    # Instruct GSM8K pool (93% correct) 80 traces held 3 incorrect ones, and a
+    # mean over 3 flipped the gate on one shard of job 492587.
+    for r in mine[: a.orientation_scan]:
+        if len(pos if r["correct"] else neg) >= a.orientation_traces:
+            continue                      # that class is full; do not pay for it
         steps = split_into_steps(r["solution"])
         if not steps:
             continue

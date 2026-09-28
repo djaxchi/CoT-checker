@@ -1,0 +1,2 @@
+# Rerun after job 492613 timed out: the d256 cell, all three seeds.
+step_tokens transformer:d256,l2,f1024,h4

@@ -13,7 +13,9 @@ set -euo pipefail
 : "${PROJECT_ROOT:?Set the isolated code snapshot}"
 : "${RUN_ROOT:?Set the dedicated leaderboard output root}"
 : "${GROUP:?Set vectors or sequences}"
-case "$GROUP" in vectors|sequences) ;; *) exit 2 ;; esac
+# sequences_d256 and sequences_small split the sequence roster after job 492613
+# hit its 6h limit: at ~5h per seed-42 cell, one job cannot hold all nine.
+case "$GROUP" in vectors|sequences|sequences_d256|sequences_small) ;; *) exit 2 ;; esac
 export PRM_STORE="/scratch/d/dchikhi/cot_mech/qwen3_8b_instruct_v1/repstore/step_spans"
 export PB_STORE="/scratch/d/dchikhi/cot_mech/qwen3_8b_instruct_v1/repstore/pb_step_spans"
 export OUT_ROOT="$RUN_ROOT/cells"
@@ -24,7 +26,7 @@ export CELLS_FILE="$PROJECT_ROOT/experiments/instruct_leaderboard_v1/$GROUP.cell
 export RESCALE=none SEEDS="42 43 44" EPOCHS=30 BATCH_SIZE=256 HP_SEARCH_CAP=100000
 export HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export N_GPUS=4 PRELOAD_BUDGET_GB=60
-if [[ "$GROUP" == sequences ]]; then
+if [[ "$GROUP" == sequences* ]]; then
   # Two 163 GB preloads fit on the 500 GB node; four do not.
   export N_GPUS=2 PRELOAD_BUDGET_GB=185
 fi

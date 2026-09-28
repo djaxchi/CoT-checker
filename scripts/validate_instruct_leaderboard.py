@@ -37,7 +37,10 @@ def validate_result(result: dict, rep: str, learner: str, seed: int) -> None:
         raise ValueError("Cell identity does not match the frozen roster")
     if result.get("n_train") != 513810 or not result.get("full_train"):
         raise ValueError("Every cell must fit all 513810 training steps")
-    if any(result.get("protocol", {}).get(key) != val for key, val in PROTOCOL.items()):
+    # Length bucketing applies to sequence learners only; vector cells record
+    # bucketed=False on both backbones, so the field is checked per kind.
+    expected = dict(PROTOCOL, bucketed=(rep == "step_tokens"))
+    if any(result.get("protocol", {}).get(key) != val for key, val in expected.items()):
         raise ValueError("Training protocol does not match the Instruct reference")
     if result["hp"].get("search_rows") != 100000:
         raise ValueError("Hyperparameter search must use 100000 rows")

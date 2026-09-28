@@ -1,0 +1,3 @@
+# Rerun after job 492613 timed out: seeds 43 and 44 (seed 42 is done and reused).
+step_tokens attn_query
+step_tokens transformer:d128,l1,f512,h4

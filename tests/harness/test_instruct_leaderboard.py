@@ -10,7 +10,8 @@ from scripts.validate_instruct_leaderboard import PROTOCOL, roster, validate_res
 
 def result():
     return {"rep": "last_token", "learner": "linear", "seed": 42,
-            "n_train": 513810, "full_train": True, "protocol": deepcopy(PROTOCOL),
+            "n_train": 513810, "full_train": True,
+            "protocol": dict(deepcopy(PROTOCOL), bucketed=False),   # a vector cell
             "hp": {"search_rows": 100000, "trials": [
                 {"lr": lr, "weight_decay": wd}
                 for lr in (1e-3, 3e-4, 1e-4) for wd in (0., .01)]},
@@ -55,3 +56,22 @@ def test_partial_search_rejected():
     data["hp"]["trials"].pop()
     with pytest.raises(ValueError):
         validate_result(data, "last_token", "linear", 42)
+
+
+def test_vector_cell_is_not_bucketed():
+    """Only sequence learners batch by length; vector cells record
+    bucketed=False, as every Base vector cell does. Job 492612 trained all 54
+    vector cells and then failed here on that field alone."""
+    data = result()
+    data["protocol"]["bucketed"] = False
+    validate_result(data, "last_token", "linear", 42)
+
+
+def test_sequence_cell_must_be_bucketed():
+    data = result()
+    data.update(rep="step_tokens", learner="attn_query")
+    data["protocol"]["bucketed"] = True
+    validate_result(data, "step_tokens", "attn_query", 42)
+    data["protocol"]["bucketed"] = False
+    with pytest.raises(ValueError):
+        validate_result(data, "step_tokens", "attn_query", 42)

@@ -174,10 +174,15 @@ def normalize_answer(string: str | None) -> str | None:
 
     # linebreaks, spaces, \! and \\, decorations
     s = s.replace("\n", "").replace("\\!", "").replace("\\\\", "\\")
+    # display-style fractions are the same fraction (MATH gold uses \dfrac)
+    s = s.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
+    # \mbox{...} is a unit wrapper exactly as \text{...} is
+    s = s.replace("\\mbox{", "\\text{")
     s = s.replace("\\left", "").replace("\\right", "")
     s = s.replace("^{\\circ}", "").replace("^\\circ", "")
     s = s.replace("\\$", "").replace("$", "")
     s = s.replace("\\%", "").replace(r"\%", "").replace("%", "")
+    had_unit = "\\text{" in s
     s = _remove_right_units(s)
     s = s.replace(" .", " 0.").replace("{.", "{0.")
     if s.startswith("."):
@@ -193,6 +198,15 @@ def normalize_answer(string: str | None) -> str | None:
     s = _fix_a_slash_b(s)
     # strip surrounding braces / trivial text wrappers
     s = s.replace("\\text{}", "").replace("\\mbox", "")
+    # a unit exponent left behind by the unit strip: "864^2" from "864 in^2"
+    s = re.sub(r"^(-?[\d.]+)\^\d$", r"\1", s) if had_unit else s
+    # "x\in[-2,7]" -> "[-2,7]"
+    s = re.sub(r"^[a-zA-Z]\\in", "", s)
+    # a one-token subscript needs no braces: 4210_{5} -> 4210_5
+    s = re.sub(r"_\{(\w)\}", r"_\1", s)
+    # thousands separators, only when the whole answer is one grouped number
+    if re.fullmatch(r"-?\d{1,3}(,\d{3})+(\.\d+)?", s):
+        s = s.replace(",", "")
     return s
 
 
@@ -238,6 +252,10 @@ def is_equiv(a: str | None, b: str | None) -> bool:
     na, nb = normalize_answer(a), normalize_answer(b)
     if na == nb:
         return True
+    # a bare comma list (no brackets) is a set of solutions: order is not graded
+    if na and nb and "," in na and "," in nb and not re.search(r"[()\[\]{}]", na + nb):
+        if sorted(na.split(",")) == sorted(nb.split(",")):
+            return True
     # cheap numeric equality (e.g. "0.50" vs "0.5", "3.0" vs "3")
     try:
         if abs(float(na) - float(nb)) < 1e-6:

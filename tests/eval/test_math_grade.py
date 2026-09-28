@@ -82,3 +82,38 @@ def test_sympy_booster_optional(monkeypatch):
         assert res is True
     except Exception:
         assert res in (True, False)   # absence of sympy must not raise
+
+
+# --------------------------------------------------------------------------- #
+# forms the Qwen3-8B (Instruct) MATH-500 pool writes, found by listing problems
+# where 8+ of 10 samples agreed on an answer the grader marked wrong
+# (instruct_arm_v1). Each pair is (model answer, MATH-500 gold).
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("pred,gold", [
+    (r"\frac{17}{50}", r"\dfrac{17}{50}"),          # math500_00162
+    (r"\dfrac{13}{6}", r"\frac{13}{6}"),            # math500_00331
+    ("10080", r"10,\!080"),                         # math500_00198
+    ("32348", r"\$32,\!348"),                       # math500_00242
+    ("11111111100", r"11,\! 111,\! 111,\! 100"),    # math500_00217
+    ("58500", "58,500"),                            # math500_00343
+    ("864", r"864 \mbox{ inches}^2"),               # math500_00257
+    ("15", r"15\mbox{ cm}^2"),                      # math500_00467
+    ("4210_5", "4210_{5}"),                         # math500_00127
+    ("[-2, 7]", r"x \in [-2,7]"),                   # math500_00383
+    ("1, -2", "-2,1"),                              # math500_00456
+])
+def test_instruct_pool_forms_are_equivalent(pred, gold):
+    assert mg.is_equiv(pred, gold)
+
+
+@pytest.mark.parametrize("pred,gold", [
+    ("3", r"\frac{13}{4}"),                         # math500_00401, a real error
+    ("1", "501"),                                   # math500_00080, a real error
+    ("21", "28"),                                   # math500_00303, a real error
+    ("(1, 2)", "(2, 1)"),                           # an ordered pair stays ordered
+    ("1,2", "1,3"),
+    ("1,000", "1"),                                 # a thousands group is not a list
+])
+def test_new_normalisations_do_not_overmatch(pred, gold):
+    assert not mg.is_equiv(pred, gold)

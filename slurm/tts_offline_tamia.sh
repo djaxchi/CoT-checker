@@ -34,6 +34,11 @@ HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
 # fewshot for the Base policy; chat for Qwen/Qwen3-8B (instruct_arm_v1), which
 # runs the non-thinking template and ignores --n_shot and --stop_strings.
 PROMPT_STYLE="${PROMPT_STYLE:-fewshot}"
+# ReProbe's sampling settings, used for both tts_roster_v1 and instruct_arm_v1.
+# Qwen's recommended non-thinking settings are T=0.7, top-p 0.8, top-k 20.
+TEMPERATURE="${TEMPERATURE:-1.0}"
+TOP_P="${TOP_P:-0.95}"
+TOP_K="${TOP_K:-50}"
 N_SAMPLES="${N_SAMPLES:-10}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-2048}"
 NUM_SHARDS="${NUM_SHARDS:-4}"
@@ -77,7 +82,7 @@ gen_set () {   # $1 = split stem, $2 = output stem
       --model_name_or_path "$MODEL_NAME_OR_PATH" --local_files_only \
       --model_dtype bfloat16 --run_name "$2" \
       --max_problems 0 --n_samples "$N_SAMPLES" \
-      --temperature 1.0 --top_p 0.95 --top_k 50 \
+      --temperature "$TEMPERATURE" --top_p "$TOP_P" --top_k "$TOP_K" \
       --max_new_tokens "$MAX_NEW_TOKENS" \
       --prompt_style "$PROMPT_STYLE" --n_shot 4 --stop_strings \
       --shard_idx "$i" --num_shards "$NUM_SHARDS" --force >>"$LOG" 2>&1 &

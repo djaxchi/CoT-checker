@@ -51,6 +51,9 @@ STEMS="${STEMS:-tts_gsm8k tts_math500}"
 # full backbone pass. To add them, submit with e.g.
 #   CELLS="$RUN_ROOT/cells/step_tokens__attn_query__seed42" sbatch --time=03:00:00 ...
 CELLS="${CELLS:-}"
+# The cell whose saved scores the PRM's segmentation is checked against. For
+# the Instruct pool that is the Instruct d512 cell (instruct_arm_v1).
+VERIFY_CELL="${VERIFY_CELL:-step_tokens__transformer_d256_l2_f1024_h4__seed42}"
 
 cd "$PROJECT_ROOT"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
@@ -75,7 +78,7 @@ pip install --no-index torch "transformers<5" numpy sympy 2>&1 | tail -1
 for STEM in $STEMS; do
   ls "$TTS_ROOT"/${STEM}.shard*_trajectories.jsonl >/dev/null 2>&1 \
     || { echo "[FATAL] no trajectories for $STEM under $TTS_ROOT" >&2; exit 2; }
-  ls "$TTS_ROOT"/scores/${STEM}__step_tokens__transformer_d256_l2_f1024_h4__seed42.shard*.jsonl >/dev/null 2>&1 \
+  ls "$TTS_ROOT"/scores/${STEM}__${VERIFY_CELL}.shard*.jsonl >/dev/null 2>&1 \
     || { echo "[FATAL] no probe scores for $STEM: the segmentation gate has nothing to check" >&2; exit 2; }
 done
 python - <<PY || { echo "[FATAL] $PRM_NAME_OR_PATH is not loadable offline from $HF_CACHE" >&2; exit 2; }
@@ -123,7 +126,7 @@ echo "=== 2. the PRM, with both gates armed ==="
 # segment every trace exactly as the probe did or the job aborts without writing.
 for STEM in $STEMS; do
   # Every probe shard: PRM shards and probe shards stride the pool differently.
-  REFS=("$TTS_ROOT"/scores/${STEM}__step_tokens__transformer_d256_l2_f1024_h4__seed42.shard*.jsonl)
+  REFS=("$TTS_ROOT"/scores/${STEM}__${VERIFY_CELL}.shard*.jsonl)
   echo "--- $STEM / PRM (gate against ${#REFS[@]} probe shards) ---" | tee -a "$LOG"
   run_sharded "$STEM" "${STEM}__prm_qwen25_math_7b" \
     python scripts/onpolicy/score_traces_with_prm.py \

@@ -3254,6 +3254,58 @@ same Instruct candidates, then explain disagreement cases before expanding the
 representation grid or online controller (§24).
 
 
+
+### 21.12 Instruct Leaderboard Replication and Prospective Rank Transfer
+
+*2026-09-28. Submitted; no new leaderboard or downstream correlation is reported yet.*
+
+The requested experiment reproduces the presentation's ProcessBench ranking on
+Qwen3-8B Instruct. It preserves calib-20 first-error F1_PB, the four-subset mean,
+three seeds and the full fixed PRM800K training protocol. The frozen roster has
+19 original representation/learner cells plus three labeled lengthfree_geom
+extensions. Every row enters the downstream comparison, including low-ranked
+rows. The protocol is `docs/instruct_leaderboard_v1_plan.md`.
+
+Preflight validated all seven Instruct store fingerprints against the completed
+d512 reference, including backbone, layer 35, dimension 4,096 and verifier
+context. It checked all three d512 results against the training protocol and
+archived their checkpoints and scores to persistent storage. The earlier
+truncated transformer experiment is excluded. Reusing these three runs leaves
+63 new runs, giving 66 seed runs for the full 22-cell table.
+
+Source snapshot: `273a1ab`, isolated from the shared cluster working tree.
+Persistent output root:
+`/project/aip-azouaq/dchikhi/cot_mech/instruct_leaderboard_v1/`.
+
+| Stage | Slurm job | Scope |
+|---|---:|---|
+| Vector grid | 492612 | 18 cells, seeds 42/43/44, node-local vector caches |
+| Sequence grid | 492613 | Attention pooling, d128 and d256, seeds 42/43/44 |
+| Validate and merge | 492614 | After both training jobs succeed; require all 66 runs |
+
+Training jobs use whole H100 nodes. The sequence job limits simultaneous
+163 GB preloads to two processes. The final validation checks complete files,
+input fingerprints, training count, protocol and hyperparameter reuse before
+producing `ranked_leaderboard.md`, its JSON companion, and the representation
+matrix `leaderboard.md`. Setup validation passed 182 harness tests, Ruff and
+shell syntax checks.
+
+The primary downstream endpoint is the Spearman correlation between the
+19 core cells' seed-averaged calib-20 F1_PB and MATH-500 best-of-4 lift over
+majority, using maximum step suspicion on the same T=1.0 candidate pool.
+Other budgets, rules, datasets and the 22-cell extension remain explicit
+secondary analyses. Shared question and seed resampling will distinguish
+measurement uncertainty from roster sensitivity. The current single completed
+architecture cannot establish a rank relationship.
+
+Before full-roster TTS scoring, resolve answer identity and failed-sample
+handling, record cross-corpus exposure, and reproduce each checkpoint's scores
+under the scoring path. In particular, lengthfree_geom requires its
+training-fitted transform during downstream inference. Generation-state inputs
+and the concurrent T=0.7 pool are separate context/policy sensitivity arms.
+The existing Instruct generation and PRM jobs remain independent.
+
+
 ---
 
 ## 22. Limitations
@@ -3595,7 +3647,7 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ## 24. Next Steps
 
-*Current plan, 2026-09-28, after §21.11. Qwen3-8B Instruct is the primary
+*Current plan, 2026-09-28, after §21.12. Qwen3-8B Instruct is the primary
 policy. Earlier plans below remain historical.*
 
 1. **Repair and freeze evaluation.** Unify gold-independent answer identity for
@@ -3615,11 +3667,14 @@ policy. Earlier plans below remain historical.*
    Compare captured and reconstructed token IDs, states and scores, including
    the final token. Test Instruct rejection against plain generation, random
    rejection at the same rate and confidence rejection at matched budgets.
-5. **Run a compact Instruct representation control before the full grid.**
-   Compare last token, token statistics and attention pooling under matched
-   training/adaptation budgets, with grouped length/position controls and
-   content-preserving formatting changes. Expand to 19 cells only if it
-   resolves a remaining representation question.
+5. **Replicate the full Instruct leaderboard, then test downstream rank transfer.**
+   The September 28 follow-up requests the original 19-cell presentation grid
+   plus the three labeled lengthfree extensions, all at three seeds. This
+   replaces the compact-grid recommendation. Preserve calib-20 F1_PB as the
+   headline, reuse only validated d512 runs, and score the entire roster on
+   identical Instruct TTS candidates. Protocol and the primary rank-transfer
+   endpoint are frozen in `docs/instruct_leaderboard_v1_plan.md`. Training can
+   proceed while the grading and downstream-scoring gates are resolved.
 6. **Treat recommended-settings generation as a sensitivity study.** The
    T=0.7, top-p 0.8, top-k 20 arm can test accuracy/diversity/cost changes.
    It cannot isolate an alleged gap to ReProbe's 92.4 until questions, prompts

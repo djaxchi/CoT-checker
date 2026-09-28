@@ -1,7 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-09-28. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §24 holds the current plan.*
+*Last updated: 2026-09-28. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
+
+## Abstract
+
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11).
 
 ## 1. Hypothesis
 
@@ -22,7 +26,7 @@ This report covers step 1 and the first probe of step 2. We establish that an ML
 
 ## 2. The Paper We Started From
 
-We chose to reproduce **"Step-level Sparse Autoencoders for Interpretable CoT Verification"** (Miaow-Lab, arXiv:2603.03031). The paper proposes an SSAE (Step-level Sparse Autoencoder) architecture trained on GSM8K-Aug with a Qwen2.5-0.5B backbone. The paper's core claim is that a linear probe on the SSAE latent vector `h_c` can predict step correctness at close to 78.58% accuracy on GSM8K.
+We chose to reproduce **"Step-Level Sparse Autoencoder for Reasoning Process Interpretation"** (Miaow-Lab, arXiv:2603.03031). The paper proposes an SSAE (Step-level Sparse Autoencoder) architecture trained on GSM8K-Aug with a Qwen2.5-0.5B backbone. The paper's core claim is that a linear probe on the SSAE latent vector `h_c` can predict step correctness at close to 78.58% accuracy on GSM8K.
 
 The paper releases its checkpoint publicly (`Miaow-Lab/SSAE-Checkpoints`), making it an ideal reproduction target: we can use the exact same encoder and evaluate probe performance on an independent task.
 
@@ -2994,7 +2998,7 @@ has filled.
 **Context.** Every result in §20 and §21 used Qwen3-8B-Base, chosen to keep
 instruction-tuning artifacts out of the probe's input. The published
 test-time-scaling results we compare against (ReProbe, HSRM, DeepConf) use the
-instruction-tuned Qwen3-8B, so our curves started from a policy nobody deploys.
+instruction-tuned Qwen3-8B, so Base was an unmatched default for those comparisons.
 This section reruns the leaderboard's top verifier and the offline
 test-time-scaling comparison on Qwen/Qwen3-8B, non-thinking mode, and makes it
 the primary policy from here on.
@@ -3045,7 +3049,8 @@ the primary policy from here on.
 | ProcessBench F1_PB calib-20, avg 4, seed 42 | 0.539 | **0.607** |
 
 Every Instruct seed beats every Base seed on AUROC and on oracle F1_PB. The
-audit is clean. The top residual coordinate carries 0.404 of a step token's
+four reported artifact checks find similar concentration and attention patterns;
+they do not establish independence from contextual formatting cues. The top residual coordinate carries 0.404 of a step token's
 squared norm on Base against 0.399 on Instruct; neither arm has a step token
 above 5x the median norm; step tokens at block 34 send 0.608 against 0.610 of
 their attention to token 0 and 0.035 against 0.030 to template text; the first
@@ -3054,10 +3059,14 @@ Base, 0.042 Instruct, uniform 0.037). The gain survives residualisation on log s
 and log context length on every split, for example ProcessBench math 0.8839
 to 0.9157 and omnimath 0.8243 to 0.8711. The one difference found is token 0's
 norm at the read layer, 6.56x the median against 4.03x, and the step_tokens
-probe never reads token 0.
+probe never reads token 0 directly. Its contextual inputs can still contain
+information from that token. The residualization is descriptive; grouped
+cross-fitting would test out-of-sample nuisance removal.
 
-The Instruct pool, regraded: pass@1 0.936 on GSM8K and 0.840 on MATH-500,
-against 0.797 and 0.463 for Base. Final-answer accuracy, both verifiers the
+The Instruct pool, regraded: exact all-sample pass@1 is 0.93533 on GSM8K
+and 0.84060 on MATH-500, against 0.79613 and 0.46440 for Base. The
+32-order estimates in the following table differ slightly from those exact
+means. Final-answer accuracy, both verifiers the
 PRM800K-trained d512 of their own backbone, aggregated by `worst`:
 
 | Instruct | gsm8k N=2 | N=4 | N=10 | math500 N=2 | N=4 | N=10 |
@@ -3086,38 +3095,40 @@ is 12.3 points on Base and 5.4 on Instruct; the verifier recovers 51% of it on
 Base and 31% on Instruct. At N=2 the Instruct vote is tied on 22% of MATH-500
 problems against 65% for Base.
 
-Against the literature on the same backbone:
+Published context on the same backbone, with unmatched evaluation protocols:
 
 | Qwen3-8B instruct | ours | published |
 |---|---|---|
 | GSM8K pass@1 | 93.6 | 95.6 (ReProbe Table 3) |
 | GSM8K self-consistency, N=10 | 95.0 | 97.6 (ReProbe Table 3) |
-| GSM8K best verifier minus self-consistency, N=10 | +0.1 (spans 0) | +0.2 (Qwen2.5-Math-PRM-7B and ReProbe) |
+| GSM8K selection lift over self-consistency, N=10 | +0.08 [-0.19, +0.38], d512 tie-break | +0.2, PRM/ReProbe best-of-N, different rule |
 | GSM8K pass@10 | 97.9 | 99.2 (ReProbe Table 3) |
-| MATH-500 pass@1 | 84.0 | 92.4 (as recorded in `docs/tts_related_work_v1.md` §0) |
-| MATH-500, best reported selection | 90.4 (verifier weighted vote, N=10) | 85.3 (HSRM best-of-8, T=0.7, top-p 0.9) |
+| MATH pass@1, different evaluation protocols | 84.06 on MATH-500 | 92.4 on ReProbe MATH, sampled subset and LLM grading |
+| MATH selection, unmatched split and budget | 90.4 (weighted vote, N=10, full MATH-500) | 85.3 (HSRM Table 7, earlier split, N=8); headline protocol trains on 150 and tests on 350 |
 
 **Interpretation.** Base was the wrong default. It cost 0.018 in-domain AUROC
-and 0.048 oracle F1_PB on ProcessBench, and the audit finds none of the
-artifacts that motivated it. The verifier-driven gains on the scaling curves
+and 0.048 oracle F1_PB on ProcessBench, and the reported audit does not find a simple concentration or
+linear length/position explanation for the gain. The verifier-driven gains on the scaling curves
 were mostly a property of the weak policy: with the Instruct model a
 single sample is already right 84% of the time on MATH-500, a pair of samples
-rarely disagrees, and the tie-break has 1.7 points to win at N=2 and nothing by
-N=10. Best-of-N is still the worst verifier rule by N=10 (-3.0 points on
+rarely disagrees, and the measured tie-break gains 1.7 points at N=2 and has an unresolved
+effect at N=10. Best-of-N is still the worst verifier rule by N=10 (-3.0 points on
 MATH-500). The tie-break no longer leads the weighted vote everywhere: at N=10
 on MATH-500 the weighted vote scores 0.904 against 0.898, and both lifts over
 self-consistency span zero (+0.43 [-0.27, +1.27] and -0.17 [-0.70, +0.41]). The
 verifier still edges DeepConf's tie-break at N=2 on MATH-500 (0.857 against
 0.851). Our GSM8K
 curve reproduces the shape ReProbe reports on the same backbone, about 2 points
-lower throughout. MATH-500 pass@1 stays 8 points under the recorded 92.4. The
-sampling temperature (1.0 here, 0.7 in HSRM) is the first candidate, and it is
-unverified.
+lower throughout. The recorded ReProbe MATH 92.4 does not establish an eight-point
+MATH-500 deficit: ReProbe also uses temperature 1.0, but evaluates sampled
+MATH questions with DeepSeek-R1 grading (§4.2 and Appendix C.2). Align
+question IDs, prompts and graders before attributing a cross-paper gap.
+See `docs/tts_related_work_v1.md` for the source comparison.
 
-**Next step.** Resample the Instruct pool at Qwen's recommended non-thinking
-settings (T=0.7, top-p 0.8, top-k 20) and read whether MATH-500 pass@1 closes on
-the published number. That single job settles whether the remaining gap is
-sampling or a pipeline difference.
+**Next step.** Resolve answer-group consistency and scorer provenance, then
+compare the external PRM on the identical Instruct pool. A T=0.7, top-p 0.8,
+top-k 20 run remains a useful policy sensitivity study; it cannot by itself
+isolate the source of the cross-paper difference. The revised order is in §24.
 
 Artifacts: `results/instruct_arm_v1/contrast_regraded_{base,instruct}.json`,
 `results/instruct_arm_v1/tiebreak_lift_base_vs_instruct.png`,
@@ -3126,6 +3137,121 @@ Artifacts: `results/instruct_arm_v1/contrast_regraded_{base,instruct}.json`,
 `scripts/analysis/regrade_trajectories.py`, `slurm/instruct_audit_tamia.sh`,
 `slurm/submit_instruct_arm.sh`, `tests/analysis/test_instruct_audit.py`,
 `tests/eval/test_math_grade.py`.
+
+
+
+### 21.11 Instruct Consolidation: Opportunities, Ranking and Evaluation Limits
+
+*2026-09-28. Supersedes broad synthesis claims in §20 and §21 that weighting
+never helps, that all useful verification is tie-breaking, or that small sample
+budgets lack prior work. Historical measurements remain in their original
+sections. The added estimates use existing saved candidate pools.*
+
+**Context.** The matched retrain improves detection while its Instruct pool
+leaves smaller gains for selection. We need to distinguish how often a choice
+can help from how well the verifier makes that choice. We also need to separate
+recomputed trajectory results from the three-seed retrain and activation audit,
+whose full cluster outputs have not been independently reproduced here.
+
+**What was done.** `scripts/analysis/tts_pair_decomposition.py` enumerates all
+45 unordered pairs per ten-candidate question, using the d512 seed-42 `worst`
+score and averaging exact score ties uniformly. This equals averaging both
+candidate orders under the frontier's first-in-order score tie convention. The
+script records input SHA256 hashes and an exclusion ledger. It excludes entire
+questions with ungradeable candidates, incomplete scores or contradictory
+correctness labels within one normalized answer group. This is a sensitivity
+analysis conditional on eligibility, not a corrected full-pool benchmark.
+
+Validation: seven new tests check the exact identity, equivalence to ordered
+frontier selection, score ties and invalid-pool rejection. The local non-slow
+suite passes 1,144 tests with two skipped; the new files pass Ruff checks.
+
+For a mixed pair containing exactly one correct candidate, let q be the
+probability of selecting it. Exact averaging gives:
+
+`selection lift = mixed-pair rate × (q - 0.5)`
+
+`oracle headroom = mixed-pair rate / 2`.
+
+**Results.** On each policy's eligible subset, the Instruct lift over majority
+is **+0.577 points [0.378, 0.779]** for GSM8K (1,319 questions) and **+1.636
+[1.120, 2.133]** for MATH (497). Intervals use 4,000 question-cluster bootstrap
+resamples, seed 915, on per-question exact expectations. They do not include
+new generation-pool uncertainty or adjustment for the earlier rule search.
+
+Base excludes MATH questions 120 and 380 for ungradeable candidates and 255
+for label conflict. Instruct excludes 99, 255 and 420 for label conflicts.
+Restricting both arms to their common questions gives:
+
+| Dataset | Common questions | Policy | Mixed-pair rate | Correct choice given mixed pair | Headroom recovered |
+|---|---:|---|---:|---:|---:|
+| GSM8K | 1,319 | Base | 21.32% | 81.37% | 62.73% |
+| GSM8K | 1,319 | Instruct | 4.53% | 62.73% | 25.46% |
+| MATH-500 | 495 | Base | 24.48% | 75.33% | 50.67% |
+| MATH-500 | 495 | Instruct | 10.77% | 65.07% | 30.14% |
+
+**Interpretation.** Reduced opportunity explains part of the smaller gain;
+conditional selection also worsens. This does not isolate the effect of
+instruction tuning, because prompts, generation caps and the resulting candidate
+populations differ. At N=2, tie-breaking and reranking have identical correctness
+under the analysis assumptions. Their restriction-of-authority comparison must
+use larger budgets. Equivalent correct answers can inflate disagreement without
+creating an N=2 correctness opportunity, although vote fragmentation can affect
+larger budgets.
+
+The regraded Base PRM comparison also changes the aggregation conclusion. On
+the saved N=10 analysis, weighted Qwen2.5-Math-PRM-7B exceeds majority by
+**2.14 points [1.35, 3.00] on GSM8K** and **4.40 [2.26, 6.62] on MATH**. It
+exceeds PRM tie-break by **1.44 [0.68, 2.20]** and **2.41 [0.40, 4.42]**.
+These historical Base estimates retain the grading and exposure limitations and
+are pointwise exploratory contrasts. They establish neither an Instruct PRM
+result nor a universal advantage for weighting.
+
+**Literature corrections.** ReProbe's token-level hidden-state transformer and
+HSRM's outcome-supervised step-sequence ranker are direct prior art. ReProbe's
+MATH grading and question subset differ from ours, and its evaluation also uses
+T=1.0. Entropy-Gated Branching evaluates budgets 2, 4, 8, 16 and 32, so the
+broad claim that small-budget verification is absent from the literature is
+incorrect. The critical review at `docs/tts_related_work_v1.md` links primary
+sources and develops the distinction between step validity, outcome ranking and
+continuation value. It also narrows the causal interpretation: the reported
+whole-span solve-gap recovery of 0.35 (p=0.02) and learned-subspace
+generation recovery of 0.09 (p=0.53) support intervention-specific claims,
+not a conclusion that the model never uses correctness information.
+
+**Remaining measurement limits.** Grading and voting still disagree about
+answer identity. For question 255, `E` and `\text{E}` normalize to the same
+answer but receive different labels against `\text{(E)}`. Historical d256
+on-policy data contain 23 training and 3 validation overlaps with MATH-500;
+this finding does not establish overlap for the PRM800K-trained d512 arm.
+Archive the d512 training and model-selection question hashes before making a
+cross-corpus independence claim. The current Instruct d512 scores use
+verifier-template states, so the generation-state d256 cost argument does not
+transfer to them. Report raw generated tokens, actual scored-candidate lengths,
+prompt processing and measured latency. Source-val, calib-20 and oracle
+ProcessBench metrics represent different adaptation budgets.
+
+**Reproduction.** Run for each arm after retaining the regraded input pools:
+
+```bash
+uv run python scripts/analysis/tts_pair_decomposition.py \
+  --run-root cot-checker-results/tts_regraded_v1/instruct \
+  --cell step_tokens__transformer_d512_l2_f2048_h8__seed42 \
+  --out runs/project_audit_20260928/regraded_pair_instruct.json
+```
+
+Replace `instruct` with `base` in the input and output paths for the historical
+control. The common-question table intersects the two `per_problem` mappings,
+averages `mixed_pair_rate` and `mixed_selected_mass`, and computes their ratio;
+headroom recovered is twice that ratio minus one. Per-question statistics and
+input hashes accompany each output. The PRM follow-up is
+`runs/project_audit_20260928/regraded_prm_contrast.json`, produced with
+`tts_rule_contrast.py`, N=10, 32 orders, baseline
+`wvote::probe::prm_qwen25_math_7b::worst` on the regraded Base root.
+
+**Next step.** Fix the full-pool evaluation contract and test the PRM on the
+same Instruct candidates, then explain disagreement cases before expanding the
+representation grid or online controller (§24).
 
 
 ---
@@ -3469,22 +3595,35 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 ## 24. Next Steps
 
-*Current plan, 2026-09-28, after §21.10. Qwen3-8B (Instruct) is the primary
-policy. The 2026-09-21 list that follows it was written for Base.*
+*Current plan, 2026-09-28, after §21.11. Qwen3-8B Instruct is the primary
+policy. Earlier plans below remain historical.*
 
-Each item reruns on Instruct a Base result that §21.10 did not cover, most
-decisive first.
-
-1. **Resample the Instruct pool at T=0.7, top-p 0.8, top-k 20.** MATH-500 pass@1
-   is 84.0 against a recorded 92.4. One generation job decides whether sampling
-   explains the gap before any other number is compared to the literature.
-2. **Qwen2.5-Math-PRM-7B on the Instruct pool.** The field's strongest verifier,
-   at N=2 to 10, on the policy it is usually reported with.
-3. **Online rejection with the Instruct d512 cell.** §21's rejection result
-   (+12.5 points at N=1 on Base) was the one mechanism that acted where voting
-   cannot. At Instruct pass@1 of 84% its headroom is smaller, and it is untested.
-4. **The 19-cell grid on Instruct states,** so the representation ranking of
-   §19 and §20.8 is restated on the primary policy.
+1. **Repair and freeze evaluation.** Unify gold-independent answer identity for
+   grading and voting; resolve conflicting groups; retain unparseable samples
+   as failures in the full-pool metric. Record checkpoint, training-question,
+   model-selection and evaluation hashes. Freeze a development/held-out rule
+   protocol before comparing more aggregators.
+2. **Run Qwen2.5-Math-PRM-7B on the identical Instruct candidates.** Compare
+   majority, mean confidence, the documented DeepConf adaptation, d512 and PRM
+   under tie-break, rerank and a development-selected weighted rule. Report
+   paired differences and measured scorer cost.
+3. **Explain Instruct selection errors.** Extend the exact pair decomposition
+   to N=3/4 rescues and harmful plurality overrides. Audit local invalidity,
+   recovery, lucky correct answers and persistent wrong answers. Test process
+   supervision against within-question outcome ranking under matched inputs.
+4. **Establish generation-state equivalence and cost, then test online control.**
+   Compare captured and reconstructed token IDs, states and scores, including
+   the final token. Test Instruct rejection against plain generation, random
+   rejection at the same rate and confidence rejection at matched budgets.
+5. **Run a compact Instruct representation control before the full grid.**
+   Compare last token, token statistics and attention pooling under matched
+   training/adaptation budgets, with grouped length/position controls and
+   content-preserving formatting changes. Expand to 19 cells only if it
+   resolves a remaining representation question.
+6. **Treat recommended-settings generation as a sensitivity study.** The
+   T=0.7, top-p 0.8, top-k 20 arm can test accuracy/diversity/cost changes.
+   It cannot isolate an alleged gap to ReProbe's 92.4 until questions, prompts
+   and grading match. Preserve the T=1.0 pool as a control.
 
 *Plan of 2026-09-21, after §21.8, written for the Base policy.*
 

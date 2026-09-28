@@ -1,236 +1,122 @@
-# Where our curves sit in the field
+**Literature review and research implications, 28 September 2026**
 
-*2026-09-22. Literature pass for sprint 8, supporting `docs/tts_sota_v1_plan.md`.
-Every number below is quoted from the cited paper, not recomputed.*
+Qwen3-8B Instruct, non-thinking, is now the primary policy. The most defensible research question is: **which information in a frozen model's reasoning states improves verification, and under which decision and compute constraints does that information improve answers?** The current results support a connection between representation, supervision and downstream selection. They do not establish that a particular aggregation rule is universally best or that a correctness representation has no causal role.
 
-## 0. The comparability problem, stated first
+This review supersedes the September 22 positioning in this file. It covers primary papers available through September 28, including August work. It is a focused critical review, not a systematic census. Numerical comparisons below preserve the source's task and protocol; same model size alone does not establish comparability. REPORT.md records experiments; `docs/project_context.md` summarizes the current evidence and `docs/tts_reading_list_v1.md` gives a reading order.
 
-Our policy is **Qwen3-8B-Base**, prompted 4-shot, sampled at temperature 1.0.
-Almost every published TTS result uses an instruct or reasoning model. The
-absolute accuracies therefore do not line up and should not be put side by side:
+**1. Distinguish the scientific targets before comparing methods**
 
-| setting | GSM8K | MATH-500 | source |
-|---|---|---|---|
-| Qwen3-8B-Base, greedy / few-shot | 81.9 | 67.2 to 68.6 | Qwen3 tech report and third-party evals |
-| Qwen3-8B instruct, non-thinking, pass@1 | 95.6 | 92.4 | ReProbe Table 3 |
-| **ours, Base, 4-shot, T=1.0, pass@1** | **78.8** | **45.0** | REPORT.md §21 |
+A step classifier, a trajectory ranker and a search controller predict different quantities. A human can mark a locally invalid inference even when later steps repair it or the final answer happens to be right. An outcome verifier can prefer that trajectory. A controller can accept a locally unhelpful step if the continuation remains recoverable. For a fixed continuation policy, the probability of eventual success is a value function, not a definition of mathematical validity.
 
-Our GSM8K pass@1 of 78.8 against a reported 81.9 is the expected cost of
-sampling at temperature 1.0 instead of greedy. Our MATH-500 pass@1 of 45.0
-against a reported 67 to 69 is a much larger gap and is not explained by
-temperature alone. Flag it rather than hide it: it means our math500 curves
-start from a weaker policy than anyone else's, which makes the headroom larger
-and the voting baseline weaker.
+This distinction explains why training a stronger step detector need not improve best-of-N. Averaging step AUROC across questions also credits separation between easy and hard problems, whereas selection compares candidates for the same question. A monotone transformation leaves AUROC unchanged while changing probability-weighted voting. Ranking, calibration and decision value therefore require separate evaluation.
 
-Three things **are** comparable across backbones and are what we should report:
+The current project crosses all three targets: PRM800K step labels, ProcessBench first-error identification, and final-answer selection on model-generated pools. Preserve those distinctions in tables. Report source-validation-selected F1 and its trivial baseline for binary step detection, ProcessBench's own trace metric for first-error identification, and final-answer accuracy for selection. Keep target-calibrated and oracle thresholds separate. AUROC avoids prevalence-driven changes in F1, but remains sensitive to the conditional populations being compared.
 
-1. **lift over self-consistency at matched N**, since both arms use the same policy;
-2. **verifier AUROC**, which is threshold-free and policy-relative;
-3. **cost**, in generated tokens and in verifier parameters.
+**2. Sparse features and dense representations**
 
-## 1. Internal-state verifiers: our direct competitors
+Yang et al.'s [Step-Level Sparse Autoencoder for Reasoning Process Interpretation](https://arxiv.org/abs/2603.03031) is the project's origin. Use its published title and distinguish reproducing an encoder from reproducing an evaluation: replacing reconstruction-derived targets with external correctness labels changes the estimand. The historical 77.50% versus 78.58% comparison is not an equal-protocol accuracy contest.
 
-| work | probe | params | signal read | policy | benchmarks | N | self-consistency baseline? |
-|---|---|---|---|---|---|---|---|
-| **ReProbe / UHeads**, arXiv 2511.06209, ACL 2026 | transformer | 9.8M | attention to the 1 to 3 preceding tokens plus top-K logits | Qwen3-8B, Phi-4 | MATH, GSM8K, ProofNet, 3 planning, 2 QA | 10 offline, 5 online | **partial**: 3 of 8 datasets, absent on MATH |
-| **HSRM**, arXiv 2608.30841 | 2-layer transformer, d=256, 4 heads, FF 4x256 | 2.12M | last-layer hidden state at step boundaries | Qwen3 1.7B/4B/8B/14B, Llama-3.x | GSM8K, MATH-500, AIME, OlympiadBench | 8, 16, 32, 64 | **none** |
-| **STEP**, arXiv 2601.09093 | 2-layer MLP, 512 hidden | ~1.3M | last-layer hidden at `\n\n` boundaries | Qwen3-4B-Thinking, R1-Qwen3-8B, Phi-4-reasoning | AIME-25, HMMT-24/25, GPQA-D | 64 | **yes** |
-| **ELHSR**, arXiv 2505.12225, KDD 2026 | linear per-token head | <0.005% of baseline RM | hidden states, or logits alone | multiple | BoN math | - | reward models only |
-| **PHSV**, arXiv 2504.05419 | MLP per reasoning chunk | small | hidden state per chunk | reasoning models | math | - | early-exit, 24% token saving |
-| **VerifySteer**, arXiv 2605.20745 | correctness probe plus latent steering | small | paragraph-boundary hidden states | Qwen3-1.7B | ProcessBench, Hard2Verify | - | **yes**, +3.7 F1 at 4x less compute |
+Kantamneni et al.'s [Are Sparse Autoencoders Useful?](https://arxiv.org/abs/2502.16681) tests sparse probing under scarce data, imbalance, label noise and distribution shift. Their non-SAE baselines remove several apparent advantages, including in multi-token probing. This is close prior art for the project's dense-versus-sparse controls. Our inference should concern the tested SAE checkpoints and tasks. Inferiority in predictive accuracy neither proves absence of correctness information nor settles whether individual features help explain a model.
 
-**HSRM is concurrent work, and it is not the same verifier.**
+Orgad et al.'s [LLMs Know More Than They Show](https://arxiv.org/abs/2410.02707v4) links token position, error type and transfer: their detectors exploit localized information but fail to generalize across datasets, and internal answer information can disagree with emitted answers. For this project, token pooling and failure-mode decomposition address substantive questions already present in the literature. Token localization is task-dependent; diffuse signals in mathematical steps would qualify, rather than contradict, their result. The WikiProfile study belongs here, provided answer decoding tests whole answers and controls candidate priors.
 
-On priority: HSRM v1 was submitted to arXiv on **31 August 2026**. Our
-representation-by-learner grid, which contains `transformer_d256_l2_f1024_h4`,
-was committed to this repository on **24 August 2026 at 13:15:36 -0400**, one
-week earlier, in a public git history. By any normal convention that is
-independent concurrent work, cited as concurrent, not a priority claim against
-us.
+A useful next representation experiment crosses last token, simple token statistics and learned pooling with matched training data, parameter budgets and adaptation budgets. The recorded +9.1 F1 versus +2.2 F1 contrasts motivate this experiment; their ratio is not a general law that representations matter four times as much as learners. Reading five concatenated statistics changes feature dimension and the linear hypothesis class. A factorial design should make that change visible.
 
-On substance, the encoder hyperparameters coincide and the model does not. The
-generic block (2 layers, width 256, 4 heads, feed-forward 1024) is a standard
-small-encoder size, and what matters is what it encodes:
+**3. Internal-state verifiers are established prior art**
 
-| | HSRM | ours |
+[ReProbe](https://arxiv.org/html/2511.06209v5) already trains a small transformer over token features, pools within a reasoning step, and uses the score in offline selection and online search. It studies hidden states as well as attention/logit features. A token transformer or a sub-10M parameter count cannot anchor a novelty claim here. The meaningful comparison concerns feature choice, fixed representation/learner controls, supervision and decision-level evaluation.
+
+[HSRM](https://arxiv.org/html/2608.30841v1) processes a sequence of step-boundary hidden states and trains a candidate-level ranker with outcome-derived pairwise supervision. Our d512 verifier processes tokens within a step and trains on human step labels. That difference matters: HSRM's objective matches within-question candidate selection more directly. It motivates a controlled outcome-ranking ablation on the same states, rather than an argument about coincident transformer dimensions. Its main selection results do not supply the matched self-consistency comparison needed for our decision claim. Its publication date alone cannot establish our public priority. Appendix A trains on the first 150 MATH-500 questions and tests on the remaining 350; Appendix D labels the 85.3 scaling result as an earlier split. Appendix B adds LLM relabeling. This benchmark adaptation and grading differ from our full MATH-500 transfer evaluation.
+
+Zhang et al.'s [Reasoning Models Know When They're Right](https://arxiv.org/abs/2504.05419) probes intermediate answer correctness and uses the probe to stop reasoning, reporting 24% fewer inference tokens without lower performance. It also detects future answer correctness before the answer is complete. This suggests testing whether our probe reflects local invalidity, impending failure, or recognition of an answer already formed. These require labels and interventions at different positions. A step-correctness classifier is not automatically an early-exit policy.
+
+The literature already bridges probing and downstream control. The stronger contribution available here is a controlled account of why better decoding of correctness sometimes fails to translate into better decisions, including the role of supervision, candidate disagreement and the cost of obtaining the states.
+
+**4. The ReProbe comparison needs a protocol correction**
+
+ReProbe Table 3 gives Qwen3-8B GSM8K pass@1 95.6, majority@10 97.6 and its strongest listed PRM 97.8. These provide context for small incremental gains. They do not establish a field-wide maximum of 0.2 points. More consequentially, §4.2 uses temperature 1.0, and grades non-GSM8K tasks with DeepSeek-R1. Appendix C.2 describes sampled test subsets. Its MATH 92.4 is not established as MATH-500 under our symbolic grader. [Source: §4.2, Table 3 and Appendix C.2](https://arxiv.org/html/2511.06209v5)
+
+Our regraded Instruct pool has exact all-sample accuracy 93.53% on GSM8K and 84.06% on MATH-500. A comparison with the published figures must first align question IDs, prompt, stopping rules, thinking mode and grading. Lowering temperature can alter accuracy, diversity and length together. Even an accuracy increase would not isolate the cause of the cross-paper gap. Treat a recommended-settings rerun as a policy sensitivity study, with the existing pool as its control.
+
+Keep a comparability ledger:
+
+| Comparison | What currently matches | What remains unmatched |
 |---|---|---|
-| sequence axis | the **steps** of a trace, S <= 100 step vectors | the **tokens** inside one step |
-| output | one rank per candidate solution | one suspicion score per step |
-| read layer | final layer L | block 34 `resid_post` of 36 |
-| labels | outcome labels propagated onto self-generated trajectories | PRM800K human step labels |
-| pooling | encoder over step summaries | masked mean over step-token states |
+| Base versus Instruct d512 detection | Frozen source splits, head architecture, rescale setting, three seeds | Backbone representations; full artifact outputs need archiving |
+| Base versus Instruct TTS | Benchmark questions, ten candidates, nominal sampling settings | Four-shot versus chat prompt, 2,048 versus 4,096 token cap, sampled errors |
+| Our Instruct versus ReProbe | Backbone family, non-thinking setting, N=10 | Exact subset, prompt, grading, training labels and features |
+| Our verifier versus HSRM | Hidden-state inputs, small learned readout | Token/step axis, process/outcome target, benchmark adaptation, grading, sampling, budget |
+| Instruct probe versus external PRM | Can share the saved candidate pool | Instruct PRM scores and measured costs are still required |
 
-Theirs is a trace-level ranker built from step summaries. Ours is a step-level
-verifier built from token states, which is why it can drive the online rejection
-loop in §21 and a trace-level ranker cannot. Sharing an encoder size is the same
-kind of coincidence as two papers both using a 3x3 convolution.
+**5. Process supervision and decision supervision can disagree**
 
-Its Qwen3-8B numbers: Best-of-8 GSM8K 93.8 at AUROC 0.682, MATH-500 85.3 at
-AUROC 0.577, scaling to 95.0 at N=64 on GSM8K. Generators run non-thinking,
-float16, temperature 0.7, top-p 0.9, trained on 64 self-generated candidates per
-problem with outcome labels. Our AUROC of 0.831 to 0.895 is well above their
-0.577 to 0.682 on the same backbone size, and the two are **not** directly
-comparable: theirs ranks whole candidates, ours discriminates steps. Say that
-rather than quote the gap.
+Lightman et al.'s [Let's Verify Step by Step](https://arxiv.org/html/2305.20050v1) establishes strong process-supervision results and introduces PRM800K. Their reported lack of improvement from reward-weighted voting is specific to their experiments. Their successful PRM reranking also prevents interpreting the paper as a general case against verifier authority. Cite the result with its setting rather than extending it to every scorer.
 
-**The gap none of them fill.** HSRM reports no self-consistency baseline at all.
-ReProbe reports majority voting on GSM8K, StrQA and SciQA only, and leaves the
-MATH cell empty. Where ReProbe does report it, the comparison is brutal:
+[The Lessons of Developing Process Reward Models](https://arxiv.org/html/2501.07301v2) studies mismatches between rollout-derived labels, process correctness and best-of-N evaluation. In Table 6, majority@8 averages 66.2 while Qwen2.5-Math-PRM-7B reaches 67.6; several other PRMs fall below majority. Appendix aggregation comparisons show that last-step, product and minimum scores behave differently. These results motivate both a strong PRM comparator and an explicit aggregation ablation. Keep Qwen2.5-Math-7B-PRM800K distinct from Qwen2.5-Math-PRM-7B.
 
-| Qwen3-8B, N=10 | GSM8K |
-|---|---|
-| pass@1 | 95.6 |
-| **majority voting** | **97.6** |
-| Qwen2.5-Math-PRM-7B (7B params) | 97.8 |
-| ReProbe, Attn+Logit, DeepSeek-anno | 97.8 |
-| pass@10 ceiling | 99.2 |
+Our saved Base PRM scores already reject the broad claim that weighting never pays: the regraded N=10 analysis gives weighted-PRM gains over majority of 2.14 points on GSM8K and 4.40 on MATH. This is historical evidence on Base, with grading and exposure limitations, not an Instruct result. The Instruct weighted d512 vote also exceeds tie-breaking in the MATH N=10 point estimate, 90.44% versus 89.84%, although each contrast with majority has an interval spanning zero.
 
-A 7B process reward model and a 9.8M probe both buy **+0.2 points** over free
-majority voting. That is the honest state of the art on GSM8K at N=10, and it is
-the number our +0.48 at N=10 should be read against.
+Setlur et al.'s [Rewarding Progress](https://arxiv.org/abs/2410.08146) defines process advantage through the change in future success probability under a prover policy. Its relevance to step deltas is conceptual: `h_i - h_{i-1}` is a representation difference, not an advantage estimate. Test its association with controlled changes in continuation success before treating it as progress. This is a promising bridge between the S4 contribution study and a controller, but the bridge needs supervision from continuations.
 
-## 2. Process reward models: the verifiers the field deploys
+**6. Voting, confidence and the small-budget claim**
 
-Best-of-8 with Qwen2.5-Math-7B-Instruct as the policy, from *The Lessons of
-Developing Process Reward Models in Mathematical Reasoning*, arXiv 2501.07301:
+[Self-consistency](https://arxiv.org/abs/2203.11171) established answer aggregation across sampled reasoning paths. Its benefit depends on the answer distribution. A more accurate policy can leave fewer mixed correct/incorrect pairs, while systematic errors can dominate every vote. Accuracy and diversity should therefore accompany every selection curve.
 
-| verifier | GSM8K | MATH | Minerva | GaoKao | Olympiad | College | MMLU STEM | **Avg** |
-|---|---|---|---|---|---|---|---|---|
-| pass@8 ceiling | 98.1 | 92.0 | 49.3 | 80.5 | 59.6 | 52.6 | 90.5 | 74.7 |
-| **maj@8 (free)** | 96.7 | 87.1 | 41.2 | 72.5 | 44.4 | 47.8 | 73.8 | **66.2** |
-| Qwen2.5-Math-PRM-7B | 97.1 | 88.0 | 42.6 | 74.5 | 47.6 | 48.7 | 74.5 | **67.6** |
-| Math-Shepherd-PRM-7B | 97.3 | 85.4 | 37.9 | 70.6 | 40.4 | 47.2 | 70.5 | 64.2 |
-| RLHFlow-PRM-Mistral-8B | 97.0 | 86.1 | 37.1 | 70.6 | 41.2 | 47.6 | 69.5 | 64.2 |
-| RLHFlow-PRM-Deepseek-8B | 97.3 | 86.3 | 40.8 | 70.9 | 42.2 | 47.2 | 69.3 | 64.9 |
-| Skywork-PRM-7B | 97.3 | 87.3 | 38.2 | 71.9 | 43.7 | 47.8 | 67.7 | 64.8 |
-| EurusPRM-Stage1 | 95.6 | 83.0 | 35.7 | 66.2 | 38.2 | 46.2 | 66.6 | 61.6 |
-| EurusPRM-Stage2 | 95.4 | 83.4 | 34.9 | 67.3 | 39.1 | 46.3 | 67.3 | 62.0 |
+[Deep Think with Confidence](https://arxiv.org/html/2508.15260v1) defines overlapping token-group confidence, low-confidence group summaries, filtering and confidence-weighted voting. Its examples use windows of 1,024 or 2,048 tokens. Our short-window adaptation for short non-thinking traces is useful, but should carry its actual window and aggregation settings. It is not a complete reproduction of every offline and online DeepConf configuration. Comparisons should include plain mean-token confidence and preserve score orientation and filtering rules.
 
-**Six of the seven published PRMs lose to majority voting on average.** Only
-Qwen2.5-Math-PRM-7B beats it, by 1.4 points. This is the single most useful
-slide in the whole literature for us, because it establishes that beating
-self-consistency at all is the bar, not a formality.
+[Boosting Self-Consistency with Ranking](https://arxiv.org/html/2606.05054v1) combines answer frequency, semantic centrality and reasoning consistency with a small learned ranker. It is direct prior art for learning when a score should overrule counts. For this project, a held-out fusion of vote margin, probe score gap and confidence would test complementarity. It must outperform its individual inputs on unseen questions and justify any extra state extraction cost.
 
-Step-level error identification is a different task and the ordering there is
-not the same. ProcessBench mean F1: Qwen2.5-Math-PRM-72B 78.3,
-Qwen2.5-Math-PRM-7B 73.5, Math-Shepherd-PRM-7B 31.5. QwQ-32B as a prompted
-critic outperforms every PRM including the 72B.
+[Entropy-Gated Branching](https://aclanthology.org/2026.eacl-long.235/) explicitly evaluates budgets 2, 4, 8, 16 and 32 against self-consistency and search methods. Figure 3 distinguishes sampled-solution count from beam-width-times-expansions. This refutes the broad claim that the small-budget literature is empty. It does not make its branching budget identical to our offline N. A narrower contribution is a paired decomposition of small-pool hidden-state selection, with explicit scorer authority and measured costs.
 
-The PRM we have downloaded, **Qwen2.5-Math-PRM-7B**, is the right choice: it is
-the only one in the table that clears majority voting, and it is the one both
-ReProbe and HSRM use as their strong baseline.
+At N=2, consistently graded parseable candidates make tie-breaking and reranking equivalent in correctness. Agreement leaves no decision; disagreement creates a 1-1 tie. Thus the N=2 gain establishes ranking utility, not the superiority of restricting a verifier to ties. N=3 and N=4 distinguish those rules.
 
-`Rethinking Reward Models for Multi-Domain Test-Time Scaling` (arXiv 2510.00492,
-TMLR 2026) adds a caution worth one line in the deck: across 14 domains,
-discriminative ORMs perform on par with discriminative PRMs, and generative ORMs
-are the most robust of the four. Step-level supervision is not self-evidently
-better outside math.
+**7. What the new Instruct decomposition establishes**
 
-## 3. Aggregation rules: the family §21.8 measured
+For two candidates drawn without replacement, let M mean that exactly one is correct, and q be the verifier's conditional probability of selecting it, averaging exact score ties uniformly. Then:
 
-| rule | origin | headline number |
-|---|---|---|
-| self-consistency | Wang et al., arXiv 2203.11171, ICLR 2023 | +17.9 points on GSM8K with PaLM-540B |
-| verifier-weighted vote | Li et al. DIVERSE, arXiv 2206.02336, ACL 2023 | GSM8K 74.4 to 83.2 on code-davinci-002 |
-| best-of-N with a PRM | Lightman et al., arXiv 2305.20050, ICLR 2024 | MATH 78.2 at best-of-1860, ORM 72.4 |
-| self-certainty plus Borda | Kang et al., arXiv 2502.18581 | MATH N=64: SC 63.40, Borda 64.10 |
-| DeepConf filter then weighted vote | arXiv 2508.15260 | AIME-25 99.9 at N=512, 84.7% fewer tokens |
-| Consilience | arXiv 2608.09898 | confidence-based selection collapses on hard tasks |
-| adaptive-consistency | Aggarwal et al., arXiv 2305.11860, EMNLP 2023 | 7.9x fewer samples, <0.1% accuracy drop |
-| GenSelect | arXiv 2507.17797 | LLM reasons over N candidates and picks |
+`lift over majority = P(M) × (q - 0.5)`
 
-**Lightman et al. corroborate §21.8 directly.** Their own text: they experimented
-with RM-weighted voting to combine the PRM with majority voting, and it *did not
-noticeably improve performance*. We found the same thing three years later with
-a different verifier and a paired interval on it. That is a citation, not a
-coincidence, and it should be on the slide.
+`oracle headroom = P(M) / 2`
 
-The counterweight, which we must state ourselves before anyone else does:
-Lightman's PRM **beats** majority voting at every N and the gap **widens** with
-N. Our rerank does the opposite, degrading on math500 past N=6. The difference
-is verifier quality, and that is exactly what the PRM run will price.
+These identities require consistent answer labels and parseable candidates. They average over the empirical pool, not an assumed independent Bernoulli model of correctness. In particular, do not substitute `2p(1-p)` using dataset-average pass@1; question difficulty and repeated-sample dependence matter.
 
-Two numbers for calibrating how large a real lift is at large N:
+The new script enumerates all 45 pairs in each ten-candidate pool. On the shared eligible questions:
 
-- self-certainty Borda over self-consistency, Llama-3.1-8B-Instruct, N=64: MATH
-  +0.70 points, GSM8K +0.08 points;
-- STEP over self-consistency at N=64: +0.4 to +5.0 points depending on benchmark.
+| Dataset | Questions | Policy | Mixed-pair rate | Correct choice given mixed pair | Fraction of headroom recovered |
+|---|---:|---|---:|---:|---:|
+| GSM8K | 1,319 | Base | 21.32% | 81.37% | 62.73% |
+| GSM8K | 1,319 | Instruct | 4.53% | 62.73% | 25.46% |
+| MATH-500 | 495 | Base | 24.48% | 75.33% | 50.67% |
+| MATH-500 | 495 | Instruct | 10.77% | 65.07% | 30.14% |
 
-## 4. Search and sequential scaling: the axis we are not on
+Both opportunity and conditional selection performance fall. That observation supports examining the remaining Instruct error types and score calibration. It does not isolate a causal effect of instruction tuning: prompts, caps and candidate populations differ. On each arm's eligible subset, Instruct gains are 0.577 points [0.378, 0.779] on GSM8K and 1.636 [1.120, 2.133] on MATH. These are pointwise question-cluster bootstrap intervals, conditional on the saved pool and exclusions. They differ from the report's 32-order estimates by design.
 
-Relevant because the director will ask, and because one of them is our §21
-rejection loop under another name.
+Numeric answer fragmentation still matters at larger N, where it changes vote counts. At N=2, splitting two equally correct answers can create an apparent disagreement but cannot create a correctness gain under this identity. Distinguish answer disagreement from a mixed-correctness opportunity.
 
-| work | method | result |
-|---|---|---|
-| Snell et al., arXiv 2408.03314 | compute-optimal allocation between revision and search | 4x more efficient than best-of-N; beats a 14x larger model FLOPs-matched |
-| Liu et al., arXiv 2502.06703 | compute-optimal TTS across policies and PRMs | a 1B policy surpasses a 405B on MATH-500 |
-| Beeching et al., HF search-and-learn | beam search and DVTS over a PRM | the reference open implementation |
-| Puri et al., arXiv 2502.01618 | particle filtering over a PRM | 4 to 16x better scaling rate than deterministic search |
-| **Zhang et al. LATTS, arXiv 2509.20368** | **per-step verifier acceptance: resample, backtrack, restart or stop** | **beats beam search by ~15% at 1e5 tokens; 10x fewer tokens at fixed accuracy; ~20 verifier calls per problem against beam search's ~80** |
-| Muennighoff et al. s1, arXiv 2501.19393, EMNLP 2025 | budget forcing | AIME24 50 to 57 by appending "Wait" |
-| Brown et al., arXiv 2407.21787 | repeated sampling | coverage is log-linear in N; **selection methods plateau past a few hundred samples** |
+**8. Causal interpretation needs intervention-specific claims**
 
-**LATTS is our §21 online rejection arm, generalised and published.** Same
-primitive: score a step, and if the verifier objects, spend more compute on that
-step. Theirs adds backtrack and restart actions and an adaptive acceptance
-threshold. Their verifier is a 7B PRM and their policy is Llama-3.2-1B, so the
-verifier is larger than the policy, which is the opposite of our regime. Our §21
-plain-versus-rejection comparison needs to cite them and say what differs: we
-price the retry loop with a blind control, which they do not, and our verifier
-is 1,700x smaller than theirs.
+Belinkov's [Probing Classifiers](https://aclanthology.org/2022.cl-1.7/) reviews the gap between information a classifier can extract and information a model uses. This project should use three separate claims: decodability, predictive utility and causal influence on generation. An accurate nonlinear head supplies the first; an improvement in answer selection supplies the second; a controlled change in the model's continuation supplies the third.
 
-Brown et al.'s plateau finding is the honest frame for our own ceiling trace:
-coverage keeps rising with N, selection does not keep up, and that gap is the
-open problem for everyone, not a weakness of our rule.
+Zhang and Nanda's [Activation Patching: Metrics and Methods](https://arxiv.org/abs/2309.16042) shows that corruption methods and outcome metrics alter localization conclusions. Heimersheim and Nanda's [How to Use and Interpret Activation Patching](https://arxiv.org/abs/2404.15255) develops related interpretation guidance. For our matched forks, report donor selection, intervention site, norm, dose, random controls, teacher-forced readout and free-generation outcome separately. Whole-span patching can move many content variables at once. Steering a probe direction can fail despite a causal role for other representations of the same information.
 
-## 5. Where this leaves us
+The project's §18.1 records whole-span solve-gap recovery 0.35, p=0.02, while a learned subspace's free-generation recovery is 0.09, p=0.53. Those outcomes support intervention-specific conclusions. They do not support declaring correctness a readout that the model never uses. Likewise, failure of a top-PC visualization cannot prove high intrinsic dimensionality; even a dense linear classifier uses a scalar projection.
 
-**What is genuinely ours.**
+[VerifySteer](https://arxiv.org/html/2605.20745v1) intervenes on verifier strictness. Its target is the verification decision, which differs from steering the generator toward a valid next mathematical step. Treat it as evidence that a verifier's decision can have controllable internal structure, not as a direct counterexample to a generator-steering null result.
 
-Every paper above reports at N greater than or equal to 8, and most report at
-N=64 or beyond: HSRM N=8, ReProbe N=10, the Lessons paper N=8, self-certainty
-N=8 to 64, STEP N=64, DeepConf N=512, Lightman N up to 1860. **Nobody reports
-N=2 to 4.** Our §21 result lives there, and the lift there is an order of
-magnitude larger than anything published at large N:
+**9. Compute and search theory guide experiments, not explanations by citation**
 
-| our lift over self-consistency | gsm8k | math500 |
-|---|---|---|
-| N=2 | **+5.66** points | **+6.02** points |
-| N=4 | +1.37 | +3.18 |
-| N=10 | +0.48 | +0.07 (interval spans zero) |
+Snell et al.'s [Scaling LLM Test-Time Compute Optimally](https://arxiv.org/abs/2408.03314) makes allocation depend on task difficulty and evaluates compute tradeoffs. [LATTS](https://arxiv.org/abs/2509.20368) applies local verification to continuation decisions including resampling and backtracking. Both motivate an adaptive controller. Neither allows pricing our current template-state scorer as a head operating on cached generation states before that path exists and passes an equivalence test.
 
-against a published band of +0.08 to +0.9 points at N=64 for confidence rules,
-+0.2 for a 7B PRM and for ReProbe at N=10, and +1.4 average for the best PRM at
-N=8. The small-N regime is not a limitation of our study, it is the only place
-in this literature where a verifier buys something large, and it is the regime a
-practitioner on a budget actually occupies.
+Huang et al.'s [Is Best-of-N the Best of Them?](https://arxiv.org/abs/2503.21878) analyzes coverage, imperfect rewards and finite-budget optimality. Our declining rerank curve is compatible with selection exploiting scoring errors. It does not identify reward hacking as the mechanism. The decisive local analysis records how often reranking rescues a wrong plurality and how often it replaces a correct one, then relates the changes to score extremes, length and error type.
 
-Second, the rule-versus-scorer separation. The field reports one rule per paper
-and treats it as the method. §21.8 sweeps the rule family with the scorer held
-fixed and finds the rule matters more than the scorer at small N. No paper in
-this list does that.
+Charge raw generation tokens, prompt processing, actual verifier reads and measured latency. A count of small-head parameters is insufficient if computing its input requires an additional backbone pass. For lazy verification, sum the lengths of the candidates actually read; multiplying average reads by unconditional average length can miss their covariance. A frontier interpolated in expected compute does not establish a hard per-question budget guarantee.
 
-**What is not ours and must be said.** The weighted vote is Lightman's and
-DIVERSE's. Per-step rejection is LATTS's. The confidence statistics are
-DeepConf's. The small-encoder block is standard, and HSRM (31 August 2026)
-reached a trace-level version of it independently, one week after our grid
-landed here; cite it as concurrent work and state the difference in what the
-encoder reads.
+**10. Research priorities after consolidation**
 
-**What the comparison still needs**, in order:
+The immediate scientific return comes from repairing the measurement contract and explaining the Instruct decisions. First unify gold-independent answer identity for grading and voting, resolve conflicting groups, retain failed samples in the full-pool metric and archive checkpoint/split hashes. Then score the identical Instruct candidates with the external PRM and compare majority, confidence, tie-break, rerank and one preregistered weighted rule. Select calibration and aggregation on development questions only.
 
-1. **Qwen2.5-Math-PRM-7B on our traces.** It is the only PRM in the literature
-   that beats majority voting, both competitor probe papers use it as their
-   strong baseline, and until it runs our verifier has never met a real one.
-2. **The N=2 to 4 regime reported for a PRM**, which no paper has done. If our
-   small-N lift survives with a 7B PRM in the same plot, that is the sprint 8
-   result.
-3. **A self-consistency baseline on the competitor benchmarks**, since HSRM
-   omits it entirely and ReProbe omits it on MATH. Re-reporting HSRM's setup
-   with the baseline it skipped is cheap and is a contribution on its own.
-4. **LATTS as the named comparator for §21's online arm**, replacing the
-   "nobody has done this" framing, which is now false.
+Next separate step validity from outcome prediction. Audit Instruct mixed pairs by first invalid step, recoverable error, correct answer with invalid reasoning, answer-format failure and persistent misconception. Blind the annotation to the selector where feasible. Test whether a within-question outcome-ranking objective improves these decisions while preserving the original process-supervised head as a control.
 
-Deferred: beam search, DVTS and particle filtering all need regeneration under a
-different sampler and belong to a later sprint.
+For the representation result, begin with last token, token statistics and attention pooling before repeating all 19 cells. Apply grouped cross-fitting to length/position controls and content-preserving format changes. A strong matched representation effect would strengthen the mechanistic thread more than another unrestricted score sweep.
+
+Finally establish generation-state equivalence and measured cost before an Instruct rejection trial. Compare rejection against plain generation, a rejection-rate-matched random controller and confidence-based rejection at the same budget. Keep Base as a historical control, and keep WikiProfile and transition-operator findings separate until they test the same causal hypothesis with comparable outcomes.

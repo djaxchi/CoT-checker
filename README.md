@@ -1,11 +1,19 @@
-# CoT-Checker: Step-Level CoT Verification via Sparse Autoencoders
+# CoT-Checker: Internal Signals for Step-Level Reasoning Verification
 
-Reproduction of step-level correctness probing from
-**"Step-Level Sparse Autoencoders for Interpretable Chain-of-Thought Verification"** (arXiv:2603.03031).
+Research on step-level correctness signals in frozen language models, spanning
+sparse autoencoders, dense representation probes and verifier-guided selection.
 
-**Research question:** Can SSAE sparse latent vectors predict whether a reasoning step in a chain-of-thought trace is correct?
+**Current policy:** Qwen3-8B Instruct, non-thinking. The matched verifier reports
+mean PRM800K AUROC **0.9128** and source-validation-selected ProcessBench F1_PB
+**0.560** across three seeds. On the regraded MATH-500 pool, the saved N=2
+analysis reports **+1.67 accuracy points [1.12, 2.24]** for verifier tie-breaking
+over majority; evaluation identity and deployment-cost checks remain open.
 
-**Result:** 77.50% validation accuracy on 1,000 steps vs the paper's 78.58% (−1.08 pp, using 0.26% of the data).
+Read the [current research context](docs/project_context.md),
+[critical literature review](docs/tts_related_work_v1.md), and
+[authoritative research log](REPORT.md). Base-model experiments remain historical
+controls. The setup and pipeline below describe the original SSAE reproduction,
+from [Step-Level Sparse Autoencoder for Reasoning Process Interpretation](https://arxiv.org/abs/2603.03031).
 
 ---
 
@@ -26,7 +34,7 @@ hf_hub_download("Miaow-Lab/SSAE-Checkpoints", "gsm8k-385k_Qwen2.5-0.5b_spar-10.p
 EOF
 ```
 
-Set your Telegram credentials (optional — the pipeline sends a notification when done):
+Set your Telegram credentials (optional: the pipeline sends a notification when done):
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your_bot_token"
@@ -47,14 +55,14 @@ bash scripts/run_pipeline.sh 1000 mps gsm8k-385k_Qwen2.5-0.5b_spar-10.pt
 Or run each step manually:
 
 ```bash
-# Step 1 — encode Math-Shepherd steps with SSAE
+# Step 1: encode Math-Shepherd steps with SSAE
 uv run python scripts/generate_probe_data.py \
     --checkpoint gsm8k-385k_Qwen2.5-0.5b_spar-10.pt \
     --output results/probe_data/math_shepherd_1000.npz \
     --max-steps 1000 \
     --device mps
 
-# Step 2 — train correctness probe
+# Step 2: train correctness probe
 uv run python scripts/train_probe.py \
     --data results/probe_data/math_shepherd_1000.npz \
     --output results/probes/correctness_probe_1000.pt \
@@ -64,7 +72,10 @@ uv run python scripts/train_probe.py \
 
 ---
 
-## Results
+## Historical SSAE pilot results
+
+These use different supervision and evaluation from the source paper and are
+not a matched benchmark comparison.
 
 ![Probe training curve](results/probe_training_curve.png)
 
@@ -99,7 +110,7 @@ results/
 ## Tests
 
 ```bash
-uv run pytest tests/ -m "not slow"
+uv run python -m pytest tests/ -m "not slow"
 ```
 
 ---
@@ -134,8 +145,8 @@ If you use this code, please also cite the original paper:
 
 ```
 @article{miaow2026ssae,
-  title={Step-Level Sparse Autoencoders for Interpretable Chain-of-Thought Verification},
-  author={Miaow-Lab},
+  title={Step-Level Sparse Autoencoder for Reasoning Process Interpretation},
+  author={Yang, Xuan and Liu, Jiayu and Lai, Yuhang and Xu, Hao and Huang, Zhenya and Miao, Ning},
   journal={arXiv:2603.03031},
   year={2026}
 }

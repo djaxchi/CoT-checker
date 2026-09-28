@@ -8,7 +8,12 @@ looks disappointing rather than wrong.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.analysis.tts_frontier import (majority_expected, n_scored_lazy, oracle,
                                        quality_from, rerank, simulate_problem,
@@ -128,3 +133,125 @@ def test_simulate_is_deterministic_given_the_generator():
                          {"v": quality_from([1.0, 0.0], True)}, [2], 3,
                          np.random.default_rng(7))
     assert a == b
+
+
+def test_bootstrap_requires_values_and_clusters_to_align():
+    """Real data hit this: a problem with fewer than n gradeable candidates
+    contributes no row at that budget, so a cluster list built from the full
+    problem list indexes past the end of the value array."""
+    import pytest
+    from scripts.analysis.tts_build_frontier import bootstrap_mean
+    vals = np.array([1.0, 0.0, 1.0])
+    assert bootstrap_mean(vals, ["q1", "q2", "q3"])[0] == pytest.approx(2 / 3)
+    with pytest.raises(IndexError):
+        bootstrap_mean(vals, ["q1", "q2", "q3", "q4"])
+
+
+# --- the weighted-vote family (sprint 8) -----------------------------------
+#
+# The claim these tests defend is that majority voting and rerank are the two
+# ends of one dial. If that is wrong the sprint-8 comparison against the
+# literature's aggregator is comparing against something else.
+
+from src.analysis.tts_frontier import (filtered_vote, softmax_vote,  # noqa: E402
+                                       softmax_weights, weighted_vote)
+
+
+def test_softmax_vote_at_beta_zero_is_the_plain_majority():
+    answers = ["a", "a", "b"]
+    correct = [False, False, True]
+    q = np.array([0.0, 0.1, 9.0])
+    drawn = np.arange(3)
+    groups, tied, _ = vote(answers, drawn)
+    assert softmax_vote(correct, answers, q, drawn, 0.0) == \
+        majority_expected(correct, groups, tied)
+
+
+def test_softmax_vote_at_large_beta_is_rerank():
+    """One candidate holds all the weight, so its answer wins outright."""
+    answers = ["a", "a", "b"]
+    correct = [False, False, True]
+    q = np.array([0.0, 0.1, 9.0])
+    drawn = np.arange(3)
+    assert softmax_vote(correct, answers, q, drawn, 60.0) == \
+        rerank(correct, q, drawn) == 1.0
+
+
+def test_softmax_weights_give_a_failed_statistic_no_vote():
+    w = softmax_weights(np.array([-np.inf, 1.0, 2.0]), np.arange(3), 1.0)
+    assert w[0] == 0.0 and w[1] > 0 and w[2] > w[1]
+
+
+def test_softmax_weights_fall_back_to_uniform_without_spread():
+    """A single draw, or a pool of equal scores, must not divide by zero."""
+    w = softmax_weights(np.array([0.5, 0.5]), np.arange(2), 4.0)
+    assert w[0] == w[1] > 0
+    assert softmax_weights(np.array([0.5]), np.arange(1), 4.0)[0] > 0
+
+
+def test_weighted_vote_lets_two_weak_votes_lose_to_one_strong_one():
+    answers = ["a", "a", "b"]
+    correct = [False, False, True]
+    assert weighted_vote(correct, answers, [0.1, 0.1, 0.9], np.arange(3)) == 1.0
+    assert weighted_vote(correct, answers, [0.4, 0.4, 0.5], np.arange(3)) == 0.0
+
+
+def test_weighted_vote_clamps_negative_and_nan_rewards_to_no_vote():
+    answers = ["a", "b"]
+    correct = [True, False]
+    assert weighted_vote(correct, answers, [0.3, -5.0], np.arange(2)) == 1.0
+    assert weighted_vote(correct, answers, [0.3, float("nan")], np.arange(2)) == 1.0
+
+
+def test_weighted_vote_with_no_weight_anywhere_scores_zero_not_a_coin():
+    answers = ["a", "b"]
+    assert weighted_vote([True, False], answers, [0.0, 0.0], np.arange(2)) == 0.0
+
+
+def test_filtered_vote_at_eta_zero_is_the_plain_majority():
+    answers = ["a", "a", "b"]
+    correct = [False, False, True]
+    q = np.array([0.0, 0.1, 9.0])
+    drawn = np.arange(3)
+    groups, tied, _ = vote(answers, drawn)
+    assert filtered_vote(correct, answers, q, drawn, 0.0) == \
+        majority_expected(correct, groups, tied)
+
+
+def test_filtered_vote_drops_the_low_scoring_bloc():
+    """DeepConf-low keeps the top tenth; here that is the single best trace."""
+    answers = ["a", "a", "b"]
+    correct = [False, False, True]
+    q = np.array([0.0, 0.1, 9.0])
+    assert filtered_vote(correct, answers, q, np.arange(3), 0.9) == 1.0
+
+
+def test_filtered_vote_always_keeps_at_least_one_candidate():
+    """eta=1.0 must not empty the pool and score a structural zero."""
+    answers = ["a"]
+    assert filtered_vote([True], answers, np.array([0.5]), np.arange(1), 1.0) == 1.0
+
+
+def test_filtered_vote_can_weight_the_survivors_too():
+    """Filter keeps both, then the reward decides: the paper's variant."""
+    answers = ["a", "b"]
+    correct = [False, True]
+    q = np.array([0.2, 0.1])
+    unweighted = filtered_vote(correct, answers, q, np.arange(2), 0.0)
+    weighted = filtered_vote(correct, answers, q, np.arange(2), 0.0,
+                             reward=[0.1, 0.9])
+    assert unweighted == 0.5 and weighted == 1.0
+
+
+def test_simulate_problem_emits_the_new_rules_only_when_asked():
+    rng = np.random.default_rng(0)
+    answers, correct, tokens = ["a", "b"], [True, False], [10, 10]
+    q = {"s": np.array([0.9, 0.1])}
+    plain = simulate_problem(answers, correct, tokens, q, [2], 1, rng)[0]
+    assert not [k for k in plain if k.startswith(("softvote", "filtvote", "wvote"))]
+    rich = simulate_problem(answers, correct, tokens, q, [2], 1, rng,
+                            rewards={"s": np.array([0.9, 0.1])},
+                            betas=[0.0, 2.0], etas=[0.5])[0]
+    for key in ("softvote0::s", "softvote2::s", "filtvote0.5::s",
+                "wvote::s", "filtwvote0.5::s"):
+        assert key in rich, key

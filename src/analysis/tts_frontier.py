@@ -115,7 +115,10 @@ def n_scored_lazy(groups: dict, tied: list) -> int:
 
 def simulate_problem(answers: Sequence, correct: Sequence, tokens: Sequence[int],
                      qualities: dict[str, np.ndarray], ns: Sequence[int],
-                     n_orders: int, rng: np.random.Generator) -> list[dict]:
+                     n_orders: int, rng: np.random.Generator,
+                     rewards: dict[str, np.ndarray] | None = None,
+                     betas: Sequence[float] = (),
+                     etas: Sequence[float] = ()) -> list[dict]:
     """Replay one problem's candidates in random draw orders.
 
     Returns one row per (order, N), carrying every rule's outcome on the same
@@ -144,5 +147,152 @@ def simulate_problem(answers: Sequence, correct: Sequence, tokens: Sequence[int]
             for name, q in qualities.items():
                 row[f"tiebreak::{name}"] = tie_break(correct, q, groups, tied)
                 row[f"rerank::{name}"] = rerank(correct, q, drawn)
+                for b in betas:
+                    row[f"softvote{b:g}::{name}"] = softmax_vote(
+                        correct, answers, q, drawn, b)
+                for e in etas:
+                    row[f"filtvote{e:g}::{name}"] = filtered_vote(
+                        correct, answers, q, drawn, e)
+                r = (rewards or {}).get(name)
+                if r is not None:
+                    row[f"wvote::{name}"] = weighted_vote(
+                        correct, answers, r, drawn)
+                    for e in etas:
+                        row[f"filtwvote{e:g}::{name}"] = filtered_vote(
+                            correct, answers, q, drawn, e, reward=r)
             out.append(row)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The weighted-vote family (sprint 8).
+#
+# Sprint 7 compared three rules: count the answers, let the scorer break ties,
+# or let the scorer choose outright. The test-time-scaling literature does not
+# use any of those three as its headline aggregator. It uses a *weighted* vote:
+#
+#     answer* = argmax_a  sum_{i : answer_i = a}  w_i
+#
+# with w_i the verifier's reward for candidate i (Lightman et al. 2023 best-of-N
+# with a PRM; Uesato et al. 2022), or the trace's confidence (DeepConf
+# arXiv:2508.15260 Eq 8). Majority voting is that rule at w_i = 1, and rerank is
+# that rule as the weight concentration goes to infinity, so the three sprint-7
+# rules and the field's rule all sit on one dial. `softmax_vote` exposes the
+# dial, which is the honest way to ask whether our operating point was the
+# right one rather than the one we happened to implement.
+#
+# All of these break a tie in total weight the way `majority_expected` does, by
+# expectation rather than by a coin, for the reason stated at the top of this
+# module.
+
+
+def _vote_expected(correct: Sequence, answers: Sequence,
+                   subset: Sequence[int], weight: Sequence[float]) -> float:
+    """Accuracy of the answer with the largest total weight, ties averaged.
+
+    A candidate with zero weight is still drawn and still paid for, it just
+    casts no vote. That is the weighted analogue of the nan convention in
+    `quality_from`: a statistic that failed to compute must not decide.
+    """
+    totals: dict[object, float] = defaultdict(float)
+    rep: dict[object, int] = {}
+    for i in subset:
+        a = answers[i]
+        if a is None:
+            continue
+        totals[a] += float(weight[i])
+        rep.setdefault(a, i)
+    if not totals:
+        return 0.0
+    top = max(totals.values())
+    if top <= 0.0:
+        return 0.0
+    tied = [a for a, t in totals.items() if t == top]
+    return float(np.mean([bool(correct[rep[a]]) for a in tied]))
+
+
+def weighted_vote(correct: Sequence, answers: Sequence,
+                  reward: Sequence[float], drawn: Sequence[int]) -> float:
+    """The literature's rule, with the scorer's own reward as the weight.
+
+    `reward` must already be on a non-negative scale where larger is better,
+    which is the caller's job because only the caller knows the scorer: a probe
+    emitting a suspicion probability contributes 1 - suspicion, and a
+    confidence statistic contributes itself.
+    """
+    if len(drawn) == 0:
+        return 0.0
+    w = np.asarray(reward, dtype=float)
+    w = np.where(np.isfinite(w), np.maximum(w, 0.0), 0.0)
+    return _vote_expected(correct, answers, drawn, w)
+
+
+def softmax_weights(quality: Sequence[float], drawn: Sequence[int],
+                    beta: float) -> np.ndarray:
+    """Weights over the drawn pool, tempered by `beta`, indexed like `quality`.
+
+    Quality is standardised within the pool first, so `beta` means the same
+    thing for a scorer emitting probabilities and one emitting log-probabilities
+    and the dial can be swept once for the whole roster. beta = 0 gives a plain
+    count; large beta puts all the weight on the pool's best candidate.
+
+    A pool whose qualities are all equal (or a single draw) has no spread to
+    standardise, and falls back to uniform weights rather than dividing by zero.
+    """
+    w = np.zeros(len(quality), dtype=float)
+    idx = np.asarray(list(drawn), dtype=int)
+    if idx.size == 0:
+        return w
+    q = np.asarray([quality[i] for i in idx], dtype=float)
+    finite = np.isfinite(q)
+    if not finite.any():
+        return w
+    z = np.zeros_like(q)
+    sd = q[finite].std()
+    if sd > 0:
+        z[finite] = (q[finite] - q[finite].mean()) / sd
+    z[~finite] = -np.inf
+    e = np.exp(beta * z - np.max(beta * z[finite]))
+    e[~finite] = 0.0
+    w[idx] = e
+    return w
+
+
+def softmax_vote(correct: Sequence, answers: Sequence,
+                 quality: Sequence[float], drawn: Sequence[int],
+                 beta: float) -> float:
+    """The vote with weights tempered by `beta`. beta=0 is `majority_expected`."""
+    if len(drawn) == 0:
+        return 0.0
+    return _vote_expected(correct, answers, drawn,
+                          softmax_weights(quality, drawn, beta))
+
+
+def filtered_vote(correct: Sequence, answers: Sequence,
+                  quality: Sequence[float], drawn: Sequence[int],
+                  eta: float, reward: Sequence[float] | None = None) -> float:
+    """DeepConf's rule: drop the worst `eta` of the pool, then vote.
+
+    DeepConf reports two settings, keeping the top 10% of traces and the top
+    90% (arXiv:2508.15260 §3.2), so eta is 0.9 and 0.1 respectively. eta = 0 is
+    a plain vote over everything drawn. At least one candidate always survives,
+    because a rule that can discard the entire pool is a rule that scores zero
+    on small budgets for reasons that have nothing to do with the scorer.
+
+    Passing `reward` votes with the confidence-weighted variant among the
+    survivors, which is what the paper actually reports; leaving it None counts
+    the survivors equally, which isolates what the filter alone contributes.
+    """
+    idx = np.asarray(list(drawn), dtype=int)
+    if idx.size == 0:
+        return 0.0
+    keep = max(1, int(np.ceil((1.0 - eta) * idx.size)))
+    q = np.asarray([quality[i] for i in idx], dtype=float)
+    order = np.argsort(-np.where(np.isfinite(q), q, -np.inf), kind="stable")
+    survivors = idx[order[:keep]]
+    if reward is None:
+        w = np.ones(len(quality), dtype=float)
+    else:
+        r = np.asarray(reward, dtype=float)
+        w = np.where(np.isfinite(r), np.maximum(r, 0.0), 0.0)
+    return _vote_expected(correct, answers, survivors, w)

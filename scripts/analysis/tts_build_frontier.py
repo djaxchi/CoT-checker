@@ -44,6 +44,14 @@ from src.eval.math_grade import normalize_answer  # noqa: E402
 # primary: it is ReProbe's Q_offline and what §20.6 found ranks identically.
 AGGS = {"worst": max, "mean": lambda s: float(np.mean(s)), "last": lambda s: s[-1]}
 
+# Confidence statistics that carry a non-negative reward scale, so the
+# literature's weighted vote is defined for them without inventing a
+# transformation. DeepConf's C is minus a mean log-probability and so is
+# non-negative by construction (arXiv:2508.15260 Eq 2); a mean sampled
+# log-probability is not, and a margin can go either way, so those two get the
+# tempered vote (which standardises first) and no weighted vote.
+CONF_WITH_REWARD = {"bottom10_group_w32", "mean_token_conf"}
+
 
 def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
@@ -80,6 +88,13 @@ def main() -> None:
     p.add_argument("--conf_rules", nargs="+",
                    default=["bottom10_group_w32", "mean_token_conf",
                             "mean_sampled_logprob", "answer_token_margin"])
+    p.add_argument("--betas", type=float, nargs="*",
+                   default=[0.5, 1.0, 2.0, 4.0, 8.0],
+                   help="temperatures for the tempered vote; 0 is majority and "
+                        "large is rerank, so this dial contains both sprint-7 "
+                        "rules and the literature's aggregator")
+    p.add_argument("--etas", type=float, nargs="*", default=[0.1, 0.5, 0.9],
+                   help="fraction of the pool DeepConf's filter discards")
     p.add_argument("--seed", type=int, default=915)
     a = p.parse_args()
 
@@ -122,39 +137,58 @@ def main() -> None:
             correct = [bool(r["correct"]) for r in cands]
             tokens = [int(r.get("n_gen_tokens", 0)) for r in cands]
             qualities: dict[str, np.ndarray] = {}
+            rewards: dict[str, np.ndarray] = {}
             for cell in sorted({c for r in cands for c in r["_cells"]}):
                 for agg, fn in AGGS.items():
                     vals = [fn(r["_cells"][cell]) if r["_cells"].get(cell)
                             else float("nan") for r in cands]
                     # Probe scores are suspicion: lower is a better candidate.
                     qualities[f"probe::{cell}::{agg}"] = quality_from(vals, False)
+                    # The head emits a sigmoid, so 1 - suspicion is already the
+                    # reward scale Lightman et al. weight votes by.
+                    rewards[f"probe::{cell}::{agg}"] = 1.0 - np.asarray(
+                        vals, dtype=float)
             for c in a.conf_rules:
                 vals = [r["_conf"].get(c, float("nan")) for r in cands]
+                if c in CONF_WITH_REWARD:
+                    rewards[f"conf::{c}"] = np.asarray(vals, dtype=float)
                 # Orientation for the confidence family is fixed on the
                 # exploratory half and recorded; higher is treated as better
                 # here, which src/analysis/token_confidence.py explains is not
                 # derivable from DeepConf's Eq 2 and must be measured.
                 qualities[f"conf::{c}"] = quality_from(vals, True)
             rows = simulate_problem(answers, correct, tokens, qualities,
-                                    a.ns, a.n_orders, rng)
+                                    a.ns, a.n_orders, rng, rewards=rewards,
+                                    betas=a.betas, etas=a.etas)
             for r in rows:
                 per_problem[pid].append(r)
             meta[pid] = {"question_hash": cands[0].get("question_hash", pid),
                          "split": cands[0].get("split"),
                          "level": cands[0].get("level")}
 
-        rules = ["majority", "oracle", "pass1"] + \
-                [f"tiebreak::{s}" for s in scorer_names] + \
-                [f"rerank::{s}" for s in scorer_names]
+        rules = ["majority", "oracle", "pass1"]
+        for sc in scorer_names:
+            rules += [f"tiebreak::{sc}", f"rerank::{sc}"]
+            rules += [f"softvote{b:g}::{sc}" for b in a.betas]
+            rules += [f"filtvote{e:g}::{sc}" for e in a.etas]
+            has_reward = sc.startswith("probe::") or \
+                sc.split("::", 1)[1] in CONF_WITH_REWARD
+            if has_reward:
+                rules.append(f"wvote::{sc}")
+                rules += [f"filtwvote{e:g}::{sc}" for e in a.etas]
         for split in (None, "expl", "conf"):
             pids = [p for p in per_problem
                     if split is None or meta[p]["split"] == split]
             if not pids:
                 continue
-            clusters = [meta[p]["question_hash"] for p in pids]
             for n in a.ns:
                 for rule in rules:
-                    vals, toks, scored = [], [], []
+                    # Clusters are collected alongside the values, not from the
+                    # full pid list: a problem with fewer than n gradeable
+                    # candidates contributes no row at that budget, and a
+                    # cluster list built independently then indexes past the
+                    # end of the value array.
+                    vals, toks, scored, clusters = [], [], [], []
                     for pid in pids:
                         rs = [r for r in per_problem[pid] if r["n"] == n]
                         if not rs:
@@ -162,6 +196,7 @@ def main() -> None:
                         vals.append(float(np.mean([r[rule] for r in rs])))
                         toks.append(float(np.mean([r["tokens"] for r in rs])))
                         scored.append(float(np.mean([r["n_scored_lazy"] for r in rs])))
+                        clusters.append(meta[pid]["question_hash"])
                     if not vals:
                         continue
                     m, lo, hi = bootstrap_mean(np.array(vals), clusters)

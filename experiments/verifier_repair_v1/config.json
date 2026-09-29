@@ -1,0 +1,16 @@
+{
+  "version": "verifier_repair_v1",
+  "seed": 20260930,
+  "families_per_domain": 32,
+  "dev_per_domain": 8,
+  "domains": ["affine", "multiplication"],
+  "forms": ["direct", "recompute", "check", "repair"],
+  "model": "Qwen/Qwen3-8B",
+  "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "layer": 35,
+  "dim": 4096,
+  "max_seq_len": 2048,
+  "t_max": 512,
+  "bootstrap_seed": 731,
+  "bootstrap_replicates": 2000
+}

@@ -1,0 +1,9 @@
+{
+  "n_rows": 2048,
+  "n_families": 64,
+  "sha256": {
+    "config.json": "334fd19f48ee1d1cee6760b82a18b6d93734beb05b7dac86da13cc2a9cc7bac3",
+    "examples.jsonl": "f0efbb92dad26c30a7712f18e6f9b0c7a91b64b26a0a05ffa3ba1610cd05528c"
+  },
+  "human_review": "pending; exact arithmetic and generation tested"
+}

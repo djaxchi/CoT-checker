@@ -1,0 +1,42 @@
+{
+  "version": "verifier_signal_v1_available64",
+  "seed": 20260928,
+  "reversal_families_per_domain": 12,
+  "inheritance_families": 24,
+  "dev_fraction": 0.25,
+  "styles": [
+    "plain",
+    "therefore",
+    "confident"
+  ],
+  "model": "Qwen/Qwen3-8B",
+  "hidden_state_index": 35,
+  "hidden_dim": 4096,
+  "max_seq_len": 2048,
+  "t_max": 512,
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "bootstrap_seed": 731,
+  "bootstrap_replicates": 2000,
+  "seed_overrides": [
+    {
+      "rep": "step_tokens",
+      "learner": "attn_query",
+      "seeds": [
+        42,
+        43
+      ]
+    },
+    {
+      "rep": "step_tokens",
+      "learner": "transformer:d128,l1,f512,h4",
+      "seeds": [
+        42,
+        43
+      ]
+    }
+  ]
+}

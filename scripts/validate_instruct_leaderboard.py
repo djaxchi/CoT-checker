@@ -56,11 +56,17 @@ def validate_result(result: dict, rep: str, learner: str, seed: int) -> None:
         raise ValueError("Need all four ProcessBench subsets")
 
 
-def validate_grid(root: Path, pairs: list[tuple[str, str]], reference: dict) -> list[dict]:
+def validate_grid(root: Path, pairs: list[tuple[str, str]], reference: dict,
+                  seeds_by_pair: dict[tuple[str, str], tuple[int, ...]] | None = None) -> list[dict]:
+    if seeds_by_pair is not None and set(seeds_by_pair) != set(pairs):
+        raise ValueError("Explicit seed roster must cover exactly the requested pairs")
     cells = []
     for rep, learner in pairs:
+        seeds = SEEDS if seeds_by_pair is None else seeds_by_pair[rep, learner]
+        if not seeds or seeds[0] != 42 or tuple(sorted(set(seeds))) != seeds or not set(seeds) <= set(SEEDS):
+            raise ValueError("Invalid explicit seed roster")
         members = []
-        for seed in SEEDS:
+        for seed in seeds:
             path = root / cell_tag(rep, learner, seed)
             for filename in ("model.pt", "results.json", *[f"pb_step_scores_{s}.jsonl" for s in SUBSETS]):
                 if not (path / filename).is_file():

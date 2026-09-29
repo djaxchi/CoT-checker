@@ -1,0 +1,6 @@
+last_token linear
+step_mean linear
+step_tokens attn_query
+step_tokens transformer:d128,l1,f512,h4
+step_tokens transformer:d256,l2,f1024,h4
+step_tokens transformer:d512,l2,f2048,h8

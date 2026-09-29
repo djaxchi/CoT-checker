@@ -1,0 +1,14 @@
+{
+  "version": "verifier_signal_v1_available64",
+  "n_rows": 912,
+  "n_families": 72,
+  "n_target_rows": 864,
+  "n_before_rows": 48,
+  "human_review": "pending; generated and arithmetic-validated only",
+  "sha256": {
+    "config.json": "94d352ce686eecfbaeed8f7281208c964535865cbe3003f121fc9c2d44d9ee78",
+    "probes.cells": "f414fee2d7710cdbafc0292e48c5c0a1146b41e62076255f33e04ec7be18792f",
+    "examples.jsonl": "668f885c756f51201e2b79b57b1f99f762cabd1dc67816f0d971f89738a72cc3"
+  },
+  "generator_sha256": "b8a5d65a0e5f4b3cb2a949bc13d1b90fb9c109eda36bc5e9aeb19da7cb25b2cb"
+}

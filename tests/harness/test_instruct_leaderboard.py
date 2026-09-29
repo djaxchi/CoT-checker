@@ -1,5 +1,6 @@
 """Prevent capped runs, protocol drift and incomplete grids from becoming ranks."""
 
+import json
 from copy import deepcopy
 from pathlib import Path
 
@@ -75,3 +76,25 @@ def test_sequence_cell_must_be_bucketed():
     data["protocol"]["bucketed"] = False
     with pytest.raises(ValueError):
         validate_result(data, "step_tokens", "attn_query", 42)
+
+
+def test_partial_seed_roster_requires_explicit_declaration(tmp_path):
+    from scripts.validate_instruct_leaderboard import SUBSETS, cell_tag, validate_grid
+
+    pair = ("last_token", "linear")
+    for seed in (42, 43):
+        data = result()
+        data.update(seed=seed, inputs={"prm/test_2k": "fixed"})
+        data["hp"].update(selected={"lr": 1e-4, "weight_decay": 0.0}, reused_from="seed42")
+        folder = tmp_path / cell_tag(*pair, seed)
+        folder.mkdir()
+        (folder / "results.json").write_text(json.dumps(data))
+        for filename in ("model.pt", *[f"pb_step_scores_{s}.jsonl" for s in SUBSETS]):
+            (folder / filename).touch()
+    reference = {"inputs": {"prm/test_2k": "fixed"}}
+    with pytest.raises(ValueError, match="Incomplete cell"):
+        validate_grid(tmp_path, [pair], reference)
+    assert len(validate_grid(tmp_path, [pair], reference, {pair: (42, 43)})) == 2
+    for invalid in ({}, {pair: ()}, {pair: (43,)}, {pair: (42, 42)}, {pair: (42, 45)}):
+        with pytest.raises(ValueError, match="seed roster"):
+            validate_grid(tmp_path, [pair], reference, invalid)

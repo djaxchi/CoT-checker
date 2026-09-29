@@ -172,7 +172,10 @@ def normalize_answer(string: str | None) -> str | None:
         return None
     s = string
 
-    # linebreaks, spaces, \! and \\, decorations
+    # TeX spacing commands are presentation, including escaped literal spaces.
+    # Preserve matrix row separators (double backslashes), and remove spacing
+    # before collapsing those separators or deleting ordinary spaces.
+    s = re.sub(r"(?<!\\)\\(?:[,;:!]|[ \t]|qquad\b|quad\b|enspace\b|thinspace\b)", "", s)
     s = s.replace("\n", "").replace("\\!", "").replace("\\\\", "\\")
     # display-style fractions are the same fraction (MATH gold uses \dfrac)
     s = s.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")

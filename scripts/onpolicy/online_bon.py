@@ -92,6 +92,9 @@ ARMS = ("plain", "random", "guided", "reject", "reject_blind")
 # which asks for no arms at all.
 DEFAULT_ARMS = ("plain", "random", "guided")
 STEP_SEP = "\n\n"
+# Wall time spent inside generate(), so a rollout's cost splits into sampling and
+# checking (online_reject_v2 reports both).
+GEN_SECONDS = [0.0]
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +219,9 @@ def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
     # BOS here would sample from a different distribution than the policy whose
     # behaviour every baseline in this study describes.
     enc = tok(ctx, return_tensors="pt").to(device)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t_gen = time.perf_counter()
     with torch.no_grad():
         out = backbone.generate(
             **enc, do_sample=True, temperature=temperature, top_p=top_p,
@@ -226,6 +232,9 @@ def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
             num_return_sequences=n, max_new_tokens=max_new_tokens,
             pad_token_id=tok.pad_token_id or tok.eos_token_id,
         )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    GEN_SECONDS[0] += time.perf_counter() - t_gen
     n_ctx = enc["input_ids"].shape[1]
     cands, generated = [], 0
     for row in out:
@@ -315,8 +324,13 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
     gen_tokens, attempts_per_step = 0, []
     rejected_drafts: list[list[str]] = []
     kept_attempt: list[int] = []
+    # Every draft's score under every checker in the panel, for inspection: the
+    # decision uses one, the tree viewer shows all of them.
+    draft_scores: list[list[dict]] = []
+    draft_texts: list[list[str]] = []
     for _ in range(args.max_steps):
         tried: list[tuple[float, str]] = []
+        all_scores: list[dict] = []
         kept: int | None = None
         for _attempt in range(args.max_retries + 1):
             cands, used = sample_candidates(
@@ -330,9 +344,14 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
                 # A coin, not a score: the retry happens at a fixed rate so the
                 # loop costs what the real one costs while deciding nothing.
                 u = 1.0 if rng.random() < args.blind_retry_rate else 0.0
+                if getattr(args, "score_all_drafts", False):
+                    checker.score_steps(problem, steps, [cand])
             else:
                 u = checker.score_steps(problem, steps, [cand])[0]
             tried.append((u, cand))
+            scored = (not blind) or getattr(args, "score_all_drafts", False)
+            all_scores.append(dict(checker.last[0]) if scored and getattr(checker, "last", None)
+                              else {})
             passes = (u == 0.0) if blind else (u <= args.reject_tau)
             if passes:
                 kept = len(tried) - 1
@@ -352,6 +371,8 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
         # is the one thing needed to judge whether the checker was right.
         kept_attempt.append(kept)
         rejected_drafts.append([c for j, (_, c) in enumerate(tried) if j != kept])
+        draft_scores.append(all_scores)
+        draft_texts.append([c for _, c in tried])
         steps.append(accepted[1])
         if is_final(accepted[1]) or not accepted[1]:
             break
@@ -372,6 +393,8 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
             # can be aligned without guessing which score belongs to the winner.
             "rejected_drafts": rejected_drafts,
             "kept_attempt": kept_attempt,
+            "draft_texts": draft_texts,
+            "draft_scores": draft_scores,
             "resample_rate": float(np.mean([n - 1 for n in attempts_per_step]))
             if attempts_per_step else 0.0}
 
@@ -388,6 +411,7 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
     if arm == "plain" and getattr(args, "plain_temperature", None) is not None:
         temp = args.plain_temperature
     gen_tokens = 0
+    plain_panel: list[dict] = []
     for _ in range(args.max_steps):
         cands, used = sample_candidates(
             backbone, tok, problem, steps, n, temp, args.top_p,
@@ -403,6 +427,8 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
             # rejection RATE on GSM8K, and unmatched rates compare compute rather
             # than skill.
             chosen_scores.append(float(checker.score_steps(problem, steps, [cands[0]])[0]))
+            if getattr(checker, "last", None):
+                plain_panel.append(dict(checker.last[0]))
         if arm == "guided":
             u = checker.score_steps(problem, steps, cands)
             k = int(np.argmin(u))
@@ -428,7 +454,8 @@ def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
             # and accuracy compared at a matched token budget
             "gen_tokens": gen_tokens,
             "checker_calls": len(pool_scores),
-            "scored_candidates": sum(len(x) for x in pool_scores)}
+            "scored_candidates": sum(len(x) for x in pool_scores),
+            "draft_scores": [[x] for x in plain_panel]}
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +557,18 @@ def verify(checker: Checker, traces_path: Path, offline_scores: Path,
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--cell_dir", required=True, type=Path)
+    p.add_argument("--cell_dir", type=Path, default=None,
+                   help="the cell for --checker template (the original re-read path)")
+    p.add_argument("--checker", choices=["template", "panel"], default="template",
+                   help="panel: generation-state probes (--gen_cells) and/or the PRM "
+                        "(--prm_name_or_path) score every draft; --active decides")
+    p.add_argument("--gen_cells", type=Path, nargs="*", default=[])
+    p.add_argument("--prm_name_or_path", default=None)
+    p.add_argument("--active", default="none",
+                   help="the panel member whose score decides (a cell name or "
+                        "prm_qwen25_math_7b); 'none' for plain and blind arms")
+    p.add_argument("--score_all_drafts", action="store_true",
+                   help="blind arm: still score every draft with the panel, for inspection")
     p.add_argument("--traces", required=True, type=Path,
                    help="judge traces jsonl: id, problem, gold, problem_id, steps")
     p.add_argument("--model_name_or_path", required=True)
@@ -600,7 +638,7 @@ def main() -> None:
                         "calibrate its rejection threshold on this dataset's own "
                         "score distribution rather than on PRM800K's, where the "
                         "same quantile is a different rejection rate.")
-    p.add_argument("--prompt_style", choices=["zero", "fewshot"], default="zero",
+    p.add_argument("--prompt_style", choices=["zero", "fewshot", "chat"], default="zero",
                    help="Must match the sampler that wrote the pool, or every "
                         "reconstructed context is one the model never saw.")
     p.add_argument("--dataset", type=str, default="",
@@ -641,19 +679,31 @@ def main() -> None:
         a.model_name_or_path, torch_dtype=dtype, local_files_only=a.local_files_only,
     ).to(a.device).eval()
 
-    if a.stats:
-        stats = json.loads(a.stats.read_text())
-    elif a.prm_store:
-        res = json.loads((a.cell_dir / "results.json").read_text())
-        stats = cell_stats(res, a.prm_store, None, a.stats_cache, {},
-                           train_stem_override=a.train_stem,
-                           assume_rescale=a.assume_rescale)
+    if a.checker == "panel":
+        from scripts.onpolicy.online_checkers import (GenStateChecker, PanelChecker,
+                                                      PRMChecker)
+        gen = (GenStateChecker(a.gen_cells, backbone, tok, a.layer, a.device, a.prompt_style)
+               if a.gen_cells else None)
+        prm = PRMChecker(a.prm_name_or_path, a.device, a.local_files_only) \
+            if a.prm_name_or_path else None
+        checker = PanelChecker(gen, prm, a.active)
+        print(f"[panel] members {checker.names}, active {a.active}")
     else:
-        raise SystemExit(
-            "pass --prm_store (to refit the cell's rescaling statistics) or "
-            "--stats. Scoring without them applies the head to unscaled states "
-            "and the numbers would be wrong without looking wrong.")
-    checker = Checker(a.cell_dir, backbone, tok, a.layer, stats, a.device)
+        if a.cell_dir is None:
+            raise SystemExit("--checker template needs --cell_dir")
+        if a.stats:
+            stats = json.loads(a.stats.read_text())
+        elif a.prm_store:
+            res = json.loads((a.cell_dir / "results.json").read_text())
+            stats = cell_stats(res, a.prm_store, None, a.stats_cache, {},
+                               train_stem_override=a.train_stem,
+                               assume_rescale=a.assume_rescale)
+        else:
+            raise SystemExit(
+                "pass --prm_store (to refit the cell's rescaling statistics) or "
+                "--stats. Scoring without them applies the head to unscaled states "
+                "and the numbers would be wrong without looking wrong.")
+        checker = Checker(a.cell_dir, backbone, tok, a.layer, stats, a.device)
 
     # The gate generates nothing, so it is checked and exited before any
     # generation-time argument is validated. Validating first made the gate
@@ -739,6 +789,13 @@ def main() -> None:
             print(f"  {i+1}/{len(keys)} problems, {time.time()-t0:.0f}s")
     if fh:
         fh.close()
+    if a.out:
+        timing = {"seconds_total": time.time() - t0, "seconds_generate": GEN_SECONDS[0],
+                  "arms": a.arms, "active": a.active, "reject_tau": a.reject_tau,
+                  "blind_retry_rate": a.blind_retry_rate, "n_problems": len(keys)}
+        if hasattr(checker, "timing"):
+            timing.update(checker.timing()); timing["checker_calls"] = checker.calls
+        a.out.with_suffix(".timing.json").write_text(json.dumps(timing, indent=1))
     print(f"[online] done in {time.time()-t0:.0f}s -> {a.out}")
 
 

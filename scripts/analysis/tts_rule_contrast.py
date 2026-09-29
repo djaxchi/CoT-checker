@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 from scripts.analysis.tts_build_frontier import (AGGS, CONF_WITH_REWARD,  # noqa: E402
                                                  load_many, read_jsonl)
 from src.analysis.tts_frontier import quality_from, simulate_problem  # noqa: E402
-from src.eval.math_grade import normalize_answer  # noqa: E402
+from src.eval.math_grade import answer_key  # noqa: E402
 
 
 def paired_bootstrap(a: np.ndarray, b: np.ndarray, clusters: list[str],
@@ -86,7 +86,7 @@ def main() -> None:
         rng = np.random.default_rng(915)
         for pid, cands in by_problem.items():
             cands.sort(key=lambda r: r["traj_uid"])
-            answers = [normalize_answer(r.get("pred")) for r in cands]
+            answers = [(r["answer_key"] if "answer_key" in r else answer_key(r.get("pred"))) for r in cands]
             correct = [bool(r["correct"]) for r in cands]
             tokens = [int(r.get("n_gen_tokens", 0)) for r in cands]
             qualities, rewards = {}, {}

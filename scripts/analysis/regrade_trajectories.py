@@ -16,13 +16,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections import defaultdict
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.eval.math_grade import grade  # noqa: E402
+from src.eval.math_grade import answer_key, grade  # noqa: E402
 
 
 def main() -> None:
@@ -36,19 +37,36 @@ def main() -> None:
     summary = {}
     for stem in a.stems:
         up = down = n = 0
-        for f in sorted(a.run_root.glob(f"{stem}.shard*_trajectories.jsonl")):
-            out = []
-            for line in f.read_text().splitlines():
-                if not line.strip():
-                    continue
-                r = json.loads(line)
+        files = sorted(a.run_root.glob(f"{stem}.shard*_trajectories.jsonl"))
+        rows_by_file, old = {}, {}
+        for f in files:
+            rows = [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+            for r in rows:
+                old[r["traj_uid"]] = bool(r["correct"])
                 g = grade(r["solution"], r["gold"])
-                up += (not r["correct"]) and g["correct"]
-                down += r["correct"] and not g["correct"]
                 r["pred"], r["correct"], r["gradeable"] = g["pred"], g["correct"], g["gradeable"]
-                out.append(json.dumps(r))
+                r["answer_key"] = answer_key(g["pred"])
+            rows_by_file[f] = rows
+        # One grade per (problem, answer_key): the voting identity and the grade
+        # must agree, or two votes for the same answer can be scored differently.
+        # A group is correct if any member's spelling matches the gold.
+        group = defaultdict(bool)
+        for rows in rows_by_file.values():
+            for r in rows:
+                if r["answer_key"] is not None:
+                    group[(r["fork_id"], r["answer_key"])] |= r["correct"]
+        n_harmonised = 0
+        for f, rows in rows_by_file.items():
+            for r in rows:
+                if r["answer_key"] is not None:
+                    c = group[(r["fork_id"], r["answer_key"])]
+                    n_harmonised += c != r["correct"]
+                    r["correct"] = c
+                up += (not old[r["traj_uid"]]) and r["correct"]
+                down += old[r["traj_uid"]] and not r["correct"]
                 n += 1
-            (a.out_root / f.name).write_text("\n".join(out) + "\n")
+            (a.out_root / f.name).write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        print(f"[regrade] {stem}: {n_harmonised} traces regraded to agree with their answer group")
         for f in sorted(a.run_root.glob(f"{stem}.shard*_conf.jsonl")):
             dst = a.out_root / f.name
             if not dst.exists():

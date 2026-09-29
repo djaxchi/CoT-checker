@@ -117,3 +117,38 @@ def test_instruct_pool_forms_are_equivalent(pred, gold):
 ])
 def test_new_normalisations_do_not_overmatch(pred, gold):
     assert not mg.is_equiv(pred, gold)
+
+
+# --------------------------------------------------------------------------- #
+# answer_key: the gold-independent identity that voting and grading share.
+# Cases are the fragmentations found in the Instruct pools (instruct_arm_v1):
+# a correct answer split across two strings splits its votes.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("a,b", [
+    ("57.00", "57"),                                   # gsm8k_test_00058
+    (r"\frac{16}{5}", "3.2"),                          # math500_00230
+    (r"\frac{11}{2}", "5.5"),                          # math500_00388
+    (r"\frac{448}{15625}", "0.028672"),                # math500_00092
+    (r"\frac{1215}{3125}", r"\frac{243}{625}"),        # math500_00033
+    ("-2,1", "1,-2"),                                  # math500_00456
+    (r"\text{E}", "E"),                                # math500_00255
+    (r"\dfrac{16}{49}", r"\frac{16}{49}"),
+    ("-\\frac{1}{3}", "-0.3333333333333333333"),
+])
+def test_answer_key_merges_equal_answers(a, b):
+    assert mg.answer_key(a) == mg.answer_key(b)
+
+
+@pytest.mark.parametrize("a,b", [
+    ("0.0000672", "0.0000671"),
+    ("(1,2)", "(2,1)"),
+    ("12", "21"),
+    (r"\frac{1}{3}", "0.33"),
+])
+def test_answer_key_keeps_different_answers_apart(a, b):
+    assert mg.answer_key(a) != mg.answer_key(b)
+
+
+def test_answer_key_none():
+    assert mg.answer_key(None) is None

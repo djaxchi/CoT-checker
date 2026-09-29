@@ -278,3 +278,50 @@ def grade(generated_solution: str, ground_truth_answer: str) -> dict:
         "correct": bool(is_equiv(pred, ground_truth_answer)),
         "gradeable": pred is not None,
     }
+
+
+# --------------------------------------------------------------------------- #
+# answer identity for voting
+# --------------------------------------------------------------------------- #
+
+_FRAC = re.compile(r"^(-?)\\frac\{(-?\d+)\}\{(-?\d+)\}$")
+
+
+def _rational(s: str):
+    """A Fraction for an integer, decimal or integer \\frac, else None.
+
+    Decimals are snapped with limit_denominator(10**7), so a repeating decimal
+    written to many places meets its fraction while two terminating decimals
+    that differ in the seventh place stay apart.
+    """
+    from fractions import Fraction
+    m = _FRAC.match(s)
+    try:
+        if m:
+            sign = -1 if m.group(1) else 1
+            return sign * Fraction(int(m.group(2)), int(m.group(3)))
+        if re.fullmatch(r"-?(\d+\.?\d*|\.\d+)", s):
+            return Fraction(s).limit_denominator(10**7)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return None
+
+
+def answer_key(pred: str | None) -> str | None:
+    """Gold-independent identity of an answer, shared by voting and grading.
+
+    Voting on raw normalized strings splits one answer across spellings ("57"
+    and "57.00", "3.2" and "\\frac{16}{5}"), which moved votes on 48 GSM8K and
+    8 MATH-500 Instruct problems. Numbers map to an exact rational, a bare
+    comma list to its sorted items, and a \\text{...} wrapper to its content.
+    Anything else keeps its normalized string.
+    """
+    s = normalize_answer(pred)
+    if s is None:
+        return None
+    s = re.sub(r"^\\text\{(.*)\}$", r"\1", s)
+    if "," in s and not re.search(r"[()\[\]{}]", s):
+        parts = [answer_key(p) or "" for p in s.split(",")]
+        return "set:" + ",".join(sorted(parts))
+    r = _rational(s)
+    return f"num:{r.numerator}/{r.denominator}" if r is not None else s

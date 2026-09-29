@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.analysis.tts_frontier import quality_from, simulate_problem  # noqa: E402
-from src.eval.math_grade import normalize_answer  # noqa: E402
+from src.eval.math_grade import answer_key  # noqa: E402
 
 # Aggregations of a per-step score into one number per solution. `worst` is the
 # primary: it is ReProbe's Q_offline and what §20.6 found ranks identically.
@@ -133,7 +133,7 @@ def main() -> None:
         rng = np.random.default_rng(a.seed)
         for pid, cands in by_problem.items():
             cands.sort(key=lambda r: r["traj_uid"])
-            answers = [normalize_answer(r.get("pred")) for r in cands]
+            answers = [(r["answer_key"] if "answer_key" in r else answer_key(r.get("pred"))) for r in cands]
             correct = [bool(r["correct"]) for r in cands]
             tokens = [int(r.get("n_gen_tokens", 0)) for r in cands]
             qualities: dict[str, np.ndarray] = {}

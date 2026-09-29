@@ -76,9 +76,27 @@ def flatten(traces: list[dict], subset: str) -> list[dict]:
     return flat
 
 
+def plan_batches(lengths: list[int], batch_size: int, max_batch_tokens: int = 0) -> list[range]:
+    """Consecutive index ranges: at most batch_size items, and when
+    max_batch_tokens > 0 at most that many padded tokens (items x longest)."""
+    out, i, n = [], 0, len(lengths)
+    while i < n:
+        j, longest = i, 0
+        while j < n and j - i < batch_size:
+            longest_next = max(longest, lengths[j])
+            if max_batch_tokens and j > i and longest_next * (j - i + 1) > max_batch_tokens:
+                break
+            longest = longest_next
+            j += 1
+        out.append(range(i, j))
+        i = j
+    return out
+
+
 def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
                   max_seq_len, batch_size, pad_id, shard_idx, num_shards, backbone,
-                  span_only=False, prompt_style="verifier"):
+                  span_only=False, prompt_style="verifier", sort_by_length=False,
+                  max_batch_tokens=0):
     flat = flatten(load_traces(raw_file), subset)
     shard = [r for r in flat if r["global_index"] % num_shards == shard_idx]
 
@@ -94,6 +112,10 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
             continue
         toks.append((ids, len(prefix_ids), ex))
 
+    if sort_by_length:
+        # Readers order items by global_index, so the write order is free; sorting
+        # it makes each batch near-uniform in length and removes most padding.
+        toks.sort(key=lambda t: len(t[0]))
     if span_only and any(start < 1 for _, start, _ in toks):
         raise ValueError("span_only needs a non-empty prefix (step_start_idx >= 1)")
     lengths = np.array(
@@ -111,8 +133,9 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
     meta = []
     cur = 0
     t0 = time.perf_counter()
-    for i in range(0, len(toks), batch_size):
-        batch = toks[i:i + batch_size]
+    for rng in plan_batches([len(t[0]) for t in toks], batch_size, max_batch_tokens):
+        i = rng.start
+        batch = toks[rng.start:rng.stop]
         maxlen = max(len(t[0]) for t in batch)
         padded = [t[0] + [pad_id] * (maxlen - len(t[0])) for t in batch]
         mask = [[1] * len(t[0]) + [0] * (maxlen - len(t[0])) for t in batch]
@@ -179,6 +202,11 @@ def main():
     p.add_argument("--layer", type=int, default=-1)
     p.add_argument("--max_seq_len", type=int, default=2048)
     p.add_argument("--batch_size", type=int, default=8)
+    p.add_argument("--sort_by_length", action="store_true",
+                   help="Batch items of similar length together (output identical "
+                        "once read back in global_index order).")
+    p.add_argument("--max_batch_tokens", type=int, default=0,
+                   help="Cap padded tokens per batch; 0 keeps the fixed batch_size.")
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--model_dtype", choices=["float16", "bfloat16", "float32"],
@@ -210,7 +238,7 @@ def main():
         encode_subset(Path(raw), subset, args.rep_root, tok, model, device, args.layer,
                       args.max_seq_len, args.batch_size, pad_id, args.shard_idx, args.num_shards,
                       Path(args.model_name_or_path).name, args.span_only,
-                      args.prompt_style)
+                      args.prompt_style, args.sort_by_length, args.max_batch_tokens)
 
 
 if __name__ == "__main__":

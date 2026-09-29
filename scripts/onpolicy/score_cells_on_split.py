@@ -165,6 +165,9 @@ def cell_stats(res: dict, prm_store: Path, vec_cache: Path | None,
     return stats
 
 
+_DERIVED: dict = {}
+
+
 def score_cell(cell_dir: Path, res: dict, split_dir: Path, stats: dict | None,
                device, batch: int, t_max: int) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     """(scores, per-step y, meta) for one cell on one split, in global order."""
@@ -183,7 +186,13 @@ def score_cell(cell_dir: Path, res: dict, split_dir: Path, stats: dict | None,
         scores = score_all(model, len(handles), loader.collate,
                            eval_plan(len(handles), batch))
     else:
-        X, y, meta = derive_split(split_dir, REP_READOUT[rep], sort=True)
+        key = (str(split_dir), REP_READOUT[rep])
+        if key not in _DERIVED:
+            # Every learner and seed of a representation reads the same vectors;
+            # deriving them once per process saves a full pass over the store
+            # for each of the other checkpoints.
+            _DERIVED[key] = derive_split(split_dir, REP_READOUT[rep], sort=True)
+        X, y, meta = _DERIVED[key]
         tfm = None if stats is None else rs.to_torch(stats, device)
 
         def collate(idx):

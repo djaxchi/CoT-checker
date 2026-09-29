@@ -82,7 +82,8 @@ class Cell:
         self.device, self.seconds = device, 0.0
 
     @torch.no_grad()
-    def score(self, blocks: list[np.ndarray]) -> list[float]:
+    def score_details(self, blocks: list[np.ndarray]) -> dict[str, list[float]]:
+        """Retain raw suspicion logits so sigmoid saturation cannot erase ranks."""
         t0 = time.perf_counter()
         if is_sequence(self.learner):
             seqs = [b[1:][-self.t_max:] for b in blocks]
@@ -96,9 +97,15 @@ class Cell:
         else:
             X = np.stack([readout(b, self.rep) for b in blocks]).astype(np.float32)
             logits = self.model(torch.from_numpy(X).to(self.device), None)
-        out = torch.sigmoid(logits.reshape(-1)).float().cpu().tolist()
+        logits = logits.reshape(-1).float()
+        out = {"scores": torch.sigmoid(logits).cpu().tolist(),
+               "logits": logits.cpu().tolist()}
         self.seconds += time.perf_counter() - t0
         return out
+
+    def score(self, blocks: list[np.ndarray]) -> list[float]:
+        """Compatibility interface for callers that consume probabilities."""
+        return self.score_details(blocks)["scores"]
 
 
 def main() -> None:
@@ -157,7 +164,7 @@ def main() -> None:
             outs[c.name].append({"traj_uid": r["traj_uid"], "problem_id": r.get("fork_id"),
                                  "correct": bool(r["correct"]), "n_steps": len(steps),
                                  "cell": f"{c.name}__gen", "span_ok": ok,
-                                 "scores": c.score(blocks)})
+                                 **c.score_details(blocks)})
         if (i + 1) % 200 == 0 or i + 1 == len(mine):
             print(f"[multi] {i+1}/{len(mine)} ({time.perf_counter()-t0:.0f}s) bad_spans={bad}",
                   flush=True)
@@ -173,7 +180,8 @@ def main() -> None:
         "cells": [str(d) for d in a.cells], "layer": a.layer, "context": "generation",
         "n_traces": len(mine), "flagged_bad_spans": bad, "seconds_backbone": t_backbone,
         "seconds_head": {c.name: c.seconds for c in cells},
-        "model": a.model_name_or_path, "created_at": datetime.now(timezone.utc).isoformat(),
+        "model": a.model_name_or_path, "score_schema": "suspicion_probability_and_logit_v1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "code_commit": git_commit()}, indent=1))
     print(f"[multi] span coverage {coverage:.4f}; backbone {t_backbone:.0f}s; heads "
           f"{sum(c.seconds for c in cells):.1f}s over {len(cells)} cells")

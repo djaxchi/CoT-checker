@@ -64,13 +64,19 @@ def step_rewards(logits: torch.Tensor, mask: torch.Tensor) -> list[float]:
     The model exposes a 2-way head; the released reference implementation takes
     softmax over the last dimension and reads channel 1 as the positive class.
     """
-    probs = torch.softmax(logits, dim=-1) * mask.unsqueeze(-1)
+    probs = torch.softmax(logits.float(), dim=-1) * mask.unsqueeze(-1)
     return probs[mask.bool()][:, 1].tolist()
 
 
+def step_log_odds(logits: torch.Tensor, mask: torch.Tensor) -> list[float]:
+    """Raw log odds of incorrectness, before probability rounding."""
+    selected = logits.float()[mask.bool()]
+    return (selected[:, 0] - selected[:, 1]).tolist()
+
+
 @torch.no_grad()
-def score_one(model, tok, problem: str, steps: list[str], device: str) -> list[float]:
-    """P(correct) per step, under the PRM's own template."""
+def score_one_details(model, tok, problem: str, steps: list[str], device: str) -> dict[str, list[float]]:
+    """Correctness probabilities and suspicion logits under the PRM template."""
     convo = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": problem},
@@ -84,7 +90,13 @@ def score_one(model, tok, problem: str, steps: list[str], device: str) -> list[f
     logits = out[0] if isinstance(out, tuple) else out.logits
     sep_id = tok.encode(SEP)[0]
     mask = (ids == sep_id)
-    return step_rewards(logits, mask)[: len(steps)]
+    return {"rewards": step_rewards(logits, mask)[:len(steps)],
+            "logits": step_log_odds(logits, mask)[:len(steps)]}
+
+
+def score_one(model, tok, problem: str, steps: list[str], device: str) -> list[float]:
+    """Compatibility interface returning P(correct) for each step."""
+    return score_one_details(model, tok, problem, steps, device)["rewards"]
 
 
 def main() -> None:
@@ -174,7 +186,8 @@ def main() -> None:
         steps = split_into_steps(r["solution"])
         if not steps:
             continue
-        rewards = score_one(model, tok, r["problem"], steps, device)
+        details = score_one_details(model, tok, r["problem"], steps, device)
+        rewards = details["rewards"]
         if len(rewards) != len(steps):
             mismatch += 1
             continue
@@ -187,7 +200,8 @@ def main() -> None:
                     "dataset": r.get("dataset"), "split": r.get("split"),
                     "correct": bool(r["correct"]), "n_steps": len(steps),
                     "cell": a.cell_name,
-                    "scores": [1.0 - float(x) for x in rewards]})
+                    "scores": [1.0 - float(x) for x in rewards],
+                    "logits": details["logits"]})
         if (i + 1) % 200 == 0 or i + 1 == len(mine):
             print(f"[prm] {i+1}/{len(mine)}  ({time.perf_counter()-t0:.0f}s)", flush=True)
 
@@ -202,6 +216,7 @@ def main() -> None:
     write_jsonl(a.out, out)
     (a.out.parent / f"{a.out.stem}_manifest.json").write_text(json.dumps({
         "prm": a.prm_name_or_path, "cell": a.cell_name, "n_traces": len(out),
+        "score_schema": "suspicion_probability_and_logit_v1", "softmax_dtype": "float32",
         "orientation": {"mean_correct": mp, "mean_incorrect": mn},
         "segmentation_mismatch": mismatch,
         "shard_idx": a.shard_idx, "num_shards": a.num_shards,

@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """Where does the gap to the oracle live, and can any scorer see it?
 
-On each problem's full pool of ten samples, problems fall into four cases:
+On each problem's full pool, separate strict minority failures from vote ties:
 
   unanimous_correct  every sample right
-  majority_correct   the plurality answer is right (some samples wrong)
-  rescuable          a right answer is present but not the plurality winner
-                     (a lost tie counts as rescuable)
-  unsolvable         no sample right
+  majority_correct_mixed  the plurality is correct, with some wrong samples
+  strict_minority_correct a correct answer is present but has fewer votes
+  vote_tie_with_correct   the correct answer ties a wrong answer at the top
+  no_correct_sample      no sample right
 
-Only `rescuable` problems separate majority vote from the oracle. For each
-scorer this reports, on rescuable problems:
+The two rescue cases contribute oracle minus expected majority credit. A vote
+tie is not a full majority failure. For each scorer, on their union, report:
 
   top1        the highest-rated sample is correct (what best-of-N would get)
-  group_win   the correct answer group has a better mean score than the
-              plurality group (what a group-level override would need)
+  group_win   expected correctness when selecting the highest mean-score group
+              among all groups, with uniform tie handling
   auroc       within-problem AUROC of correct against incorrect samples,
               averaged over problems
 
-and on majority_correct problems the damage an override would do:
+and on majority_correct_mixed problems the damage an override would do:
 
   top1_wrong  the highest-rated sample is wrong
-  group_loss  some wrong group beats the correct plurality group on mean score
+  group_loss  expected error of selecting the highest mean-score group
 
 Suspicion scores (probes, PRM stored as 1 - P(correct)) use the worst step and
 lower is better; confidence is higher-is-better.
@@ -41,6 +41,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.eval.math_grade import answer_key  # noqa: E402
+from src.analysis.downstream_audit import describe_pool, outcome  # noqa: E402
 
 
 def auroc(pos, neg) -> float:
@@ -87,46 +88,42 @@ def main() -> None:
                 by[r["fork_id"]].append(r)
 
         cases = Counter()
+        majority_credit, oracle_credit = [], []
         minority_share = []
         stats = {s: defaultdict(list) for s in a.scorers}
         for pid, rs in by.items():
-            keys = [r.get("answer_key") or answer_key(r.get("pred")) for r in rs]
+            keys = [r["answer_key"] if "answer_key" in r else answer_key(r.get("pred")) for r in rs]
             ok = [bool(r["correct"]) for r in rs]
-            votes = Counter(keys)
-            top = max(votes.values())
-            winners = [k for k, v in votes.items() if v == top]
-            good = {k for k, c in zip(keys, ok) if c}
-            if all(ok):
-                case = "unanimous_correct"
-            elif not good:
-                case = "unsolvable"
-            elif len(winners) == 1 and winners[0] in good:
-                case = "majority_correct"
-            else:
-                case = "rescuable"
-                minority_share.append(max(votes[k] for k in good) / len(rs))
+            pool = describe_pool(keys, ok)
+            case = pool["case"]
+            rescuable = case in ("strict_minority_correct", "vote_tie_with_correct")
+            if rescuable:
+                minority_share.append(max(pool["counts"][pool["truth"].astype(bool)]) / len(rs))
+            majority_credit.append(pool["majority"])
+            oracle_credit.append(pool["oracle"])
             cases[case] += 1
-            if case not in ("rescuable", "majority_correct"):
+            if not rescuable and case != "majority_correct_mixed":
                 continue
-            plural = max(votes, key=lambda k: (votes[k], k not in good))  # a tie counts as lost
             for s in a.scorers:
                 q = np.array([quality[s].get(r["traj_uid"], np.nan) for r in rs], float)
-                if np.isnan(q).all():
-                    continue
-                q = np.where(np.isnan(q), np.nanmin(q), q)
-                best = int(np.argmax(q))
-                gmean = {k: q[[i for i, kk in enumerate(keys) if kk == k]].mean() for k in votes}
+                if not np.isfinite(q).all():
+                    raise ValueError(f"{pid}: missing or non-finite scores for {s}")
+                top1 = outcome(pool, -q, "rerank")
+                group_win = outcome(pool, -q, "group_mean")
                 st = stats[s]
-                if case == "rescuable":
-                    st["top1"].append(ok[best])
-                    best_good = max(gmean[k] for k in good)
-                    st["group_win"].append(best_good > gmean[plural] if plural not in good else True)
+                if rescuable:
+                    st["top1"].append(top1)
+                    st["group_win"].append(group_win)
                     st["auroc"].append(auroc(q[np.array(ok)], q[~np.array(ok)]))
                 else:
-                    st["top1_wrong"].append(not ok[best])
-                    st["group_loss"].append(any(gmean[k] > gmean[plural] for k in votes if k not in good))
+                    st["top1_wrong"].append(1-top1)
+                    st["group_loss"].append(1-group_win)
         n = len(by)
         res = {"n_problems": n, "cases": dict(cases),
+               "majority_expected": float(np.mean(majority_credit)),
+               "oracle": float(np.mean(oracle_credit)),
+               "oracle_gap_problem_equivalents": float(np.sum(np.array(oracle_credit)-majority_credit)),
+               "score_ties": "uniform expectation", "case_schema": "strict_minority_and_vote_ties_v2",
                "rescuable_share_of_correct_answer": {
                    "median": float(np.median(minority_share)) if minority_share else None,
                    "histogram": dict(Counter(round(x, 1) for x in minority_share))},

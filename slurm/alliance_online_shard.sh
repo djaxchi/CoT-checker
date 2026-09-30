@@ -44,7 +44,8 @@ pip install --no-index torch "transformers<5" numpy sympy 2>&1 | tail -1
 
 if [[ "$ARM" == verify ]]; then
   python scripts/onpolicy/verify_online_checkers.py --pool "${VERIFY_POOL:?}" \
-    --gen_cells "${GEN_CELLS[@]}" --prm_name_or_path "$PRM" | tee "$OUT"
+    --gen_cells "${GEN_CELLS[@]}" --prm_name_or_path "$PRM" --stem "${VERIFY_STEM:-tts_math500}" \
+    --prompt_style "${PROMPT_STYLE:-chat}" --probe_context "${PROBE_CONTEXT:-generation}" | tee "$OUT"
   exit "${PIPESTATUS[0]}"
 fi
 

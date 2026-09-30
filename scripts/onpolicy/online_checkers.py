@@ -98,7 +98,7 @@ class PRMChecker:
     name = "prm_qwen25_math_7b"
 
     def __init__(self, prm_name_or_path: str, device: str, local_files_only: bool = True,
-                 bf16_rewards: bool = True):
+                 bf16_rewards: bool = False):
         from transformers import AutoModel, AutoTokenizer
         from scripts.onpolicy.score_traces_with_prm import score_one
         self._score_one = score_one
@@ -111,11 +111,12 @@ class PRMChecker:
             raise SystemExit(f"[prm] {len(info['missing_keys'])} weights not loaded")
         self.model = model.to(device).eval()
         self.device, self.seconds = device, 0.0
-        # The saved pool's PRM scores were computed with a bfloat16 softmax, so
-        # they sit on bfloat16's grid (0, 1/256, 1/128 ...). Thresholds are
-        # quantiles of that pool, so the live reward is rounded to the same grid
-        # before comparison; otherwise a quantile of exactly 0 would reject any
-        # step with a float32 reward below 1.
+        # Pools scored before 4b4731c used a bfloat16 softmax, so their PRM
+        # scores sit on bfloat16's grid (0, 1/256, 1/128 ...). Thresholds taken
+        # from such a pool need the live reward rounded to the same grid
+        # (bf16_rewards=True); otherwise a quantile of exactly 0 would reject any
+        # step with a float32 reward below 1. Pools scored since then are float32
+        # and compare directly.
         self.bf16_rewards = bf16_rewards
 
     @torch.no_grad()

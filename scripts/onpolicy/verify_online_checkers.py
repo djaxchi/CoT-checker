@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.generate_onpolicy_steps import split_into_steps  # noqa: E402
-from scripts.onpolicy.online_checkers import GenStateChecker, PRMChecker  # noqa: E402
+from scripts.onpolicy.online_checkers import GenStateChecker, PRMChecker, TemplateChecker  # noqa: E402
 
 
 def main() -> None:
@@ -36,6 +36,10 @@ def main() -> None:
     p.add_argument("--n_traces", type=int, default=12)
     p.add_argument("--max_steps", type=int, default=6)
     p.add_argument("--tol_median", type=float, default=0.02)
+    p.add_argument("--probe_context", choices=["generation", "verifier"], default="generation",
+                   help="generation: states from the sampler pass, offline files <cell>__gen; "
+                        "verifier: re-read under the training template, offline files <cell>")
+    p.add_argument("--prompt_style", default="chat")
     a = p.parse_args()
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -43,7 +47,8 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(a.model_name_or_path, local_files_only=True)
     bb = AutoModelForCausalLM.from_pretrained(a.model_name_or_path, torch_dtype=torch.bfloat16,
                                               local_files_only=True).to(dev).eval()
-    gen = GenStateChecker(a.gen_cells, bb, tok, 35, dev, "chat")
+    Checker = TemplateChecker if a.probe_context == "verifier" else GenStateChecker
+    gen = Checker(a.gen_cells, bb, tok, 35, dev, a.prompt_style)
     prm = PRMChecker(a.prm_name_or_path, dev) if a.prm_name_or_path else None
 
     tr = [json.loads(l) for f in sorted(a.pool.glob(f"{a.stem}.shard*_trajectories.jsonl"))
@@ -52,7 +57,7 @@ def main() -> None:
     offline = {}
     names = [c.name for c in gen.cells] + ([prm.name] if prm else [])
     for n in names:
-        suffix = "" if n == "prm_qwen25_math_7b" else "__gen"
+        suffix = "" if n == "prm_qwen25_math_7b" or a.probe_context == "verifier" else "__gen"
         offline[n] = {}
         for f in sorted((a.pool / "scores").glob(f"{a.stem}__{n}{suffix}.shard*.jsonl")):
             for l in f.read_text().splitlines():

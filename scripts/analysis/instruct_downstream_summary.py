@@ -63,6 +63,9 @@ def main() -> None:
     p.add_argument("--best_seed", type=Path, required=True)
     p.add_argument("--leaderboard", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--suffix", default="__gen",
+                   help="score-file suffix of the probe cells: __gen for generation-state "
+                        "scoring, empty for verifier-template scoring")
     a = p.parse_args()
 
     rows = [r for f in a.contrasts for r in json.loads(f.read_text())]
@@ -79,7 +82,7 @@ def main() -> None:
     for b in best:
         tag = f"{b['rep']}__{b['learner'].replace(':', '_').replace(',', '_')}__seed{b['seed']}"
         cells.append({"rep": b["rep"], "learner": b["learner"], "seed": b["seed"],
-                      "scorer": f"probe::{tag}__gen::worst",
+                      "scorer": f"probe::{tag}{a.suffix}::worst",
                       "calib20_seed": b["calib20"],
                       "calib20_mean": lb[(b["rep"], b["learner"])]["instruct"]["calib20"]})
 

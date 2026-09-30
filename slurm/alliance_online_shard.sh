@@ -26,9 +26,9 @@ export HF_HOME="${HF_HOME:-$SCRATCH/hf_cache}"
 unset TRANSFORMERS_CACHE
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 CELLS_DIR="${CELLS_DIR:-$SCRATCH/cot_mech/cells}"
-# One probe, chosen on the temperature-0.7 pool by within-problem ranking on
-# MATH-500 (0.666, the best of the 19); the PRM is the other checker.
-GEN_CELLS=("$CELLS_DIR/boundary_stats__mlp_h1024x2__seed42")
+# Both probes the temperature-0.7 pool ranks best within problems on MATH-500
+# (0.666 and 0.648). They share one backbone pass, so scoring both is free.
+GEN_CELLS=("$CELLS_DIR/boundary_stats__mlp_h1024x2__seed42" "$CELLS_DIR/step_stats__mlp_h1024__seed43")
 PRM=Qwen/Qwen2.5-Math-PRM-7B
 mkdir -p "$(dirname "$OUT")"
 

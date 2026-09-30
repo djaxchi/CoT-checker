@@ -16,6 +16,8 @@
 #   ARM=reject_blind the same loop with a coin at BLIND_RATE; drafts still scored
 #   ARM=verify       gate: online scores reproduce the offline ones on stored traces
 #
+# No step or length cut-off in practice: MAX_STEPS (1000) and STEP_TOKENS (4096
+# per step) are safety bounds, and a step still ends at its blank line.
 # NO INTERNET on compute nodes; models are read from HF_HOME.
 
 set -euo pipefail
@@ -56,6 +58,6 @@ python scripts/onpolicy/online_bon.py --checker panel \
   --traces "${PROBLEMS:?}" --model_name_or_path Qwen/Qwen3-8B --local_files_only \
   --layer 35 --prompt_style "${PROMPT_STYLE:-chat}" --probe_context "${PROBE_CONTEXT:-generation}" --arms "$ARM" \
   --plain_temperature 1.0 --reject_temperature 1.0 --top_p 0.95 --top_k 50 \
-  --max_steps 28 --max_new_tokens 768 --max_retries 2 --max_problems 100000 \
+  --max_steps "${MAX_STEPS:-1000}" --max_new_tokens "${STEP_TOKENS:-4096}" --max_retries 2 --max_problems 100000 \
   --seed 42 --shard_idx "${SHARD:-0}" --num_shards "${NUM_SHARDS:-1}" \
   --out "$OUT" "${EXTRA[@]}"

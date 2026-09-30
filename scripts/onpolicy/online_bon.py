@@ -231,6 +231,12 @@ def sample_candidates(backbone, tok, problem: str, prior_steps: list[str],
             top_k=top_k,
             num_return_sequences=n, max_new_tokens=max_new_tokens,
             pad_token_id=tok.pad_token_id or tok.eos_token_id,
+            # Stop at the step boundary instead of writing up to max_new_tokens and
+            # discarding everything after the first blank line: on Instruct that
+            # threw away most of each call (a 14-step GSM8K plain rollout sampled
+            # 2,553 tokens for a ~300-token solution). The text is still cut at
+            # STEP_SEP below, so the kept step is unchanged.
+            stop_strings=[STEP_SEP], tokenizer=tok,
         )
     if torch.cuda.is_available():
         torch.cuda.synchronize()

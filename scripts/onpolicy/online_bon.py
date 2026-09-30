@@ -76,6 +76,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# cuDNN's SDPA kernel fails to launch on some long contexts on Rorqual's H100s
+# (CUDNN_STATUS_EXECUTION_FAILED_CUDA_DRIVER after ~70 min in two shards); the
+# flash and memory-efficient kernels compute the same attention.
+torch.backends.cuda.enable_cudnn_sdp(False)
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -334,7 +339,11 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
     # decision uses one, the tree viewer shows all of them.
     draft_scores: list[list[dict]] = []
     draft_texts: list[list[str]] = []
-    for _ in range(args.max_steps):
+    for k_step in range(args.max_steps):
+        if k_step and k_step % 50 == 0:
+            # No step cap in practice, so a rollout that never boxes an answer
+            # runs long; this is the only sign of it before the record lands.
+            print(f"  [rollout] {arm}: step {k_step}, {gen_tokens} generated tokens", flush=True)
         tried: list[tuple[float, str]] = []
         all_scores: list[dict] = []
         kept: int | None = None

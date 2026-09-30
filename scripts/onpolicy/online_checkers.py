@@ -76,7 +76,8 @@ class GenStateChecker:
 class PRMChecker:
     name = "prm_qwen25_math_7b"
 
-    def __init__(self, prm_name_or_path: str, device: str, local_files_only: bool = True):
+    def __init__(self, prm_name_or_path: str, device: str, local_files_only: bool = True,
+                 bf16_rewards: bool = True):
         from transformers import AutoModel, AutoTokenizer
         from scripts.onpolicy.score_traces_with_prm import score_one
         self._score_one = score_one
@@ -89,6 +90,12 @@ class PRMChecker:
             raise SystemExit(f"[prm] {len(info['missing_keys'])} weights not loaded")
         self.model = model.to(device).eval()
         self.device, self.seconds = device, 0.0
+        # The saved pool's PRM scores were computed with a bfloat16 softmax, so
+        # they sit on bfloat16's grid (0, 1/256, 1/128 ...). Thresholds are
+        # quantiles of that pool, so the live reward is rounded to the same grid
+        # before comparison; otherwise a quantile of exactly 0 would reject any
+        # step with a float32 reward below 1.
+        self.bf16_rewards = bf16_rewards
 
     @torch.no_grad()
     def score(self, problem: str, prior: list[str], cand: str) -> float:
@@ -96,7 +103,10 @@ class PRMChecker:
         rewards = self._score_one(self.model, self.tok, problem, prior + [cand or "."],
                                   self.device)
         _sync(self.device); self.seconds += time.perf_counter() - t0
-        return 1.0 - float(rewards[-1])
+        r = float(rewards[-1])
+        if self.bf16_rewards:
+            r = float(torch.tensor(r, dtype=torch.float32).to(torch.bfloat16).float())
+        return 1.0 - r
 
 
 class PanelChecker:

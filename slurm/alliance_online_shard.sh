@@ -8,8 +8,8 @@
 #SBATCH --output=%x-%j.out
 
 # online_reject_v2: one arm, one shard of one problem set, one GPU (Alliance
-# per-GPU clusters). Qwen3-8B writes each step; the panel (two generation-state
-# probes and Qwen2.5-Math-PRM-7B) scores every draft, and ACTIVE decides.
+# per-GPU clusters). Qwen3-8B writes each step; the panel (the generation-state
+# probe and Qwen2.5-Math-PRM-7B) scores every draft, and ACTIVE decides.
 #
 #   ARM=plain        no checker decision; every step scored by the whole panel
 #   ARM=reject       resample a step whose ACTIVE suspicion exceeds TAU (2 retries)
@@ -26,7 +26,9 @@ export HF_HOME="${HF_HOME:-$SCRATCH/hf_cache}"
 unset TRANSFORMERS_CACHE
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 CELLS_DIR="${CELLS_DIR:-$SCRATCH/cot_mech/cells}"
-GEN_CELLS=("$CELLS_DIR/step_stats__mlp_h1024__seed43" "$CELLS_DIR/boundary_stats__mlp_h1024x2__seed42")
+# One probe, chosen on the temperature-0.7 pool by within-problem ranking on
+# MATH-500 (0.666, the best of the 19); the PRM is the other checker.
+GEN_CELLS=("$CELLS_DIR/boundary_stats__mlp_h1024x2__seed42")
 PRM=Qwen/Qwen2.5-Math-PRM-7B
 mkdir -p "$(dirname "$OUT")"
 

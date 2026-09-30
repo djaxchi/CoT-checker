@@ -14,6 +14,9 @@
 #   TASK=score    every cell in CELLS_FILE on the store (one representation
 #                 group per job via CELL_REGEX), per dataset
 #   TASK=convert  pb_step_scores -> frontier score files; fails on any missing trace
+#   TASK=pbgate   the same encode+score path on ProcessBench gsm8k (REF holds the raw
+#                 file and each cell's training-time pb_step_scores_gsm8k.jsonl);
+#                 reports how closely it reproduces them. POOL is the gate's workdir.
 # NO INTERNET on compute nodes.
 
 set -euo pipefail
@@ -59,4 +62,15 @@ convert)
     python scripts/onpolicy/pb_scores_to_tts.py --cells_root "$OUT" --split "$STEM" \
       --trajectories "$POOL"/"$STEM".shard*_trajectories.jsonl --stem "$STEM" --out_dir "$POOL/scores"
   done ;;
+pbgate)
+  : "${REF:?}" "${CELLS_FILE:?}"
+  python scripts/encode_processbench_token_store.py --raw_specs "gsm8k:$REF/processbench_gsm8k.jsonl" \
+    --rep_root "$STORE" --model_name_or_path Qwen/Qwen3-8B --local_files_only --span_only \
+    --prompt_style verifier --layer 35 --max_seq_len "${MAX_SEQ_LEN:-20480}" --batch_size 64 \
+    --max_batch_tokens 32768 --sort_by_length --model_dtype bfloat16 2>&1 | grep -v CUDACaching | tail -3
+  mapfile -t CELLS < <(grep -v '^#' "$CELLS_FILE" | sed '/^\s*$/d')
+  python scripts/onpolicy/score_cells_on_split.py --cells "${CELLS[@]}" --split_dir "$STORE/gsm8k" \
+    --split_name gsm8k --out_dir "$OUT" --summary "$OUT/summary_gsm8k.json" | grep -v "^\[score\] .*AUROC" | tail -2
+  python scripts/onpolicy/check_scoring_reproduction.py --cells_root "$REF" --rescored_root "$OUT" \
+    --split gsm8k --out "$POOL/reproduction.json" ;;
 esac

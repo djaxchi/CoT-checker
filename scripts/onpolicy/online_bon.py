@@ -569,6 +569,9 @@ def main() -> None:
                    help="panel: generation-state probes (--gen_cells) and/or the PRM "
                         "(--prm_name_or_path) score every draft; --active decides")
     p.add_argument("--gen_cells", type=Path, nargs="*", default=[])
+    p.add_argument("--probe_context", choices=["generation", "verifier"], default="generation",
+                   help="probes read the sampler's own states, or re-read the step "
+                        "under the verifier template they were trained on")
     p.add_argument("--prm_name_or_path", default=None)
     p.add_argument("--active", default="none",
                    help="the panel member whose score decides (a cell name or "
@@ -644,7 +647,7 @@ def main() -> None:
                         "calibrate its rejection threshold on this dataset's own "
                         "score distribution rather than on PRM800K's, where the "
                         "same quantile is a different rejection rate.")
-    p.add_argument("--prompt_style", choices=["zero", "fewshot", "chat"], default="zero",
+    p.add_argument("--prompt_style", choices=["zero", "fewshot", "chat", "prm800k"], default="zero",
                    help="Must match the sampler that wrote the pool, or every "
                         "reconstructed context is one the model never saw.")
     p.add_argument("--dataset", type=str, default="",
@@ -687,8 +690,9 @@ def main() -> None:
 
     if a.checker == "panel":
         from scripts.onpolicy.online_checkers import (GenStateChecker, PanelChecker,
-                                                      PRMChecker)
-        gen = (GenStateChecker(a.gen_cells, backbone, tok, a.layer, a.device, a.prompt_style)
+                                                      PRMChecker, TemplateChecker)
+        Probe = TemplateChecker if a.probe_context == "verifier" else GenStateChecker
+        gen = (Probe(a.gen_cells, backbone, tok, a.layer, a.device, a.prompt_style)
                if a.gen_cells else None)
         prm = PRMChecker(a.prm_name_or_path, a.device, a.local_files_only) \
             if a.prm_name_or_path else None

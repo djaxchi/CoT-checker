@@ -90,3 +90,37 @@ def test_chat_is_a_recorded_sampler_style():
     assert "chat" in SAMPLER_STYLES
     row = {"prompt_style": "chat", "problem": PROBLEM}
     assert context_from_row(row).startswith("<|im_start|>user\n")
+
+
+# ---- prm800k: PRM800K-style steps from the Instruct policy -------------------
+
+def test_prm800k_prompt_is_the_qwen3_multi_turn_template():
+    """System instruction, three PRM800K exemplar turns, then the problem, in the
+    exact string Qwen3's template renders (non-thinking); pinned literally."""
+    from src.onpolicy.prompts import PRM800K_EXEMPLARS, PRM800K_SYSTEM, prm800k_prompt
+    expect = f"<|im_start|>system\n{PRM800K_SYSTEM}<|im_end|>\n"
+    for ex in PRM800K_EXEMPLARS:
+        expect += f"<|im_start|>user\n{ex['problem']}<|im_end|>\n"
+        expect += "<|im_start|>assistant\n" + "\n\n".join(ex["steps"]) + "<|im_end|>\n"
+    expect += f"<|im_start|>user\n{PROBLEM}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    assert prm800k_prompt(PROBLEM) == expect
+    assert build_prompt(PROBLEM, "prm800k") == expect
+
+
+def test_prm800k_exemplars_are_plain_steps_ending_in_a_boxed_answer():
+    from src.onpolicy.prompts import PRM800K_EXEMPLARS
+    assert len(PRM800K_EXEMPLARS) == 3
+    for ex in PRM800K_EXEMPLARS:
+        assert "\\boxed{" in ex["steps"][-1]
+        assert not any(s.lstrip().startswith(("#", "---", "- ", "* ")) for s in ex["steps"])
+
+
+def test_prm800k_context_reconstructs_the_sampled_context():
+    from src.onpolicy.prompts import context, prm800k_prompt
+    solution = "We add two and two.\n\nThat gives four.\n\nSo \\boxed{4}."
+    steps = split_into_steps(solution)
+    full = prm800k_prompt(PROBLEM) + solution
+    for k, step in enumerate(steps):
+        ctx = context("prm800k", PROBLEM, "\n\n".join(steps[:k]))
+        assert full.startswith(ctx), k
+        assert full[len(ctx):].startswith(step), k

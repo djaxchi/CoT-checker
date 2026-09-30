@@ -1,0 +1,42 @@
+[
+ {
+  "problem": "For how many positive integers $n$ is $n^2-3n+2$ a prime number?",
+  "steps": [
+   "I notice that $n^2-3n+2$ can be factored as $(n-2)(n-1)$.",
+   "So, unless one of the factors is $1$ and the other is prime, the expression will not be prime.",
+   "That means I only need to check the cases where $n-2=1$ or $n-1=1$.",
+   "If $n-2=1$, then $n=3$ and $n^2-3n+2=2$, which is prime.",
+   "If $n-1=1$, then $n=2$ and $n^2-3n+2=0$, which is not prime.",
+   "So, there is only one positive integer $n$ that makes $n^2-3n+2$ prime, and that is $n=3$.",
+   "So the answer is $\\boxed{1}$."
+  ],
+  "source": "PRM800K phase2_train, every step rated +1"
+ },
+ {
+  "problem": "Palindromes are numbers that read the same backwards and forwards, like 5665. What is the least possible positive four-digit palindrome that is divisible by 3?",
+  "steps": [
+   "I know that a number is divisible by 3 if the sum of its digits is divisible by 3.",
+   "So I want to find the smallest four-digit number that is a palindrome and has a digit sum that is a multiple of 3.",
+   "The smallest four-digit palindrome is 1001, but the sum of its digits is 2, which is not divisible by 3.",
+   "The next smallest palindrome is 1111, but the sum of its digits is 4, which is also not divisible by 3.",
+   "The next one is 1221, but the sum of its digits is 6, which is divisible by 3.",
+   "So 1221 is the smallest four-digit palindrome that is divisible by 3.",
+   "So the answer is $\\boxed{1221}$."
+  ],
+  "source": "PRM800K phase2_train, every step rated +1"
+ },
+ {
+  "problem": "A certain ellipse is tangent to both the $x$-axis and the $y$-axis, and its foci are at $(2, -3 + \\sqrt{5})$ and $(2, -3 - \\sqrt{5}).$  Find the length of the major axis.",
+  "steps": [
+   "I know that the length of the major axis of an ellipse is twice the distance from the center to either vertex, where the vertices are the endpoints of the major axis.",
+   "To find the center of the ellipse, I can use the fact that it is the midpoint of the segment joining the foci.",
+   "The midpoint formula is $(\\frac{x_1 + x_2}{2}, \\frac{y_1 + y_2}{2}),$ so the center of the ellipse is $(\\frac{2 + 2}{2}, \\frac{-3 + \\sqrt{5} - 3 - \\sqrt{5}}{2}) = (2, -3).$",
+   "Since the ellipse is tangent to both axes, I can also use the fact that the distance from the center to either vertex is equal to the distance from the center to either axis.",
+   "For example, the distance from the center to the vertex on the positive $x$-axis is the same as the distance from the center to the positive $x$-axis, which is $|2 - 0| = 2.$",
+   "Similarly, the distance from the center to the vertex on the positive $y$-axis is the same as the distance from the center to the positive $y$-axis, which is $|(-3) - 0| = 3.$",
+   "Therefore, the length of the major axis is twice the longer of these two distances, which is $2 \\cdot 3 = 6.$",
+   "So the answer is $\\boxed{6}$."
+  ],
+  "source": "PRM800K phase2_train, every step rated +1"
+ }
+]

@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from scripts.onpolicy.score_gen_states_multi import Cell, step_blocks  # noqa: E402
-from src.onpolicy.prompts import context  # noqa: E402
+from src.onpolicy.prompts import context, verifier_prefix  # noqa: E402
 from src.onpolicy.spans import step_token_spans  # noqa: E402
 
 STEP_SEP = "\n\n"
@@ -70,6 +70,27 @@ class GenStateChecker:
         h = h.to(torch.float16).cpu().numpy()
         _sync(self.device); self.seconds_backbone += time.perf_counter() - t0
         block = step_blocks(h, len(p_ids), spans)[-1]
+        return {c.name: float(c.score([block])[0]) for c in self.cells}
+
+
+class TemplateChecker(GenStateChecker):
+    """The probes' training context, exactly: the step re-read under the verifier
+    template ("Problem: ... Previous reasoning: ... Current step:"), prefix
+    tokenised with special tokens and the step without, as the PRM800K and
+    ProcessBench encoders did. The block is [last prefix token; step tokens],
+    the span-store layout. Costs one extra backbone pass per draft."""
+
+    @torch.no_grad()
+    def score_all(self, problem: str, prior: list[str], cand: str,
+                  dataset: str = "", n_shot: int = 4) -> dict[str, float]:
+        p_ids = self.tok(verifier_prefix(problem, STEP_SEP.join(prior)),
+                         add_special_tokens=True)["input_ids"]
+        s_ids = self.tok(cand, add_special_tokens=False)["input_ids"] or p_ids[-1:]
+        _sync(self.device); t0 = time.perf_counter()
+        h = self.backbone(input_ids=torch.tensor([p_ids + s_ids], device=self.device),
+                          output_hidden_states=True).hidden_states[self.layer][0]
+        block = h[len(p_ids) - 1:].to(torch.float16).cpu().numpy()
+        _sync(self.device); self.seconds_backbone += time.perf_counter() - t0
         return {c.name: float(c.score([block])[0]) for c in self.cells}
 
 

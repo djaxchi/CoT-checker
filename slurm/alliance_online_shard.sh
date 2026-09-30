@@ -54,7 +54,7 @@ EXTRA=()
 python scripts/onpolicy/online_bon.py --checker panel \
   --gen_cells "${GEN_CELLS[@]}" --prm_name_or_path "$PRM" --active "${ACTIVE:-none}" \
   --traces "${PROBLEMS:?}" --model_name_or_path Qwen/Qwen3-8B --local_files_only \
-  --layer 35 --prompt_style chat --arms "$ARM" \
+  --layer 35 --prompt_style "${PROMPT_STYLE:-chat}" --probe_context "${PROBE_CONTEXT:-generation}" --arms "$ARM" \
   --plain_temperature 1.0 --reject_temperature 1.0 --top_p 0.95 --top_k 50 \
   --max_steps 28 --max_new_tokens 768 --max_retries 2 --max_problems 100000 \
   --seed 42 --shard_idx "${SHARD:-0}" --num_shards "${NUM_SHARDS:-1}" \

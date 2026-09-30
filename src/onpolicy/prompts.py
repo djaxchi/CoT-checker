@@ -29,10 +29,13 @@ script imports it from here, and a test pins the string.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 STYLES = ("verifier", "generation")
 
 # Prompt styles a *sampler* can have run under, as recorded per trajectory.
-SAMPLER_STYLES = ("zero", "fewshot", "chat")
+SAMPLER_STYLES = ("zero", "fewshot", "chat", "prm800k")
 
 
 def generation_prompt(problem: str) -> str:
@@ -59,6 +62,29 @@ def chat_prompt(problem: str) -> str:
     """
     return (f"<|im_start|>user\n{problem}\n{CHAT_INSTRUCTION}<|im_end|>\n"
             "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+
+
+# PRM800K-style steps from the Instruct policy (online_reject_v2). Left to itself,
+# Qwen3-8B writes markdown: a quarter of its blank-line "steps" are headers or
+# horizontal rules and a quarter bare display equations, where PRM800K steps are
+# one or two plain sentences (median 29 tokens). The verifiers were trained on the
+# latter, so the policy is shown three PRM800K solutions (phase2 train, every step
+# rated +1, none from MATH-500) and asked to write that way.
+PRM800K_SYSTEM = ("Solve the problem step by step. Write each step as one or two plain "
+                  "sentences, with any math inline in $...$. Put a blank line between "
+                  "steps. Do not use headings, lists, bold text or horizontal rules. "
+                  "Finish with a step that states the final answer in \\boxed{}.")
+PRM800K_EXEMPLARS = json.loads((Path(__file__).with_name("prm800k_exemplars.json")).read_text())
+
+
+def prm800k_prompt(problem: str) -> str:
+    """Qwen3's chat template for the system turn, three exemplar turns and the
+    problem, non-thinking; a literal so contexts rebuild without a tokenizer."""
+    s = f"<|im_start|>system\n{PRM800K_SYSTEM}<|im_end|>\n"
+    for ex in PRM800K_EXEMPLARS:
+        s += f"<|im_start|>user\n{ex['problem']}<|im_end|>\n"
+        s += "<|im_start|>assistant\n" + "\n\n".join(ex["steps"]) + "<|im_end|>\n"
+    return s + f"<|im_start|>user\n{problem}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
 def generation_prefix(problem: str, prefix: str) -> str:
@@ -109,6 +135,9 @@ def context(style: str, problem: str, prefix: str = "", dataset: str = "",
         return base if not prefix else f"{base}{prefix}\n\n"
     if style == "chat":
         base = chat_prompt(problem)
+        return base if not prefix else f"{base}{prefix}\n\n"
+    if style == "prm800k":
+        base = prm800k_prompt(problem)
         return base if not prefix else f"{base}{prefix}\n\n"
     raise ValueError(f"unknown sampler prompt style {style!r}; "
                      f"expected one of {SAMPLER_STYLES}")

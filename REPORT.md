@@ -1,5 +1,5 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-09-28. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-09-29. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
@@ -3257,7 +3257,35 @@ representation grid or online controller (§24).
 
 ### 21.12 Instruct Leaderboard Replication and Prospective Rank Transfer
 
-*2026-09-28. Submitted; no new leaderboard or downstream correlation is reported yet.*
+*Updated: 2026-09-29. 64 of 66 seed runs complete; the downstream test is §21.13.*
+
+**Results (added 2026-09-29).** Two seed-44 runs (attention pooling and d128)
+were not completed; both cells enter with seeds 42 and 43. The vector job
+trained all 54 of its runs and then failed its own validation, which required
+`bucketed: True` of vector cells that never bucket; the validator was fixed and
+the runs validated. The sequence job timed out at 6h and was rerun as two jobs;
+Instruct sequence cells took 5 to 6h each against 1 to 2h on Base, and the cause
+is not yet known. One seed diverged (`step_stats × mlp h1024x2` seed 43, AUROC
+0.500).
+
+Seed means (`scripts/analysis/leaderboard_base_vs_instruct.py`):
+
+| rank | Instruct cell | AUROC | calib-20 F1_PB | Base calib-20 (rank) |
+|---|---|---|---|---|
+| 1 | step_tokens × transformer d512 | 0.9128 | 0.6107 | 0.5648 (1) |
+| 2 | step_tokens × attn_query | 0.9018 | 0.6052 | 0.5596 (2) |
+| 3 | step_tokens × transformer d256 | 0.9060 | 0.6030 | 0.5315 (8) |
+| 4 | boundary_stats × mlp h1024 | 0.9153 | 0.6014 | 0.5399 (5) |
+| 5 | step_stats × mlp h1024 | 0.9112 | 0.5951 | 0.5410 (4) |
+
+Over the 19 cells trained on raw states on both backbones, Spearman between the
+Base and Instruct orderings is +0.49 on AUROC, +0.73 on source-val F1_PB, +0.66
+on oracle F1_PB and **+0.67 on calib-20** (+0.78 without the diverged cell).
+Instruct beats Base on AUROC in 18 of 19 cells and on calib-20 in 17 of 19. The
+top two cells are the same on both backbones; the middle reorders. Full table:
+`results/instruct_arm_v1/base_vs_instruct_core.md`.
+
+*Original submission record, 2026-09-28:*
 
 The requested experiment reproduces the presentation's ProcessBench ranking on
 Qwen3-8B Instruct. It preserves calib-20 first-error F1_PB, the four-subset mean,
@@ -3304,6 +3332,176 @@ under the scoring path. In particular, lengthfree_geom requires its
 training-fitted transform during downstream inference. Generation-state inputs
 and the concurrent T=0.7 pool are separate context/policy sensitivity arms.
 The existing Instruct generation and PRM jobs remain independent.
+
+
+### 21.13 Instruct Downstream: Every Verifier and the PRM on the Same Candidates
+
+*Updated: 2026-09-29*
+
+**Context.** §21.10 compared one verifier with majority voting. This asks the
+question the downstream protocol of `docs/instruct_leaderboard_v1_plan.md` froze:
+across the leaderboard, and against Qwen2.5-Math-PRM-7B, which scorer turns ten
+Instruct samples into more correct answers, and does ProcessBench predict it?
+
+**What was done.**
+
+- *Scorers.* The best seed (by calib-20 F1_PB) of each of the 19 core cells,
+  Qwen2.5-Math-PRM-7B, and two token-confidence statistics. The lengthfree cells
+  are excluded because the scoring path does not apply their length transform.
+- *Context.* Every probe reads the states the sampler computed, through
+  `scripts/onpolicy/score_gen_states_multi.py`: one teacher-forced pass per
+  trajectory, shared by all cells. Step blocks follow the training layout
+  ([boundary; step tokens]), and vector readouts go through `_reduce_item`, the
+  function that derived the training vectors; a test checks them row for row.
+- *Pools.* The saved Instruct pools at T=1.0 (primary) and T=0.7 (sensitivity),
+  GSM8K test and MATH-500, ten samples each, regraded with a shared answer
+  identity (`answer_key`): votes and grades now agree, so "57" and "57.00" are
+  one vote. That merged split votes on 48 GSM8K and 8 MATH-500 problems.
+- *Compute.* Twelve single-GPU Rorqual jobs (`slurm/alliance_downstream_shard.sh`),
+  12 to 15 minutes each, after TamIA's rolling reboot left its queue a day long.
+  Span coverage was 99.7 to 100%, and the PRM segmented every trace exactly as
+  the probes did (0 mismatches).
+- *Rules.* Majority, tie-break, best-of-N (rerank), weighted vote and DeepConf's
+  filtered vote at N = 2 to 10, worst-step aggregation, paired question-cluster
+  bootstrap (`tts_rule_contrast.py`).
+
+**Results: selection.** Accuracy (%), T=1.0 pool:
+
+| | MATH N=2 | MATH N=4 | MATH N=10 | GSM8K N=2 | GSM8K N=4 | GSM8K N=10 |
+|---|---|---|---|---|---|---|
+| majority | 84.22 | 88.14 | 90.17 | 93.61 | 94.57 | 95.03 |
+| PRM tie-break | **86.24** | 88.64 | 90.22 | **94.91** | 95.12 | 95.30 |
+| PRM best-of-N | 86.24 | 87.24 | 88.35 | 94.91 | **95.67** | **96.14** |
+| PRM weighted vote | 86.27 | **88.73** | **90.60** | 94.91 | 95.57 | 95.83 |
+| best probe tie-break (boundary_stats × mlp h1024x2) | 86.06 | 88.64 | 89.80 | 94.18 | 94.74 | 95.00 |
+| best probe best-of-N | 86.06 | 87.13 | 87.49 | 94.18 | 94.47 | 94.92 |
+| oracle | 89.56 | 92.57 | 95.20 | 95.84 | 97.06 | 97.88 |
+
+Tie-break lifts over majority at N=2: PRM +2.02 [+1.45, +2.63] on MATH-500 and
++1.30 [+1.02, +1.59] on GSM8K; best probe +1.84 [+1.29, +2.39] and +0.57; d512
++1.20 and +0.37; mean token confidence +0.96 and +0.53. The T=0.7 pool gives the
+same ordering (MATH N=2: PRM +1.58, best probe +1.55).
+
+Three points. The probes help only as tie-breakers, and there the best one comes
+within 0.2 points of a 7B PRM at N=2 on MATH-500. Every scorer loses to majority
+under best-of-N on MATH-500, including the PRM (88.35 against 90.17 at N=10).
+The PRM is the only scorer that beats majority when allowed to override it, and
+only on GSM8K (best-of-N 96.14 against 95.03 at N=10) and marginally with the
+weighted vote on MATH-500 (90.60). Figures:
+`results/instruct_downstream_v1/figs/accuracy_vs_n_all_rules_t10.png`.
+
+**Results: rank transfer.** Spearman across the 19 cells between calib-20 F1_PB
+and MATH-500 best-of-4 lift (the frozen primary endpoint) is **+0.28** (Kendall
++0.16) on the T=1.0 pool with the chosen seed's F1, and +0.09 with the
+seed-averaged F1; on the T=0.7 pool +0.70 and +0.51. Other endpoints run +0.3 to
++0.6. The leaderboard's top cells (the step-token transformers and attention
+pooling) sit mid-table downstream, and `boundary_stats`/`step_stats` × mlp lead.
+Choosing each cell's best ProcessBench seed inflates the chosen-seed column. The
+`step_delta` cells fail under generation states (saturated scores collapse their
+weighted vote, −64 points at N=10) and rank last everywhere.
+
+**Results: trajectory correctness.** AUROC of worst-step score for a correct
+final answer, over all traces and within a problem:
+
+| | MATH all | MATH within | GSM8K all | GSM8K within |
+|---|---|---|---|---|
+| PRM | 0.876 | **0.709** | **0.879** | **0.819** |
+| boundary_stats × mlp h1024x2 | **0.883** | 0.643 | 0.778 | 0.653 |
+| step_stats × mlp h1024 | 0.881 | 0.655 | 0.833 | 0.641 |
+
+On MATH-500 the best probes match the PRM at separating correct from incorrect
+traces, but much of that is problem difficulty. Selection needs within-problem
+ranking, and there the PRM leads. Averaging step scores beats the worst step for
+nearly every probe (d512: 0.762 to 0.886 on MATH), so worst-step selection may
+understate some probes.
+
+**Results: combining the PRM and the probes.** A logistic selector over vote
+share, the PRM, four probes, confidence and length, cross-validated by problem
+(`scripts/analysis/tts_combined_selector.py`), reaches 90.00 on MATH-500 and
+95.60 on GSM8K at N=10, against 90.60 and 95.83 for the PRM weighted vote alone.
+Without the PRM it falls to majority on GSM8K (95.00). The probes add nothing on
+top of the PRM.
+
+**Results: where the oracle gap lives.** On the full ten-sample pool
+(`scripts/analysis/tts_rescuable.py`, first version, lost ties counted as
+rescuable), MATH-500 splits into 318 unanimous-correct, 130 majority-correct,
+**28 rescuable** (right answer present but outvoted) and 24 unsolvable problems;
+the rescuable ones are the 5-point gap. Their correct answer is a median 2-in-10
+minority (1-in-10 on 13 of them). On those 28 the PRM's highest-scored sample is
+correct 32% of the time and its within-problem AUROC is 0.54; the probes sit at
+0.40 to 0.58. On the 130 majority-correct problems the PRM would override a
+correct vote 10.8% of the time, so best-of-N loses more (about 14 problems) than
+it rescues (about 9). GSM8K has 44 rescuable problems, where the PRM does see the
+right answer (top-1 64%, AUROC 0.71) and our probes largely do not (0.50 to
+0.60). The T=0.7 pool agrees. The script has since been revised to separate vote
+ties from strict minorities; the counts above predate that revision.
+
+**Results: cost.** Measured on Rorqual H100s: generation costs 2.76 ms per token
+on GSM8K and 3.27 on MATH-500 (batched ten samples), the PRM 0.060 ms per input
+token, and a probe head about 0.005. The PRM therefore costs about 2% of
+generation time and a head about 0.2%; in FLOPs the PRM costs 0.93 of a
+generated token per token read. At matched FLOPs, extra samples plus the d512
+generation-state probe beat the PRM's best-of-N and weighted vote on MATH-500 by
+1.3 to 2.9 points and tie its tie-break; at matched GPU time the PRM wins or
+ties, and on GSM8K it wins under both (`scripts/analysis/tts_prm_vs_genprobe.py`).
+
+**Results: sampling.** Resampling the Instruct pool at Qwen's recommended
+non-thinking settings (T=0.7, top-p 0.8, top-k 20) gives pass@1 93.1 on GSM8K
+and 83.6 on MATH-500, no closer to the recorded 92.4. Sampling does not explain
+the MATH-500 gap.
+
+**Interpretation.** On Instruct, the probes are cheap, competitive tie-breakers
+and poor overriders; the PRM is the only scorer whose authority beyond ties pays,
+and only where it can see minority-correct answers (GSM8K). On MATH-500 the
+remaining oracle gap sits on problems where the correct answer is rare and no
+scorer, the PRM included, ranks it above the wrong majority, so better
+aggregation of these scores cannot close it. ProcessBench F1 predicts the
+downstream ordering only weakly. A PRM beating majority on GSM8K reproduces the
+literature (ReProbe +0.2, the Lessons paper +0.4 to +0.9) and is a baseline,
+not a finding.
+
+**Next step.** Use the verifiers during generation (§21.14), where step-level
+checking can act on the step it flags instead of choosing among finished answers.
+
+Artifacts: `results/instruct_downstream_v1/` (summary_t10, summary_t07,
+best_seed.json, combined_t10.json, rescuable_t10/t07.json, parts/, figs/),
+`cot-checker-results/tts_regraded_v2/`, `slurm/alliance_downstream_shard.sh`,
+`scripts/onpolicy/score_gen_states_multi.py`,
+`scripts/analysis/instruct_downstream_summary.py`. Rorqual jobs 22043442 to
+22043453.
+
+
+### 21.14 Verification During Generation on Instruct (online_reject_v2)
+
+*Updated: 2026-09-29. Running; no results yet.*
+
+**Context.** Selection leaves the checker nothing to do once a wrong step is
+written. Rejection sampling acts on the step: on Base it was the one mechanism
+that worked at N=1 (§20.17, §21: +11.7 points over its blind control). This
+reruns it on Instruct, with our probes and the PRM as checkers.
+
+**Design.** Qwen3-8B writes one step at a time (chat template, T=1.0, top-p
+0.95, top-k 50, cut at the first blank line, up to 768 tokens per step, stop at
+`\boxed{}` or 28 steps). A step whose suspicion exceeds τ is resampled, up to two
+retries, keeping the least suspicious draft if all are flagged. Arms, paired by
+problem and seed on 500 MATH-500 and 200 GSM8K problems (one seed): plain; reject
+with each of `boundary_stats × mlp h1024x2`, `step_stats × mlp h1024` (the two
+probes that rank best within problems on the T=0.7 pool) and the PRM, each at τ
+rejecting the top 50%, 35% and 20% of steps; and blind, a coin at the
+`boundary_stats` probe's measured retry rate for the 35% threshold. Thresholds
+are quantiles of each checker's step scores in the saved T=1.0 pool, per
+dataset, with no labels. The PRM's live reward is rounded to the bfloat16 grid
+the saved scores sit on, so a quantile of exactly 0 keeps its meaning. On GSM8K
+the probe's 50% and 35% thresholds coincide (0.129), so those arms are one.
+
+Every draft of every arm is scored by all three checkers and logged with its
+text (`scripts/onpolicy/online_checkers.py`, `online_bon.py`), so each rollout
+can be read as a tree of kept and rejected steps. A gate
+(`verify_online_checkers.py`) first checks that online scores reproduce the
+offline ones on stored traces.
+
+**Status.** Smoke jobs 22057029 to 22057032 and 22057394 (10 problems each)
+running on Rorqual.
 
 
 ---

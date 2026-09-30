@@ -65,8 +65,11 @@ class GenStateChecker:
         s_ids = self.tok(STEP_SEP.join(steps), add_special_tokens=False)["input_ids"]
         spans = [(x, min(y, len(s_ids))) for x, y in step_token_spans(prompt, steps, self._n)]
         _sync(self.device); t0 = time.perf_counter()
-        h = self.backbone(input_ids=torch.tensor([p_ids + s_ids], device=self.device),
-                          output_hidden_states=True).hidden_states[self.layer][0]
+        # The decoder body, not the causal LM: the checker reads hidden states
+        # only, and the LM head's logits over a long context (vocab 152k) are
+        # the allocation that ran a no-cap rollout out of memory.
+        h = self.backbone.model(input_ids=torch.tensor([p_ids + s_ids], device=self.device),
+                                output_hidden_states=True).hidden_states[self.layer][0]
         h = h.to(torch.float16).cpu().numpy()
         _sync(self.device); self.seconds_backbone += time.perf_counter() - t0
         block = step_blocks(h, len(p_ids), spans)[-1]
@@ -87,8 +90,11 @@ class TemplateChecker(GenStateChecker):
                          add_special_tokens=True)["input_ids"]
         s_ids = self.tok(cand, add_special_tokens=False)["input_ids"] or p_ids[-1:]
         _sync(self.device); t0 = time.perf_counter()
-        h = self.backbone(input_ids=torch.tensor([p_ids + s_ids], device=self.device),
-                          output_hidden_states=True).hidden_states[self.layer][0]
+        # The decoder body, not the causal LM: the checker reads hidden states
+        # only, and the LM head's logits over a long context (vocab 152k) are
+        # the allocation that ran a no-cap rollout out of memory.
+        h = self.backbone.model(input_ids=torch.tensor([p_ids + s_ids], device=self.device),
+                                output_hidden_states=True).hidden_states[self.layer][0]
         block = h[len(p_ids) - 1:].to(torch.float16).cpu().numpy()
         _sync(self.device); self.seconds_backbone += time.perf_counter() - t0
         return {c.name: float(c.score([block])[0]) for c in self.cells}

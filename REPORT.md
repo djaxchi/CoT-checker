@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-09-29. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-03. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15).
 
 ## 1. Hypothesis
 
@@ -3502,6 +3502,113 @@ offline ones on stored traces.
 
 **Status.** Smoke jobs 22057029 to 22057032 and 22057394 (10 problems each)
 running on Rorqual.
+
+
+### 21.15 The PRM's Own Activations as the Verifier's Input (prm_backbone_v1, prm_geometry_v1)
+
+*Updated: 2026-10-03. Sprint 9, first task.*
+
+**Context.** Every probe so far read the policy's residual stream. This asks
+whether the residual stream of Qwen2.5-Math-PRM-7B, the downstream PRM of
+§21.13, carries a richer correct/incorrect signal than Qwen3-8B (Instruct), and
+whether that signal is visible without a trained learner.
+
+**What was done.** Three studies on the frozen PRM800K splits
+(`probe_train_full` 513,810 steps, `val_5k`, `test_2k`) and the four
+ProcessBench subsets.
+
+1. *Leaderboard retrain.* The 22 cells of the Instruct leaderboard (§21.12),
+   seeds 42, 43 and 44, retrained on PRM states under the identical protocol
+   (RESCALE=none, 30 epochs, patience 3, batch 256, seed-42 lr x wd search
+   reused by 43 and 44). Only the backbone changes. The PRM loads as
+   `Qwen2ForCausalLM` with zero missing keys (the checkpoint ships `lm_head`;
+   only the reward head `score.*` is dropped). The read layer is
+   `hidden_states[27]`, block 26 of 28, matching Instruct's block 34 of 36.
+   Steps are encoded under the same verifier template; the PRM and Qwen3-8B
+   tokenizers produce identical ids on all 2,000 test rows. Each TamIA job
+   encoded its own span store to node-local disk (shared scratch had 127 GB free
+   against the 154 GB needed) and read spans through the page cache
+   (`slurm/prm_backbone_tamia.sh`, jobs 501624, 501626, 501731). The three
+   independent encodes produced identical input fingerprints, so every cell read
+   the same activations. Table: `results/prm_backbone_v1/leaderboard.md`.
+2. *The PRM as a scorer.* `scripts/score_processbench_with_prm.py` scores
+   ProcessBench with the PRM's own head in its native template (system prompt,
+   steps joined by `<extra_0>`), writing per-trace suspicion = 1 - P(correct) in
+   the probe cells' layout so oracle and calib-20 use the leaderboard code
+   (job 502723).
+3. *Learner-free geometry.* `scripts/analysis/prm_geometry.py` fits only class
+   means and covariances of the train split and scores test and ProcessBench
+   with closed-form rules: the raw class-mean axis, nearest centroid (cosine),
+   LDA (shrunk pooled covariance, shrinkage picked on val from
+   {1e-4, 1e-3, 1e-2, 0.1, 0.5}), LDA restricted to the top-K principal
+   components, the best single PC, QDA, a covariance-only rule (both means set
+   to the pooled mean, so only class shape differs) and a 50-nearest-neighbour
+   cosine vote over 200,000 train steps. Readouts `last_token`, `step_mean`,
+   `boundary_stats`, on both backbones (jobs 502727, 502814). Val chooses the
+   threshold through a rank-preserving map, so AUROC is unaffected.
+
+**Results.**
+
+*Leaderboard.* PRM states beat Instruct states on 21 of 22 cells at
+ProcessBench calib-20 F1_PB (mean +0.071) and on 20 of 22 on PRM800K test AUROC
+(mean +0.017). The top PRM cell, `boundary_stats x mlp:h1024x2`, reaches
+calib-20 0.661, oracle 0.701 and AUROC 0.922; the best Instruct cell
+(`step_tokens x d512`) reaches 0.610, 0.655 and 0.913. The one loss is
+`step_tokens x attn_query` (0.501 against 0.608, 0.487 to 0.513 over seeds). The
+ranking reshuffles (calib-20 Spearman +0.29): pooled-statistics MLPs overtake
+the sequence transformers. In-domain f1_incorrect at the val threshold runs 0.82
+to 0.86 against the trivial 0.667.
+
+*PRM head.*
+
+| subset | F1_PB at P<0.5 | oracle | calib-20 | best probe on PRM states, calib-20 |
+|---|---:|---:|---:|---:|
+| gsm8k | 0.818 | 0.829 | 0.805 | 0.765 |
+| math | 0.772 | 0.783 | 0.747 | 0.692 |
+| olympiadbench | 0.669 | 0.677 | 0.625 | 0.618 |
+| omnimath | 0.664 | 0.671 | 0.626 | 0.571 |
+| mean | 0.731 | 0.740 | 0.701 | 0.661 |
+
+The fixed-threshold mean reproduces Qwen's reported 73.5 within 0.5 points. The
+head beats the best probe on its own states on every subset; the gap runs from
+0.007 (olympiadbench) to 0.055 (omnimath).
+
+*Geometry* (PRM800K test AUROC; ProcessBench calib-20 in parentheses).
+
+| rule | PRM `boundary_stats` | Instruct `boundary_stats` |
+|---|---:|---:|
+| best single PC | 0.789 (0.574) | 0.674 (0.257) |
+| class-mean axis | 0.772 (0.447) | 0.659 (0.251) |
+| nearest centroid | 0.774 (0.480) | 0.664 (0.280) |
+| kNN, k=50 | 0.891 (0.525) | 0.845 (0.319) |
+| covariance only | 0.890 (0.509) | 0.870 (0.322) |
+| QDA | 0.891 (0.520) | 0.871 (0.328) |
+| LDA | 0.919 (0.667) | 0.909 (0.575) |
+
+Closed-form LDA on PRM `boundary_stats` matches the best trained probe (0.919
+against 0.922 AUROC; 0.667 against 0.661 calib-20; 0.704 against 0.701 oracle).
+On the other readouts LDA equals the trained linear probe (`step_mean` 0.9055
+against 0.9056; `last_token` 0.902 against 0.904). LDA restricted to the top-K
+PCs of PRM `boundary_stats` gives 0.653 at K=1, 0.808 at K=4, 0.854 at K=8,
+0.899 at K=256 and 0.919 at full rank; Instruct gives 0.642 at K=4 and 0.765 at
+K=8. Under 7% of the in-sample Mahalanobis separation sits in the
+lower-variance half of directions on any cell. The in-sample Mahalanobis
+distance overstates separability (Gaussian-predicted AUROC 0.986 against 0.919
+measured on PRM `boundary_stats`).
+
+**Interpretation.** The class axis is easier to see in the PRM's residual
+stream than in Instruct's (a single PC reaches 0.79 against 0.67), and a closed-form whitened mean difference
+recovers everything the 22-cell grid learns. The signal is one linear direction
+that needs whitening and many dimensions; it never forms clusters in a 2-D map.
+Second-order structure is real in-domain (covariance-only 0.89) but does not
+transfer to ProcessBench (calib-20 at most 0.52), so it encodes PRM800K-specific
+style rather than validity. A probe on the PRM's states still trails the PRM's
+own head by 0.04 calib-20 on average: reading the activations recovers most of
+the PRM's judgment, not all of it, and adds nothing beyond it.
+
+**Next step.** Encode in the PRM's native format (`<extra_0>` separators), where
+the head reads its state, and test whether LDA on that state closes the 0.04 gap
+to the head. Figures: `results/prm_geometry_v1/{methods_auroc,lda_topk,pc_auroc,views_boundary_stats}.png`.
 
 
 ---

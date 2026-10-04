@@ -37,7 +37,7 @@ set -euo pipefail
 module load StdEnv/2023 python/3.12 gcc arrow/24.0.0
 
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
-RUN_ROOT="${RUN_ROOT:-$STORE/cot_mech/dense_full_7b_v1}"
+RUN_ROOT="${RUN_ROOT:-${STORE:-$SCRATCH}/cot_mech/dense_full_7b_v1}"
 PRM_STORE="${PRM_STORE:-$RUN_ROOT/repstore/step_spans}"
 PB_STORE="${PB_STORE:-$RUN_ROOT/repstore/pb_step_spans}"
 VEC_CACHE="${VEC_CACHE:-$RUN_ROOT/cache/grid_vectors}"

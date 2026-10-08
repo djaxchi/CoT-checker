@@ -26,7 +26,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.onpolicy.prompts import STYLES, build_prefix  # noqa: E402
+from src.onpolicy.prompts import JUDGE_ANSWERS, STYLES, build_prefix, build_suffix  # noqa: E402
+from src.repstore.judge_store import JudgeWriter, answer_ids, judge_spec  # noqa: E402
 from src.repstore.store import TOKEN_SEQ, RepSpec  # noqa: E402
 
 
@@ -96,30 +97,38 @@ def plan_batches(lengths: list[int], batch_size: int, max_batch_tokens: int = 0)
 def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
                   max_seq_len, batch_size, pad_id, shard_idx, num_shards, backbone,
                   span_only=False, prompt_style="verifier", sort_by_length=False,
-                  max_batch_tokens=0):
+                  max_batch_tokens=0, judge_root=None):
     flat = flatten(load_traces(raw_file), subset)
     shard = [r for r in flat if r["global_index"] % num_shards == shard_idx]
 
+    suffix = build_suffix(prompt_style)
+    suffix_ids = tokenizer(suffix, add_special_tokens=False)["input_ids"] if suffix else []
     toks = []
     for ex in shard:
         prefix_ids = tokenizer(build_prefix(prompt_style, ex["problem"], ex["prefix"]),
                                add_special_tokens=True, truncation=False)["input_ids"]
         step_ids = tokenizer(ex["current_step"], add_special_tokens=False, truncation=False)["input_ids"]
         ids = prefix_ids + step_ids
-        if not step_ids or len(ids) > max_seq_len:
+        # The judge style decides overlength on the verifier template's length, so
+        # it keeps exactly the steps the verifier stores kept; its extra prompt
+        # tokens are allowed past max_seq_len.
+        n_check = len(ids) if prompt_style != "judge" else len(tokenizer(
+            build_prefix("verifier", ex["problem"], ex["prefix"]),
+            add_special_tokens=True, truncation=False)["input_ids"]) + len(step_ids)
+        if not step_ids or n_check > max_seq_len:
             # ProcessBench steps can be long; skip overlength to match dense encoder policy.
-            print(f"[pb_tokstore] skip {ex['id']} step {ex['step_idx']} len={len(ids)}", flush=True)
+            print(f"[pb_tokstore] skip {ex['id']} step {ex['step_idx']} len={n_check}", flush=True)
             continue
-        toks.append((ids, len(prefix_ids), ex))
+        toks.append((ids + suffix_ids, len(prefix_ids), len(ids), ex))
 
     if sort_by_length:
         # Readers order items by global_index, so the write order is free; sorting
         # it makes each batch near-uniform in length and removes most padding.
         toks.sort(key=lambda t: len(t[0]))
-    if span_only and any(start < 1 for _, start, _ in toks):
+    if span_only and any(start < 1 for _, start, _, _ in toks):
         raise ValueError("span_only needs a non-empty prefix (step_start_idx >= 1)")
     lengths = np.array(
-        [len(ids) - start + 1 if span_only else len(ids) for ids, start, _ in toks],
+        [end - start + 1 if span_only else end for _, start, end, _ in toks],
         dtype=np.int32)
     total = int(lengths.sum())
     d = model.config.hidden_size
@@ -128,6 +137,10 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
     h_mm = np.lib.format.open_memmap(out_dir / "h.npy", mode="w+", dtype=np.float16, shape=(total, d))
     print(f"[pb_tokstore] {subset} shard {shard_idx}: {len(toks)} items {total:,} rows "
           f"{total*d*2/1e9:.2f}GB", flush=True)
+    judge = None
+    if judge_root is not None:
+        judge = JudgeWriter(judge_root, subset, shard_idx, len(toks), d)
+        yes_id, no_id = answer_ids(tokenizer, JUDGE_ANSWERS)
 
     y = np.zeros(len(toks), dtype=np.int8)
     meta = []
@@ -143,9 +156,14 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
         att = torch.tensor(mask, dtype=torch.long, device=device)
         with torch.no_grad():
             out = model(inp, attention_mask=att, output_hidden_states=True, use_cache=False)
-        hs = out.hidden_states[layer]; del out
-        for b, (ids, start, ex) in enumerate(batch):
-            nt = len(ids)
+        hs = out.hidden_states[layer]
+        if judge is not None:
+            last = torch.tensor([len(t[0]) - 1 for t in batch], device=device)
+            ans = out.logits[torch.arange(len(batch), device=device), last][:, [yes_id, no_id]]
+            ans = ans.float().cpu().numpy()
+        del out
+        for b, (ids, start, end, ex) in enumerate(batch):
+            nt = end
             lo = start - 1 if span_only else 0
             keep = nt - lo
             vecs = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
@@ -177,6 +195,15 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
                 })
             meta.append(row)
             cur += keep
+            if judge is not None:
+                pair = hs[b, [start - 1, len(ids) - 1], :].detach().to(torch.float16).cpu().numpy()
+                if not np.isfinite(pair).all():
+                    raise ValueError(f"non-finite float16 verdict state for {ex['id']} "
+                                     f"step {ex['step_idx']}")
+                judge.add(i + b, pair[0], pair[1], int(y[i + b]),
+                          {k: v for k, v in row.items() if not k.startswith("orig_")}
+                          | {"orig_n_tokens": len(ids)},
+                          float(ans[b, 0]), float(ans[b, 1]))
         del hs
     h_mm.flush()
     np.save(out_dir / "lengths.npy", lengths)
@@ -190,6 +217,8 @@ def encode_subset(raw_file, subset, rep_root, tokenizer, model, device, layer,
         readout="step_span_with_boundary" if span_only else "token_all_last_layer",
         source_split=subset)
     (out_dir / "spec.json").write_text(spec.to_json())
+    if judge is not None:
+        judge.close(judge_spec(judge_root.name, d, layer, backbone, subset))
     print(f"[pb_tokstore] {subset} shard {shard_idx}: done {cur:,} rows ({time.perf_counter()-t0:.0f}s)", flush=True)
 
 
@@ -221,7 +250,14 @@ def main():
                         "on-policy comparison controlled; 'generation' rebuilds the "
                         "context an on-policy sampler actually ran under, giving the "
                         "generative states rather than a re-read.")
+    p.add_argument("--judge_rep_root", type=Path, default=None,
+                   help="With --prompt_style judge: where the boundary + verdict-token "
+                        "store goes (src/repstore/judge_store.py).")
     args = p.parse_args()
+    if args.prompt_style == "judge" and not (args.span_only and args.judge_rep_root):
+        p.error("--prompt_style judge needs --span_only and --judge_rep_root")
+    if args.prompt_style != "judge" and args.judge_rep_root:
+        p.error("--judge_rep_root only applies to --prompt_style judge")
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -238,7 +274,8 @@ def main():
         encode_subset(Path(raw), subset, args.rep_root, tok, model, device, args.layer,
                       args.max_seq_len, args.batch_size, pad_id, args.shard_idx, args.num_shards,
                       Path(args.model_name_or_path).name, args.span_only,
-                      args.prompt_style, args.sort_by_length, args.max_batch_tokens)
+                      args.prompt_style, args.sort_by_length, args.max_batch_tokens,
+                      args.judge_rep_root)
 
 
 if __name__ == "__main__":

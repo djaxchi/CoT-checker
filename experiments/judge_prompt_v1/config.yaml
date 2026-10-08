@@ -1,0 +1,22 @@
+# judge_prompt_v1 (docs/judge_prompt_v1_plan.md). The roster below is what the
+# submit scripts launch; edit both together.
+backbone: Qwen/Qwen3-8B
+layer: 35                  # hidden_states index, block 34 of 36
+prompt_style: judge        # src/onpolicy/prompts.py judge_prefix + JUDGE_SUFFIX
+num_shards: 16
+max_seq_len: {prm800k: 2304, processbench: 2048}   # PB skip decided on verifier length
+splits: {train: probe_train_full, val: val_5k, test: test_2k}
+protocol: {rescale: none, epochs: 30, patience: 3, batch_size: 256, hp_search_cap: 100000,
+           seeds: [42, 43, 44], hp_search_seed: 42}
+cells:
+  span:      # step-span readouts, context changed only
+    - [step_tokens, "transformer:d512,l2,f2048,h8"]   # Rorqual (needs spans)
+    - [boundary_stats, "mlp:h1024x2"]                 # TamIA, pre-derived vectors
+    - [boundary_stats, linear]
+    - [last_token, linear]
+    - [step_mean, linear]
+  verdict:   # last token of the verdict question
+    - [last_token, linear]
+    - [last_token, "mlp:h1024x2"]
+  zeroshot: P(No) over {Yes, No} at the verdict token
+geometry: {reps_span: [last_token, step_mean, boundary_stats], reps_verdict: [last_token], knn: false}

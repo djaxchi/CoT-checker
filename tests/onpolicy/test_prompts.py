@@ -124,3 +124,23 @@ def test_prm800k_context_reconstructs_the_sampled_context():
         ctx = context("prm800k", PROBLEM, "\n\n".join(steps[:k]))
         assert full.startswith(ctx), k
         assert full[len(ctx):].startswith(step), k
+
+
+# ---- judge: the verification prompt of judge_prompt_v1 ---------------------
+
+def test_judge_prompt_is_qwen3_system_user_non_thinking_template():
+    """prefix + step + suffix is apply_chat_template([system, user],
+    add_generation_prompt=True, enable_thinking=False) on Qwen3-8B, with the user
+    turn holding problem, previous steps, current step and the verdict question.
+    Checked against the real template (transformers, local Qwen3-8B tokenizer)."""
+    from src.onpolicy.prompts import JUDGE_SUFFIX, JUDGE_SYSTEM, build_suffix, judge_prefix
+    full = judge_prefix(PROBLEM, "We add.") + "So 4." + JUDGE_SUFFIX
+    assert full == (
+        "<|im_start|>system\n" + JUDGE_SYSTEM + "<|im_end|>\n"
+        "<|im_start|>user\nProblem:\n" + PROBLEM + "\n\nPrevious steps:\nWe add.\n\n"
+        "Current step:\nSo 4.\n\nIs the current step correct? Answer Yes or No.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert judge_prefix(PROBLEM, "").endswith("Previous steps:\n(none)\n\nCurrent step:\n")
+    assert build_prefix("judge", PROBLEM, "a") == judge_prefix(PROBLEM, "a")
+    assert build_suffix("judge") == JUDGE_SUFFIX
+    assert build_suffix("verifier") == "" and build_suffix("generation") == ""

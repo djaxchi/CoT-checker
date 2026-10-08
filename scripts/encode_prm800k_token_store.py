@@ -46,30 +46,41 @@ import torch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from scripts.encode_prm800k_hidden_states import build_prompt_prefix  # noqa: E402
+from src.onpolicy.prompts import JUDGE_ANSWERS, build_prefix, build_suffix  # noqa: E402
+from src.repstore.judge_store import JudgeWriter, answer_ids, judge_spec  # noqa: E402
 from src.repstore.store import TOKEN_SEQ, RepSpec  # noqa: E402
 
 
-def tokenize_with_offsets(tokenizer, ex: dict, max_seq_len: int) -> tuple[list[int], int]:
-    """Return (input_ids, step_start_idx). step_start_idx = len(prefix_ids)."""
+def tokenize_with_offsets(tokenizer, ex: dict, max_seq_len: int,
+                          prompt_style: str = "verifier") -> tuple[list[int], int, int]:
+    """Return (input_ids, step_start_idx, step_end_idx).
+
+    step_end_idx is one past the step's last token. It equals len(input_ids)
+    except under the judge style, whose verdict question follows the step. Prefix,
+    step and suffix are tokenized separately, so the step's ids are the same
+    under every style.
+    """
     prefix_ids = tokenizer(
-        build_prompt_prefix(ex["problem"], ex["prefix"]),
+        build_prefix(prompt_style, ex["problem"], ex["prefix"]),
         add_special_tokens=True, truncation=False,
     )["input_ids"]
     cand_ids = tokenizer(ex["candidate_step"], add_special_tokens=False, truncation=False)["input_ids"]
     if not cand_ids:
         raise ValueError("empty candidate step")
-    ids = prefix_ids + cand_ids
+    suffix = build_suffix(prompt_style)
+    suffix_ids = tokenizer(suffix, add_special_tokens=False)["input_ids"] if suffix else []
+    ids = prefix_ids + cand_ids + suffix_ids
     if len(ids) > max_seq_len:
         raise ValueError(f"len {len(ids)} > max_seq_len {max_seq_len}")
-    return ids, len(prefix_ids)
+    return ids, len(prefix_ids), len(prefix_ids) + len(cand_ids)
 
 
 def encode_split(
     jsonl_path: Path, rep_root: Path, stem: str, tokenizer, model, device,
     layer: int, max_seq_len: int, batch_size: int, pad_id: int,
     shard_idx: int, num_shards: int, backbone: str, limit: int | None,
-    span_only: bool = False,
+    span_only: bool = False, prompt_style: str = "verifier",
+    judge_root: Path | None = None,
 ) -> None:
     rows = [json.loads(l) for l in jsonl_path.read_text().splitlines() if l.strip()]
     for gi, r in enumerate(rows):
@@ -79,14 +90,14 @@ def encode_split(
         shard = shard[:limit]
 
     # ---- Pass 1: tokenize, size the memmap ----
-    toks: list[tuple[list[int], int, dict]] = []
+    toks: list[tuple[list[int], int, int, dict]] = []
     for ex in shard:
-        ids, start = tokenize_with_offsets(tokenizer, ex, max_seq_len)
-        toks.append((ids, start, ex))
-    if span_only and any(start < 1 for _, start, _ in toks):
+        ids, start, end = tokenize_with_offsets(tokenizer, ex, max_seq_len, prompt_style)
+        toks.append((ids, start, end, ex))
+    if span_only and any(start < 1 for _, start, _, _ in toks):
         raise ValueError("span_only needs a non-empty prefix (step_start_idx >= 1)")
     lengths = np.array(
-        [len(ids) - start + 1 if span_only else len(ids) for ids, start, _ in toks],
+        [end - start + 1 if span_only else end for _, start, end, _ in toks],
         dtype=np.int32)
     total_rows = int(lengths.sum())
     d = model.config.hidden_size
@@ -98,6 +109,10 @@ def encode_split(
     )
     print(f"[tokstore] {stem} shard {shard_idx}/{num_shards}: {len(toks)} items, "
           f"{total_rows:,} rows, {total_rows*d*2/1e9:.1f} GB", flush=True)
+    judge = None
+    if judge_root is not None:
+        judge = JudgeWriter(judge_root, stem, shard_idx, len(toks), d)
+        yes_id, no_id = answer_ids(tokenizer, JUDGE_ANSWERS)
 
     # ---- Pass 2: forward, stream into memmap ----
     y = np.zeros(len(toks), dtype=np.int8)
@@ -108,7 +123,7 @@ def encode_split(
         batch = toks[i:i + batch_size]
         maxlen = max(len(t[0]) for t in batch)
         padded, masks = [], []
-        for ids, _, _ in batch:
+        for ids, _, _, _ in batch:
             padded.append(ids + [pad_id] * (maxlen - len(ids)))
             masks.append([1] * len(ids) + [0] * (maxlen - len(ids)))
         inp = torch.tensor(padded, dtype=torch.long, device=device)
@@ -116,9 +131,13 @@ def encode_split(
         with torch.no_grad():
             out = model(inp, attention_mask=att, output_hidden_states=True, use_cache=False)
         hs = out.hidden_states[layer]  # (b, maxlen, d)
+        if judge is not None:
+            last = torch.tensor([len(t[0]) - 1 for t in batch], device=device)
+            ans = out.logits[torch.arange(len(batch), device=device), last][:, [yes_id, no_id]]
+            ans = ans.float().cpu().numpy()
         del out
-        for b, (ids, start, ex) in enumerate(batch):
-            nt = len(ids)
+        for b, (ids, start, end, ex) in enumerate(batch):
+            nt = end
             lo = start - 1 if span_only else 0
             keep = nt - lo
             vecs = hs[b, lo:nt, :].detach().to(torch.float16).cpu().numpy()
@@ -148,6 +167,14 @@ def encode_split(
                 })
             meta.append(row)
             cursor += keep
+            if judge is not None:
+                pair = hs[b, [start - 1, len(ids) - 1], :].detach().to(torch.float16).cpu().numpy()
+                if not np.isfinite(pair).all():
+                    raise ValueError(f"non-finite float16 verdict state for {ex['uid']}")
+                judge.add(i + b, pair[0], pair[1], int(ex["label"]),
+                          {k: v for k, v in row.items() if not k.startswith("orig_")}
+                          | {"orig_n_tokens": len(ids)},
+                          float(ans[b, 0]), float(ans[b, 1]))
         del hs
         if (i // batch_size) % 32 == 0 or i + batch_size >= len(toks):
             print(f"[tokstore] {stem} shard {shard_idx}: {i+len(batch)}/{len(toks)} "
@@ -162,8 +189,10 @@ def encode_split(
     spec = RepSpec(
         name=rep_root.name, kind=TOKEN_SEQ, dim=d, layer=layer, backbone=backbone,
         readout="step_span_with_boundary" if span_only else "token_all_last_layer",
-        source_split=stem)
+        source_split=stem, prompt_style=prompt_style)
     (out_dir / "spec.json").write_text(spec.to_json())
+    if judge is not None:
+        judge.close(judge_spec(judge_root.name, d, layer, backbone, stem))
     print(f"[tokstore] {stem} shard {shard_idx}: done ({cursor:,} rows written)", flush=True)
 
 
@@ -190,7 +219,16 @@ def main() -> None:
                    help="Store only the pre-step boundary row plus the step's own "
                         "tokens (~7x smaller, byte-identical to encoding in full "
                         "then compacting).")
+    p.add_argument("--prompt_style", choices=("verifier", "judge"), default="verifier",
+                   help="'judge' wraps each step in the verification chat prompt of "
+                        "src/onpolicy/prompts.py and needs --span_only and --judge_rep_root.")
+    p.add_argument("--judge_rep_root", type=Path, default=None,
+                   help="Where the judge style writes its boundary + verdict-token store.")
     args = p.parse_args()
+    if args.prompt_style == "judge" and not (args.span_only and args.judge_rep_root):
+        p.error("--prompt_style judge needs --span_only and --judge_rep_root")
+    if args.prompt_style != "judge" and args.judge_rep_root:
+        p.error("--judge_rep_root only applies to --prompt_style judge")
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -208,7 +246,8 @@ def main() -> None:
             args.data_dir / jsonl_name, args.rep_root, stem, tok, model, device,
             args.layer, args.max_seq_len, args.batch_size, pad_id,
             args.shard_idx, args.num_shards, Path(args.model_name_or_path).name,
-            args.limit_per_file, args.span_only,
+            args.limit_per_file, args.span_only, args.prompt_style,
+            args.judge_rep_root,
         )
 
 

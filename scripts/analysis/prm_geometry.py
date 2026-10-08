@@ -324,15 +324,19 @@ def study(Xtr, ytr, Xva, yva, Xte, yte, pb: dict, dev, knn: bool = True,
 # store I/O
 # ---------------------------------------------------------------------------
 
-def load_backbone(prm_store: Path, pb_store: Path, rep: str):
+def load_backbone(prm_store: Path, pb_store: Path, rep: str, prederived: bool = False):
+    """prederived: the stores hold one subdirectory per rep, already derived
+    (scripts/derive_vector_store.py), read as one row per item."""
     from scripts.train_rep_learner_cell import load_vectors
+    if prederived:
+        prm_store, pb_store = prm_store / rep, pb_store / rep
     out = {}
     for stem in ("probe_train_full", "val_5k", "test_2k"):
-        X, y, _ = load_vectors(prm_store, stem, rep, None, sort=False)
+        X, y, _ = load_vectors(prm_store, stem, rep, None, sort=False, prederived=prederived)
         out[stem] = (np.asarray(X, dtype=np.float32), np.asarray(y, dtype=np.int64))
     pb = {}
     for sub in PB_SUBSETS:
-        X, _, meta = load_vectors(pb_store, sub, rep, None, sort=True)
+        X, _, meta = load_vectors(pb_store, sub, rep, None, sort=True, prederived=prederived)
         pb[sub] = (np.asarray(X, dtype=np.float32), meta)
     return out, pb
 
@@ -345,6 +349,8 @@ def main() -> None:
     p.add_argument("--reps", nargs="+", default=["last_token", "step_mean", "boundary_stats"])
     p.add_argument("--out_dir", type=Path, required=True)
     p.add_argument("--no_knn", action="store_true")
+    p.add_argument("--prederived", action="store_true",
+                   help="each store dir holds <rep>/<split> vector stores")
     a = p.parse_args()
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for spec in a.backbone:
@@ -357,7 +363,7 @@ def main() -> None:
                 continue
             print(f"=== {name} / {rep}", flush=True)
             t0 = time.time()
-            splits, pb = load_backbone(prm_store, pb_store, rep)
+            splits, pb = load_backbone(prm_store, pb_store, rep, a.prederived)
             print(f"  loaded in {time.time()-t0:.0f}s: train {splits['probe_train_full'][0].shape}",
                   flush=True)
             metrics, arrays = study(*splits["probe_train_full"], *splits["val_5k"],

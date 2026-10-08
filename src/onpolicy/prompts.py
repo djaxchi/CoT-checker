@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-STYLES = ("verifier", "generation")
+STYLES = ("verifier", "generation", "judge")
 
 # Prompt styles a *sampler* can have run under, as recorded per trajectory.
 SAMPLER_STYLES = ("zero", "fewshot", "chat", "prm800k")
@@ -105,12 +105,43 @@ def verifier_prefix(problem: str, prefix: str) -> str:
     return f"Problem:\n{problem}\n\n{prefix_section}Current step:\n"
 
 
+# judge_prompt_v1: the backbone is told it is verifying the current step before
+# it reads it, then asked for a verdict after it. The step's own token states can
+# see the instruction but not the question (causal attention), so the step-span
+# readouts measure what the instruction changes; the last token of JUDGE_SUFFIX,
+# where the model is about to answer, is a separate readout and also gives the
+# zero-shot P(No) / P(Yes) baseline. "Current step:\n" ends the prefix exactly as
+# in the verifier template, so the step is tokenized the same way under both.
+JUDGE_SYSTEM = ("You are a careful math verifier. You are given a problem, the previous "
+                "steps of a solution, and the current step. Decide whether the current "
+                "step is correct, given the problem and the previous steps.")
+JUDGE_SUFFIX = ("\n\nIs the current step correct? Answer Yes or No.<|im_end|>\n"
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n")
+JUDGE_ANSWERS = ("Yes", "No")
+
+
+def judge_prefix(problem: str, prefix: str) -> str:
+    """Qwen3 chat template (system + user turn) up to the current step."""
+    return (f"<|im_start|>system\n{JUDGE_SYSTEM}<|im_end|>\n"
+            f"<|im_start|>user\nProblem:\n{problem}\n\n"
+            f"Previous steps:\n{prefix if prefix else '(none)'}\n\nCurrent step:\n")
+
+
 def build_prefix(style: str, problem: str, prefix: str) -> str:
     if style == "verifier":
         return verifier_prefix(problem, prefix)
     if style == "generation":
         return generation_prefix(problem, prefix)
+    if style == "judge":
+        return judge_prefix(problem, prefix)
     raise ValueError(f"unknown prompt style {style!r}; expected one of {STYLES}")
+
+
+def build_suffix(style: str) -> str:
+    """Text after the step. Only the judge style has one."""
+    if style not in STYLES:
+        raise ValueError(f"unknown prompt style {style!r}; expected one of {STYLES}")
+    return JUDGE_SUFFIX if style == "judge" else ""
 
 
 def context(style: str, problem: str, prefix: str = "", dataset: str = "",

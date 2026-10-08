@@ -104,7 +104,7 @@ REPS = tuple(REP_READOUT) + REP_SPARSE + (REP_SPARSE_SEQ, "step_tokens")
 # ---------------------------------------------------------------------------
 
 def load_vectors(store_root: Path, stem: str, rep: str, cache_dir: Path | None,
-                 sort: bool, fingerprint: str | None = None):
+                 sort: bool, fingerprint: str | None = None, prederived: bool = False):
     """(X (N, D) float32, y (N,), meta) for a fixed-vector representation.
 
     Derivation is a pure numpy slice over the memory-mapped store, so it is cached
@@ -118,8 +118,11 @@ def load_vectors(store_root: Path, stem: str, rep: str, cache_dir: Path | None,
     the same inputs" guarantee would be reporting on data the cell never touched.
     With the fingerprint in the name a changed store simply misses the cache and
     re-derives.
+
+    `prederived`: the store already holds this rep's vectors, one row per item
+    (scripts/derive_vector_store.py), so the readout is the row itself.
     """
-    readout = REP_READOUT[rep]
+    readout = "last" if prederived else REP_READOUT[rep]
     key = f"{rep}__{stem}" + (f"__{fingerprint}" if fingerprint else "")
     cache_h = cache_dir / f"{key}_h.npy" if cache_dir else None
     cache_y = cache_dir / f"{key}_y.npy" if cache_dir else None
@@ -306,6 +309,9 @@ def main() -> None:
                    help="Disable length-bucketed batching for sequence learners. "
                         "Bucketing only changes which items share a batch, never "
                         "what the model sees for a given item.")
+    p.add_argument("--prederived", action="store_true",
+                   help="--prm_store / --pb_store hold this vector rep already derived "
+                        "(scripts/derive_vector_store.py), one row per item.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--threshold_grid", default="0.01")
     args = p.parse_args()
@@ -329,6 +335,9 @@ def main() -> None:
     if args.rescale == "whiten" and (sparse or sparse_seq):
         raise SystemExit("whiten is a dense rotation and would fill in every zero "
                          "of a sparse code; use zscore for the sae_* reps")
+    if args.prederived and (seq or sparse or sparse_seq or args.rep in
+                            ("step_tokens", "lengthfree_geom")):
+        raise SystemExit(f"--prederived is for dense vector reps, not {args.rep} x {args.learner}")
     if sparse and seq:
         raise SystemExit(f"{args.rep} is a fixed vector; use a vector learner")
     if sparse_seq and not seq:
@@ -443,13 +452,16 @@ def main() -> None:
     else:
         Xtr, y_train, _ = load_vectors(args.prm_store, args.train_stem, args.rep,
                                        args.vec_cache_dir, sort=False,
-                                       fingerprint=inputs[f"prm/{args.train_stem}"])
+                                       fingerprint=inputs[f"prm/{args.train_stem}"],
+                                       prederived=args.prederived)
         Xva, y_val, _ = load_vectors(args.prm_store, args.val_stem, args.rep,
                                      args.vec_cache_dir, sort=False,
-                                     fingerprint=inputs[f"prm/{args.val_stem}"])
+                                     fingerprint=inputs[f"prm/{args.val_stem}"],
+                                     prederived=args.prederived)
         Xte, y_test, _ = load_vectors(args.prm_store, args.test_stem, args.rep,
                                       args.vec_cache_dir, sort=False,
-                                      fingerprint=inputs[f"prm/{args.test_stem}"])
+                                      fingerprint=inputs[f"prm/{args.test_stem}"],
+                                      prederived=args.prederived)
         if args.rep == "lengthfree_geom":
             # Fitted on train and applied unchanged everywhere, exactly as the
             # rescale statistics are. Materialised rather than applied lazily so
@@ -627,7 +639,8 @@ def main() -> None:
         else:
             Xpb, _, meta = load_vectors(args.pb_store, sub, args.rep,
                                         args.vec_cache_dir, sort=True,
-                                        fingerprint=inputs[f"pb/{sub}"])
+                                        fingerprint=inputs[f"pb/{sub}"],
+                                        prederived=args.prederived)
             if lstats is not None:
                 # the TRAIN length map, never refitted here: ProcessBench steps
                 # run 80 to 119 tokens against PRM800K's 39, and refitting would
@@ -676,7 +689,8 @@ def main() -> None:
                      "test_is_val": bool(test_is_val),
                      "batch_size": args.batch_size, "t_max": args.t_max,
                      "dropout": args.dropout,
-                     "threshold_grid": args.threshold_grid},
+                     "threshold_grid": args.threshold_grid,
+                     "prederived": bool(args.prederived)},
         "in_domain": in_domain,
         "processbench": pb,
         "wall_seconds": round(time.time() - t0, 1),

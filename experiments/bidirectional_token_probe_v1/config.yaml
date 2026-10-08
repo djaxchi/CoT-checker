@@ -1,0 +1,85 @@
+# bidirectional_token_probe_v1: resolved configuration (authoritative).
+# Plan: docs/bidirectional_token_probe_v1_plan.md
+experiment_id: bidirectional_token_probe_v1
+
+data:
+  prm800k_source: tasksource/PRM800K@547b19506677a59037ee888838834b65e9b1ddd4
+  prm800k_files:
+    phase2_train.jsonl: 1110237feeb51d1bc200cb37b8f965cfdc1036eac7d506094049366fe7dc1089
+    phase2_test.jsonl: 6b172efa884ac8341a946dd82e06947c135b7254109fb3f7aa907c715d98aaad
+  phase1: counted only (no original continuation)
+  processbench_source: Qwen/ProcessBench (gsm8k, math, olympiadbench, omnimath)
+  trajectory: question.pre_generated_steps (original full solution)
+  label_alignment: >
+    a rated completion's text must equal pre_generated_steps[k] AND every earlier
+    position must have advanced with the original text; otherwise masked (off_branch)
+  label_convention: {rating_-1: 1, rating_0: 0, rating_+1: 0, unknown: masked}
+  masked: [unrated, flagged, contradictory within record, conflicting across duplicate annotations,
+           off_branch, no_original_completion, never-labeled later steps]
+  dropped_records: [bad_problem finish_reason, malformed, no trustworthy label]
+  dedup: (normalized problem text, exact step list); agreeing labels merged
+  problem_identity: sha1 of NFKC + lowercase + whitespace-collapsed problem text
+  pb_overlap: exact and normalized problem-text match against all four PB subsets; overlapping
+    PRM problems removed from every PRM split
+  splits: NEW problem-disjoint 80/10/10 (train/val/test), val halved into dev/calib,
+    seed 1729, stratified by "problem has an erroneous trajectory". Old membership not
+    reused (record-level pseudo problem ids; see data_audit.json old_split_recoverability)
+  prevalence: natural, no rebalancing
+  context_cap_tokens: 8192   # audit: max trace 2583 tokens, 0 exclusions
+
+backbone:
+  model: Qwen/Qwen3-8B
+  revision: b968826d9c46dd6066d109eabc6255188de91218
+  tokenizer_json_sha256: aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4
+  config_json_sha256: f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30
+  runtime: python 3.12.4, torch 2.14.1, CUDA 13.2, transformers 5.18.0 (TamIA wheelhouse)
+  mode: frozen, eval(), no grad, causal attention, sdpa
+  dtype: bfloat16 forward, float16 storage
+  hidden_states_index: 35   # output of decoder block 34 of 36 (hidden_states[0] = embeddings)
+  format: "Problem:\n{problem}\n\nSolution:\n" + steps joined by "\n\n" (tokenize_solution,
+    additive boundaries, no chat template)
+  store: node-local $SLURM_TMPDIR, 32 token-balanced shards (shared storage lacks 293 GiB)
+
+probe:
+  input: all prefix tokens, all step tokens, one copied pre-step boundary per step
+  separators: excluded except as the next step's boundary copy (sees only earlier steps)
+  in_norm: LayerNorm(4096) per token
+  projection: Linear(4096 -> 256)
+  transformer: {layers: 2, heads: 4, d: 256, ff: 1024, dropout: 0.1, prenorm: true}
+  positions: sinusoidal absolute token position + sinusoidal step index (prefix: none)
+  roles: learned {prefix, boundary, token, query}
+  readout: shared learned query per step (query position = last token of the step);
+    queries read keys, never are keys
+  head: Linear(256 -> 1), sigmoid = P(incorrect); validity = 1 - P
+  arms:
+    local: prefix + own step (incl. boundary)
+    causal: prefix + steps <= i
+    future1: physically cropped view through step i+1; rows owned by j read <= j+1
+    full: prefix + all steps
+    prefix_rows: read prefix only (all arms)
+
+training:
+  loss: BCE, mean over labeled steps of a trajectory, mean over trajectories
+  optimizer: AdamW
+  lr_grid: [1.0e-4, 3.0e-4, 1.0e-3]
+  wd_grid: [0.01, 0.1]
+  effective_batch_trajectories: 32 (length-bucketed, buckets of 50 batches)
+  max_epochs: 30
+  patience: 5 (dev step F1, best threshold, higher threshold on ties)
+  grad_clip: 1.0
+  autocast: bfloat16
+  search: {seed: 0, arms: [causal, full], settings: 6, selection: max mean dev F1 of the two arms}
+  final: {seeds: [42, 43, 44], arms: [local, causal, future1, full]}
+  pairing: per seed, identical init (seeded build), identical batch order/membership
+
+evaluation:
+  threshold: best incorrect-step F1 on labeled PRM calib steps (higher wins ties), frozen
+  prm_test: [F1@calib, oracle F1, AUROC, precision, recall, prevalence, always-positive F1,
+             rating-0 slice, targets-with-future slice]
+  processbench: [known-label step F1/AUROC, F1_PB first crossing, Acc_error, Acc_correct,
+                 exact localization, oracle threshold, always-no-error, always-step-0,
+                 premature/late rates]
+  bootstrap: 10000 paired resamples clustered by problem, fixed thresholds
+  structural_baseline: logistic on [step index, target tokens, prefix tokens, later steps, later tokens]
+  diagnostics: 256 known-label eval targets with >=2 later steps, seed 1729:
+    [unchanged, shuffled later steps (re-encoded), final answer removed (re-encoded), future hidden]

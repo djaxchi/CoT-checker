@@ -1,0 +1,13 @@
+# 12 search fits: seed 0, arms causal/full, lr x wd grid; one process per fit (pairing holds: seeded init + seed-only sampler)
+search_lr1e-4_wd0.01_causal --arms causal --seed 0 --lr 1e-4 --wd 0.01 --score_splits dev
+search_lr1e-4_wd0.01_full --arms full --seed 0 --lr 1e-4 --wd 0.01 --score_splits dev
+search_lr1e-4_wd0.1_causal --arms causal --seed 0 --lr 1e-4 --wd 0.1 --score_splits dev
+search_lr1e-4_wd0.1_full --arms full --seed 0 --lr 1e-4 --wd 0.1 --score_splits dev
+search_lr3e-4_wd0.01_causal --arms causal --seed 0 --lr 3e-4 --wd 0.01 --score_splits dev
+search_lr3e-4_wd0.01_full --arms full --seed 0 --lr 3e-4 --wd 0.01 --score_splits dev
+search_lr3e-4_wd0.1_causal --arms causal --seed 0 --lr 3e-4 --wd 0.1 --score_splits dev
+search_lr3e-4_wd0.1_full --arms full --seed 0 --lr 3e-4 --wd 0.1 --score_splits dev
+search_lr1e-3_wd0.01_causal --arms causal --seed 0 --lr 1e-3 --wd 0.01 --score_splits dev
+search_lr1e-3_wd0.01_full --arms full --seed 0 --lr 1e-3 --wd 0.01 --score_splits dev
+search_lr1e-3_wd0.1_causal --arms causal --seed 0 --lr 1e-3 --wd 0.1 --score_splits dev
+search_lr1e-3_wd0.1_full --arms full --seed 0 --lr 1e-3 --wd 0.1 --score_splits dev

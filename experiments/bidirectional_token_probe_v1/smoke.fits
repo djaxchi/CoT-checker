@@ -1,0 +1,4 @@
+# smoke: timing for all four arms, finite gradients, dev selection, all-step scoring
+smoke_arms --arms local causal future1 full --seed 0 --lr 3e-4 --wd 0.01 --max_epochs 2 --patience 5 --ckpt_every 10 --limit_dev 64 --score_splits dev pb_gsm8k
+# tiny-real-data overfit: train == dev subset, no regularisation
+smoke_overfit --arms causal full --seed 0 --lr 1e-3 --wd 0.0 --dropout 0.0 --max_epochs 40 --patience 40 --dev_split train --limit_train 64 --limit_dev 64 --score_splits

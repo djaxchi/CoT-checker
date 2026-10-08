@@ -1,0 +1,13 @@
+# perf smoke: 12 one-arm processes (GPUs 0-3 host two each, 4-7 one), 1 epoch, timing only
+perf_s1_local --arms local --seed 1 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s1_causal --arms causal --seed 1 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s1_future1 --arms future1 --seed 1 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s1_full --arms full --seed 1 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s2_local --arms local --seed 2 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s2_causal --arms causal --seed 2 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s2_future1 --arms future1 --seed 2 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s2_full --arms full --seed 2 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s3_local --arms local --seed 3 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s3_causal --arms causal --seed 3 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s3_future1 --arms future1 --seed 3 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath
+perf_s3_full --arms full --seed 3 --lr 3e-4 --wd 0.01 --max_epochs 1 --ckpt_every 25 --limit_dev 400 --score_splits pb_omnimath

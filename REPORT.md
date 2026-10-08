@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-10-03. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-08. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18).
 
 ## 1. Hypothesis
 
@@ -1653,6 +1653,15 @@ that generation should be abandoned rather than resumed, and stages 2 and 3
 tested) should not run.
 
 ### Next Step
+
+*Qualification added 2026-10-05 (§21.16).* The measurements above stand, but
+they do not establish that later steps carry no usable information. They test
+mean-pooled future states and deltas fed to a linear readout, cross-validated
+within ProcessBench. §21.16 tests direct token-level attention to later steps
+with a trained transformer readout, on frozen Qwen3-8B Instruct states, trained on
+PRM800K trajectories; that design also finds no gain (full - causal: PRM800K
+step F1 -0.026, ProcessBench mean F1_PB -0.022). Both nulls are bounded by their
+representation, readout and supervision.
 
 The future-aware arm is closed: the ceiling test says the information is not
 there, so no deployable version of it can help, and the generation job that would
@@ -3611,7 +3620,323 @@ the head reads its state, and test whether LDA on that state closes the 0.04 gap
 to the head. Figures: `results/prm_geometry_v1/{methods_auroc,lda_topk,pc_auroc,views_boundary_stats}.png`.
 
 
+### 21.16 Direct Attention to Later Steps (bidirectional_token_probe_v1)
+
+*Updated: 2026-10-05. Plan: `docs/bidirectional_token_probe_v1_plan.md`.*
+
+**Context.** §19.1 measured future context only through pooled vectors and a
+linear readout. This asks whether a trained probe that attends token by token to
+later reasoning steps judges a target step better than a matched probe that sees
+only the step and its past.
+
+**What was done.** `scripts/build_prm800k_trajectory_dataset.py` and
+`src/data/prm_trajectories.py` rebuilt PRM800K phase 2 (train and test files,
+100,544 records) around the original generated solution,
+`question.pre_generated_steps`. A step keeps its human label only if a rated
+completion's text equals the original step and every earlier position advanced
+with the original text. 43 records diverged onto a human repair or an
+alternative, and their later labels were masked. Ratings map -1 to incorrect,
+and 0 and +1 to correct. Deduplication collapsed 23,437 repeated annotations and
+masked 1,784 conflicting positions, leaving 75,553 unique trajectories. 851
+problems match ProcessBench math by exact text and were removed with their
+5,342 trajectories. The old split was unusable: 861 of 873 old-val and 375 of
+378 old-test canonical problems also sit in old train, because the old builder
+keyed problems by record. New problem-disjoint splits (seed 1729, stratified by
+erroneous trajectory) hold train 56,222, dev 3,374, calib 3,387 and test 7,228
+traces. Train carries 47,885 incorrect and 329,625 correct labeled steps, plus
+372,887 unlabeled later steps that stay in the input. Every trace fits under the
+8,192-token cap (maximum 2,583).
+
+`scripts/encode_trajectory_token_store.py` ran Qwen3-8B (revision b968826,
+bf16) once per complete trajectory in a fixed reading format ("Problem: ...
+Solution: ..." with steps joined by blank lines). It stored every token's
+`hidden_states[35]` in fp16: 73,611 traces, 38,461,459 tokens, 294 GB. Shared
+scratch had 126 GB free, so each job encoded onto node-local disk, which took
+268 s on 8 H200s. On the smoke run, prefix-only and full-trace encodings were
+bit-identical on shared positions.
+
+`src/probes/contextual_token_probe.py` projects each frozen state (LayerNorm,
+then Linear 4096 to 256) and adds a copied pre-step boundary row per step. Two
+pre-norm transformer layers follow (4 heads, FF 1024, dropout 0.1), then one
+learned query per step that reads token keys and is never a key. Every condition
+has the same 2,638,593 parameters. The conditions differ only in visibility:
+
+* `local`: prefix plus the step's own rows.
+* `causal`: prefix plus steps up to i.
+* `future1`: a view physically cropped after step i+1.
+* `full`: every step.
+
+Prefix rows read only the prefix in every condition, so they cannot relay the
+future. Unit tests perturb later steps and check that causal and future1 outputs
+cannot move through any layer (`tests/probes/test_contextual_token_probe.py`,
+42 tests in total).
+
+The loss is BCE averaged over a trajectory's labeled steps, then over 32
+trajectories. Twelve search fits (causal and full, lr x wd, seed 0) selected lr
+1e-4 and wd 0.1 on PRM dev F1 (mean 0.6118). Twelve final fits followed: 4
+conditions x seeds 42, 43, 44, with shared initial weights and batch order
+within a seed. Each final froze its threshold on PRM calib steps, and
+`scripts/eval_contextual_token_probe.py` applied it unchanged to PRM test and
+ProcessBench. The whole roster ran in one H200:8 job in 2 h 00 m (TamIA 506725).
+
+**Results.** Seed means; contrasts are paired, with 95% problem-clustered
+bootstrap intervals (10,000 resamples):
+
+| | local | causal | future1 | full |
+|---|---|---|---|---|
+| PRM test step F1 (calib thr) | **0.613** | 0.607 | 0.592 | 0.582 |
+| PRM test AUROC | **0.907** | 0.905 | 0.898 | 0.893 |
+| ProcessBench mean F1_PB (calib thr) | 0.643 | **0.650** | 0.613 | 0.629 |
+
+| contrast | PRM step F1 | ProcessBench mean F1_PB |
+|---|---|---|
+| full - causal | -0.0255 [-0.0307, -0.0202] | -0.0215 [-0.0333, -0.0097] |
+| future1 - causal | -0.0149 [-0.0199, -0.0099] | -0.0367 [-0.0494, -0.0240] |
+| causal - local | -0.0060 [-0.0098, -0.0024] | +0.0067 [-0.0031, +0.0166] |
+
+Always-positive F1 on PRM test is 0.222 (prevalence 12.5%).
+
+* **full - causal by seed.** PRM F1 is -0.019, -0.023 and -0.035, each with an
+  interval below zero. ProcessBench F1_PB is -0.036, -0.030 and +0.002.
+* **full - causal by subset.** F1_PB is +0.001 (gsm8k), -0.020 (math), -0.066
+  (olympiadbench) and -0.002 (omnimath). Known-label step AUROC drops by 0.015
+  to 0.026 on every subset.
+
+The controls:
+
+* **Structural baseline.** A logistic model on step index, step length, prefix
+  length, later-step count and later-token count reaches PRM F1 0.311 and AUROC
+  0.675. At its calibrated threshold it flags every correct ProcessBench trace,
+  so its F1_PB is 0.
+* **Perturbation diagnostic.** 256 stratified targets with at least two later
+  steps, scored by the full models:
+  * Hiding the future raises P(incorrect) by 0.062 on average (0.093 on
+    incorrect targets), and fixed-threshold F1 rises from 0.783 to 0.816.
+  * Shuffling later steps lowers AUROC from 0.921 to 0.898.
+  * Removing final-answer text changes scores by 0.005 on average.
+  * Causal scores stay exactly unchanged under every variant.
+
+Full reference: `results/bidirectional_token_probe_v1/summary.md`.
+
+**Interpretation.** On these frozen states, direct attention to later steps
+lowers step F1 and AUROC on PRM800K, and the loss transfers to ProcessBench. The
+loss grows with horizon on PRM800K. Position and continuation cues do not
+explain the probes: the structural baseline sits about 0.3 F1 below every
+probe. The diagnostic shows that the full probe reads the order of the
+continuation, not the final answer. On incorrect targets, a visible
+continuation lowers its alarm on average.
+
+The label structure gives one plausible account. Under first-error labels,
+"some error is visible in my context" equals the label for every labeled causal
+target. A full-context query sees the error in every erroneous trace and must
+localize it, and its training curves start lower and peak lower (dev F1 0.598
+vs 0.625). Explicit keys for earlier steps add nothing over the step's own
+prefix-conditioned states (causal - local is about 0). The null bounds this
+layer, this two-layer readout with absolute step encodings, and first-error
+supervision. It does not show that later text lacks information.
+
+These ProcessBench numbers are not matched to §21.12 or §21.15. Those
+leaderboards used a verifier template, candidate-fork training and calib-20
+thresholds.
+
+**Next step.** None for the future-aware readout at this scale. Test a target
+that is not tied to first-error structure, such as post-error labels from a
+small annotated set, before revisiting future access.
+
+*Follow-up 2026-10-05:* §21.17 ran that test with ReProbe's all-step DeepSeek-R1
+labels. The deficit persisted.
+
+### 21.17 All-Step Labels Do Not Rescue Future Access (bidirectional_token_probe_v2)
+
+*Updated: 2026-10-05. Plan: `docs/bidirectional_token_probe_v2_plan.md`.*
+
+**Context.** §21.16 blamed first-error supervision for the full probe's deficit:
+under it, "an error is visible in my context" equals the label for every labeled
+causal target. This test removes that coupling and changes nothing else.
+
+**What was done.** ReProbe (Ni et al., arXiv 2511.06209) publishes Qwen3-8B's
+own solutions to 10,827 PRM800K problems, with step labels from two annotators:
+DeepSeek-R1 (`rediska0123/train_prm800k_Qwen3-8B_finished`, rev 13cb942) and
+Qwen3-8B itself (`JingweiNi/train_prm800k_Qwen3-8B_finished_self_annotate`, rev
+672bf94). Both cover the same 32,484 replies and label every step.
+
+`scripts/build_reprobe_trajectory_dataset.py` and
+`src/data/reprobe_trajectories.py` parsed these into 32,143 unique trajectories,
+with 0 alignment failures and 834 length-truncated final steps masked. Each
+problem inherits its §21.16 split. The 752 problems that overlap ProcessBench
+were removed from training, dev, calib and test, which keeps all 3,400
+ProcessBench traces in evaluation.
+
+On the held-out test, 1,449 labeled steps follow a first error, and 56% of them
+are labeled correct. The labels still carry a cue: P(incorrect | an earlier
+labeled error) = 0.438, against 0.037 with none.
+
+Encoder, probe, grid, seeds and threshold rule are §21.16's. The search
+reselected lr 1e-4 and wd 0.1. Search, finals (one H100:4 node per seed) and six
+self-label fits ran in parallel. TamIA jobs: 507208, 507234 to 507240, 507255.
+
+**Results.** Seed means, with paired problem-clustered bootstrap intervals:
+
+| | local | causal | future1 | full |
+|---|---|---|---|---|
+| held-out test step F1 (DeepSeek labels) | 0.524 | **0.531** | 0.508 | 0.512 |
+| steps after the first error, AUROC | **0.741** | 0.697 | 0.688 | 0.694 |
+| PRM800K human test F1 | **0.518** | 0.424 | 0.421 | 0.405 |
+| ProcessBench mean F1_PB | 0.625 | **0.627** | 0.515 | 0.489 |
+
+full - causal, by evaluation set:
+
+* Held-out test: -0.019 F1 [-0.035, -0.004].
+* Steps after the first error: -0.019 [-0.040, -0.000].
+* Steps up to and including the first error: -0.027 [-0.048, -0.008].
+* ProcessBench mean F1_PB: -0.138 [-0.156, -0.120]. Every subset and seed is
+  negative, down to -0.207 on OlympiadBench.
+
+The self-labeled arm repeats the pattern: -0.033 F1 on the held-out test and
+-0.170 F1_PB. The two annotators agree on 97.0% of steps (kappa 0.778).
+
+The structural baseline reaches test F1 0.207. In the perturbation diagnostic,
+hiding the future from the full models raises their AUROC from 0.852 to 0.907,
+and shuffling the later steps lowers it to 0.777. Removing the final answer
+moves it by less than 0.002.
+
+Full reference: `results/bidirectional_token_probe_v2/summary.md`.
+
+**Interpretation.** The prespecified prediction failed. If first-error coupling
+caused the deficit, full - causal would have been less negative after the first
+error than before it. The two estimates (-0.019 and -0.027) overlap, and both
+are below zero.
+
+On these states, then, the probe gains nothing from later tokens even when later
+steps are labeled. Their order changes its scores, and on this sample it ranks
+better without them.
+
+Context also hurts in the slice where it should help most. Among post-error
+steps, the probe that sees only the current step ranks best. Its gap over causal
+is 0.044 AUROC [0.026, 0.063], consistent with context probes leaning on "an
+error already happened" (the residual 0.438 vs 0.037 cue).
+
+Transfer worsened rather than improved. Against v1, the full probe's
+ProcessBench deficit grew from 0.022 to 0.138 F1_PB. local also transferred best
+to human-labeled PRM800K (0.518 vs causal 0.424).
+
+The result bounds this layer, this two-layer readout, this frozen backbone and
+LLM-judge labels. It does not show that later text carries no information.
+
+**Next step.** Close future-token access for frozen single-layer readouts. The
+`local` advantage on post-error ranking and on human-label transfer is the more
+promising signal: test whether stripping context, rather than adding it,
+improves out-of-domain localization.
+
 ---
+
+### 21.18 Stripping Backbone Context Hurts Everywhere (context_ablation_v3)
+
+*Updated: 2026-10-08. Plan: `docs/context_ablation_v3_plan.md`.*
+
+**Context.** §21.17 found that `local`, the probe that sees only the current
+step, ranked post-error steps best and transferred best to human labels. This
+test moves the restriction into the backbone. Qwen3-8B re-encodes each step
+under less context, and we ask whether out-of-domain localization improves.
+
+**What was done.** `scripts/build_context_views.py` built four views of every
+step, 200,649 per context:
+
+* `full`: all prior steps;
+* `prev1`: the previous step only;
+* `q`: the problem plus the step;
+* `none`: the step alone.
+
+The encoder stores only the target step's tokens, so the probe input layout is
+identical across contexts. Probe settings:
+
+* the `local` arm on layer 35, lr 1e-4, wd 0.1;
+* seeds 42, 43 and 44;
+* thresholds selected on calib and held fixed.
+
+There were two training sources:
+
+* PRM800K human labels (`v1human`), with in-domain test on PRM800K human test;
+* ReProbe DeepSeek-R1 labels (`v2ds`), with in-domain test on ReProbe test.
+
+Each source was also scored on the other source's test set and on all of
+ProcessBench, with the 752 overlap problems excluded from v2ds training.
+`scripts/collect_context_views.py` mapped predictions back to steps. Contrasts
+use 10,000 problem-clustered bootstrap resamples.
+
+All 24 fits ran on TamIA: jobs 509448 (full), 512024 (prev1), cav3_q2 and
+cav3_none2. A Rorqual mirror was built as a hedge and cancelled unused.
+
+**Results.** Seed means:
+
+| | full | prev1 | q | none |
+|---|---|---|---|---|
+| v1human in-domain F1 (always-positive 0.221) | **0.602** | 0.537 | 0.452 | 0.413 |
+| v1human in-domain AUROC | **0.905** | 0.876 | 0.831 | 0.794 |
+| v1human ReProbe test F1 | **0.465** | 0.353 | 0.318 | 0.295 |
+| v1human ProcessBench mean F1_PB | **0.648** | 0.493 | 0.305 | 0.366 |
+| v2ds in-domain F1 (always-positive 0.131) | **0.523** | 0.442 | 0.409 | 0.338 |
+| v2ds in-domain AUROC | **0.907** | 0.878 | 0.862 | 0.803 |
+| v2ds PRM800K human test F1 | **0.519** | 0.430 | 0.357 | 0.307 |
+| v2ds ProcessBench mean F1_PB | **0.586** | 0.451 | 0.403 | 0.412 |
+
+In-domain oracle F1 sits within 0.01 of the calib-threshold F1 for every context.
+
+The main contrast, q - full, has 95% intervals that exclude 0 on every set:
+
+* v1human:
+  * in-domain F1 -0.150 [-0.164, -0.137];
+  * ProcessBench F1_PB from -0.220 (GSM8K) to -0.473 (OlympiadBench).
+* v2ds:
+  * in-domain F1 -0.114 [-0.140, -0.090];
+  * PRM800K human test F1 -0.162 [-0.177, -0.147];
+  * ProcessBench F1_PB from -0.129 (Omni-MATH) to -0.222 (GSM8K).
+
+`prev1 - full` and `none - full` are also negative on every ProcessBench subset
+for both sources.
+
+The loss concentrates in steps up to and including the first error. Measured
+as ReProbe test AUROC:
+
+* v1human: full 0.901, q 0.796 up to the first error; full 0.696, q 0.719 after
+  it.
+* v2ds: full 0.916, q 0.849 up to the first error; full 0.721, q 0.738 after
+  it.
+
+Post-error AUROC q - full is +0.023 [-0.016, 0.062] for v1human and +0.017
+[-0.012, 0.046] for v2ds. Post-error F1 q - full changes sign between sources:
++0.052 for v1human and -0.056 for v2ds.
+
+Full reference: `results/context_ablation_v3/summary.md`. Figures:
+`results/context_ablation_v3/figures/{headline,contrasts,pre_post}.png`.
+
+**Interpretation.** The prespecified prediction failed. It required q - full
+above 0 on ProcessBench mean F1_PB for both sources. The observed values are
+-0.343 and -0.183. The ordering is full > prev1 > q > none on every in-domain
+and cross-dataset metric, the reverse of the predicted full ≤ prev1 ≤ q.
+
+The prior solution in the backbone's context carries most of the correctness
+signal for steps up to the first error, which are the steps that matter for
+first-error localization. Without the solution so far, the bare problem adds
+nothing on ProcessBench: `none` beats `q` on mean F1_PB in both sources (0.366
+vs 0.305, 0.412 vs 0.403).
+
+The small post-error gain for `q` repeats §21.17's `local` advantage on that
+slice. Context helps the model judge whether a step follows from correct work,
+and it partly misleads after an error. Its intervals include 0.
+
+Together with §21.16 and §21.17, the evidence favors this setting:
+
+* causal backbone context (all prior steps);
+* a probe that reads only the current step's tokens.
+
+Both narrower backbone context and wider probe attention lost.
+
+**Next step.** Fix the input as causal-context states read by the `local` probe.
+Stop varying context for this layer and readout.
+
+---
+
 
 ## 22. Limitations
 
@@ -3951,6 +4276,17 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-05 (§21.17).* All-step DeepSeek-R1 labels on Qwen3-8B's own
+trajectories did not rescue future access (full - causal -0.019 step F1, -0.138
+ProcessBench F1_PB). The next probe-design question is whether less context
+(the `local` readout) transfers better, not whether more context helps.
+
+*Addendum 2026-10-05 (§21.16).* Future-token access is closed at this scale:
+direct token attention to later steps lowered PRM800K step F1 by 0.026 and
+ProcessBench F1_PB by 0.022 against a matched causal probe. The trajectory
+dataset and token store it built (`results/bidirectional_token_probe_v1/`) give
+every later causal-probe study one aligned, problem-disjoint PRM800K population.
 
 *Current plan, 2026-09-28, after §21.12. Qwen3-8B Instruct is the primary
 policy. Earlier plans below remain historical.*

@@ -1,0 +1,1 @@
+--label_override ${MANIFEST}/meta_self --score_splits dev calib test prm_human_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath

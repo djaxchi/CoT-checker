@@ -1,0 +1,2 @@
+smoke_v2 --arms causal full --seed 0 --lr 3e-4 --wd 0.01 --max_epochs 2 --ckpt_every 10 --limit_dev 64 --score_splits dev test pb_gsm8k
+smoke_v2_self --arms causal --seed 0 --lr 3e-4 --wd 0.01 --max_epochs 1 --limit_dev 64 --score_splits test --label_override ${MANIFEST}/meta_self

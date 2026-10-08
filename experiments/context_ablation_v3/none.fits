@@ -1,0 +1,7 @@
+# context_ablation_v3: ctx=none, local readout, v1 selected HP, seeds 42-44, both sources
+none_v1human_s42 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split v1_train --dev_split v1_dev --bucket_by step --score_splits v1_dev v1_calib prm_human_test rp_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath
+none_v1human_s43 --arms local --seed 43 --lr 1e-4 --wd 0.1 --train_split v1_train --dev_split v1_dev --bucket_by step --score_splits v1_dev v1_calib prm_human_test rp_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath
+none_v1human_s44 --arms local --seed 44 --lr 1e-4 --wd 0.1 --train_split v1_train --dev_split v1_dev --bucket_by step --score_splits v1_dev v1_calib prm_human_test rp_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath
+none_v2ds_s42 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split v2_train --dev_split v2_dev --bucket_by step --score_splits v2_dev v2_calib rp_test prm_human_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath
+none_v2ds_s43 --arms local --seed 43 --lr 1e-4 --wd 0.1 --train_split v2_train --dev_split v2_dev --bucket_by step --score_splits v2_dev v2_calib rp_test prm_human_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath
+none_v2ds_s44 --arms local --seed 44 --lr 1e-4 --wd 0.1 --train_split v2_train --dev_split v2_dev --bucket_by step --score_splits v2_dev v2_calib rp_test prm_human_test pb_gsm8k pb_math pb_olympiadbench pb_omnimath

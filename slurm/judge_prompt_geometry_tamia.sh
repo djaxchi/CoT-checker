@@ -21,7 +21,7 @@ echo "git $(git rev-parse --short HEAD)"
 virtualenv --no-download "$SLURM_TMPDIR/env" >/dev/null
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip >/dev/null
-pip install --no-index torch numpy 2>&1 | tail -1
+pip install --no-index torch numpy pyyaml 2>&1 | tail -1
 GEO="$RUN/geometry"; mkdir -p "$GEO" "$RUN/logs"
 pids=(); g=0
 for rep in last_token step_mean boundary_stats; do

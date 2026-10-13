@@ -110,9 +110,9 @@ def test_select_quota_order_and_problem_cap():
 
 
 class CharTok:
-    """ids >= 32 are characters; 0 is EOS."""
+    """ids >= 10 are characters (newline included); 0 is EOS."""
     def decode(self, ids, skip_special_tokens=False):
-        return "".join(chr(i) for i in ids if i >= 32)
+        return "".join(chr(i) for i in ids if i >= 10)
 
 
 def ids(s):
@@ -169,3 +169,39 @@ def test_validate_against_track1(tmp_path):
     v = validate(rows, tmp_path, 0.03)
     assert v["n_forks"] == 40 and v["pass"]
     assert v["err_after_minus_err_a"]["mean"] == pytest.approx(0.0)
+
+
+def claim(sent, lo):
+    return {"sentence": sent, "aligned_token_ids": list(range(lo, lo + len(sent)))}
+
+
+def test_parse_unfinished_row_keeps_complete_lines():
+    from src.analysis.step_value_labels import parse_unfinished_row
+    l1, l2, frag = "- Step 1: a\n", "- Step 2: bb\n", "- Step 3: cut"
+    prompt = [1, 2]
+    reply = ids(l1 + l2 + frag)
+    cl = [claim(l1, 0), claim(l2, len(l1)), claim(frag, len(l1) + len(l2))]
+    p, why = parse_unfinished_row(prompt + reply, prompt, cl, CharTok().decode, EOS)
+    assert why == "ok"
+    assert p["step_spans"] == [(0, 12), (12, 25)] and p["end"] == 25 and p["n_dropped_tokens"] == len(frag)
+    assert p["reply_ids"] == reply[:25] and p["step_claim_idx"] == [0, 1]
+    assert parse_unfinished_row(prompt + reply + [EOS], prompt, cl, CharTok().decode, EOS)[1] == "has_eos"
+    assert parse_unfinished_row([9] + reply, prompt, cl, CharTok().decode, EOS)[1] == "prompt_mismatch"
+
+
+def test_batches_respect_row_and_token_caps():
+    from src.analysis.step_value_labels import _batches
+    assert _batches([0, 1, 2, 3, 4], [10] * 5, 2, None, 8) == [[0, 1], [2, 3], [4]]
+    # (rows) x (longest + chunk) <= 60: 3 rows of length 10 with chunk 10 fit, a 4th does not
+    assert _batches([0, 1, 2, 3], [10, 10, 10, 10], 99, 60, 10) == [[0, 1, 2], [3]]
+    # a long row starts its own batch once it would push the padded size over the cap
+    assert _batches([0, 1, 2], [5, 5, 50], 99, 70, 5) == [[0, 1], [2]]
+
+
+def test_sample_rounds_pool_rebatches_running_rows():
+    seqs = {r: [5] * (3 if r < 4 else 9) + [EOS] for r in range(6)}
+    calls = []
+    res = sample_rounds(scripted_gen(seqs, calls), [[r] for r in range(6)], [50] * 6, {EOS}, chunk=4, batch=4)
+    assert all(x["eos"] for x in res) and [len(x["ids"]) for x in res] == [4] * 4 + [10] * 2
+    assert calls[:2] == [(4, 4), (2, 4)]       # round 1: two batches of the 6 rows
+    assert calls[2][0] == 2                     # round 2: only the 2 long rows, one batch

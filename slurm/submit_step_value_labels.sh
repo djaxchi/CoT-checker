@@ -1,7 +1,9 @@
 #!/bin/bash
 # Submit step_value_labels_v1 from the TamIA login node.
-#   bash submit_step_value_labels.sh <snapshot_dir> [smoke|validate|full] [nodes]
+#   bash submit_step_value_labels.sh <snapshot_dir> [smoke|smoke_label|validate|full] [nodes]
 # smoke:    trace_set_validate.json, 2 traces per shard, k=16, 20 min, into $R/smoke.
+# smoke_label: trace_set_label.json, 24 traces per shard (memory and throughput on
+#           the label distribution), 30 min, into $R/smoke_label.
 # validate: the 501 factorized_step_labels_v1 forks, cuts [s, s+1], k=16, one node,
 #           into $R/validate. Gate (plan section 4) is checked by summarize_values.py
 #           against the full run's track-1 shards before any label run.
@@ -16,7 +18,7 @@ NODES="${3:-4}"
 R=/project/aip-azouaq/$USER/cot_mech/step_value_labels_v1
 case "$MODE" in
   smoke|validate) TAG=validate ;;
-  full) TAG=label ;;
+  full|smoke_label) TAG=label ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 python3 - "$R/split" "build_audit_$TAG.json" <<'PY'
@@ -29,7 +31,8 @@ for name, want in audit["outputs"].items():
 print("trace set checksums ok")
 PY
 OUT=$R/$MODE; [[ "$MODE" == full ]] && OUT=$R/label
-if [[ "$MODE" != smoke && -n "$(ls "$OUT"/values.shard*.jsonl 2>/dev/null)" ]]; then
+OUT="$OUT${OUT_SUFFIX:-}"   # e.g. OUT_SUFFIX=_v2 for a second validate run
+if [[ "$MODE" != smoke* && -n "$(ls "$OUT"/values.shard*.jsonl 2>/dev/null)" ]]; then
   echo "[FATAL] $OUT already has outputs (resume with RESUME=1 by hand)" >&2; exit 2
 fi
 mkdir -p "$OUT/logs"
@@ -39,6 +42,7 @@ sb() { sbatch --parsable --output="$OUT/logs/%x-%j.out" --export=ALL,SNAP=$SNAP,
 S="$SNAP/slurm/step_value_labels_tamia.sh"
 case "$MODE" in
   smoke) j=$(EXTRA="$EXTRA,LIMIT=2" sb --time=00:20:00 --job-name=svl_smoke "$S"); echo "smoke $j" | tee -a "$JOBS" ;;
+  smoke_label) j=$(EXTRA="$EXTRA,LIMIT=24" sb --time=00:30:00 --job-name=svl_smokel "$S"); echo "smoke_label $j" | tee -a "$JOBS" ;;
   validate) j=$(sb --time="${TIME:-01:00:00}" --job-name=svl_val "$S"); echo "validate $j" | tee -a "$JOBS" ;;
   full)
     for ((g = 0; g < NODES; g++)); do

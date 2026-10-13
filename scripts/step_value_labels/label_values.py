@@ -9,10 +9,11 @@ of the reply, under factorized_step_labels_v1's sampler (T=1.0, top-p 0.95,
 top-k 50, reply cap 4,096 tokens counted from the reply start). Contexts are the
 released token ids, never re-tokenized text.
 
-Throughput: the rollouts of several traces are batched (left-padded, --gen_batch
-rows) and sampled in rounds of --chunk new tokens; rows that have not ended are
-carried into the next round (src/analysis/step_value_labels.sample_rounds), so a
-rare runaway row does not hold its batch to the cap.
+Throughput: the rollouts of several traces (about --pool_rows rows) are sampled
+together in rounds of --chunk new tokens, left-padded batches of at most
+--gen_batch rows and --max_batch_tokens padded tokens; rows that have not ended
+are re-batched into the next round (src/analysis/step_value_labels.sample_rounds),
+so batches stay full and a rare runaway row does not hold a batch to the cap.
 
 All rollouts of a trace are graded together with the project grader (one grade per
 answer identity, as in track 1). Output per shard: values.shardNN.jsonl, one row
@@ -63,7 +64,8 @@ def label_group(gen, tok, traces: list[tuple[int, dict]], args, eos_ids) -> list
         for c, off in zip(t["cuts"], t["cut_offsets"]):
             ctx = t["prompt_ids"] + t["reply_ids"][:off]
             rows += [(ti, c, ctx, args.max_reply_tokens - off)] * args.k
-    res = sample_rounds(gen, [r[2] for r in rows], [r[3] for r in rows], eos_ids, args.chunk, args.gen_batch)
+    res = sample_rounds(gen, [r[2] for r in rows], [r[3] for r in rows], eos_ids, args.chunk, args.gen_batch,
+                        getattr(args, "max_batch_tokens", None))
     out = []
     for ti, (fi, t) in enumerate(traces):
         mine = [(r, x) for r, x in zip(rows, res) if r[0] == ti]
@@ -100,8 +102,11 @@ def main() -> None:
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--top_k", type=int, default=50)
     p.add_argument("--max_reply_tokens", type=int, default=4096)
-    p.add_argument("--chunk", type=int, default=512, help="new tokens per sampling round")
-    p.add_argument("--gen_batch", type=int, default=128, help="rows per generate call")
+    p.add_argument("--chunk", type=int, default=128, help="new tokens per sampling round")
+    p.add_argument("--gen_batch", type=int, default=256, help="max rows per generate call")
+    p.add_argument("--max_batch_tokens", type=int, default=256_000,
+                   help="max padded tokens (rows x (longest context + chunk)) per generate call")
+    p.add_argument("--pool_rows", type=int, default=2048, help="rollouts sampled together (whole traces)")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
@@ -144,14 +149,15 @@ def main() -> None:
     eos_ids = {tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")}
     gen = make_gen(model, a, pad_id, device)
     print(f"[val] shard {a.shard_idx}/{a.num_shards}: {len(traces)} traces, k={a.k} T={a.temperature} "
-          f"top_p={a.top_p} top_k={a.top_k} cap={a.max_reply_tokens} chunk={a.chunk} batch={a.gen_batch}",
+          f"top_p={a.top_p} top_k={a.top_k} cap={a.max_reply_tokens} chunk={a.chunk} batch={a.gen_batch} "
+          f"max_batch_tokens={a.max_batch_tokens} pool={a.pool_rows}",
           flush=True)
 
-    # groups of whole traces with about gen_batch rollouts each; one seed per group
+    # pools of whole traces with about pool_rows rollouts each; one seed per pool
     groups, cur, rows = [], [], 0
     for it in traces:
         cur.append(it); rows += len(it[1]["cuts"]) * a.k
-        if rows >= a.gen_batch:
+        if rows >= a.pool_rows:
             groups.append(cur); cur, rows = [], 0
     if cur:
         groups.append(cur)

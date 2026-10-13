@@ -91,8 +91,27 @@ Each set is frozen to JSON before any job (`scripts/step_value_labels/build_trac
   * `error`: at least one DeepSeek-incorrect step. All of them.
   * `hard_clean`: no DeepSeek error, on a problem where some trace has a labeled error or a wrong answer. As many as `error`.
   * `easy`: the rest. 10% of the two groups above, to anchor the low end.
-* Expected size, from the 8,000-trace capped v2 train set: 1,622 traces with an error, 3,441 incorrect steps. The builder's `--count_only` pass on the full v2 train split fixes the real numbers before the set is frozen.
-* At about 3,200 traces and 7.3 cuts each, the set needs about 370k rollouts. At v1's throughput that is 72 GPU-hours; the validate run measures the batched throughput that sets the walltime.
+* Traces that hit ReProbe's 256-token cap (`--include_unfinished`) join too. They are cut after their last complete step line (`parse_unfinished_row`).
+
+**Amendment 2026-10-13, before any label job: the set includes capped traces.** The count pass showed why finished traces alone are too few:
+
+* Finished traces only: 957 error traces and 1,856 incorrect steps after exclusions. The eval-fork exclusion removed 1,145 traces, mostly from hard problems.
+* The v2 train split holds 11,147 retained traces that hit the cap, 3,058 of them with an error, carrying 5,595 incorrect steps.
+* 97% of them parse: 10,845 ok, 302 decode mismatches. Their step lines are complete and end in a newline, and any cut-off fragment after the last line is dropped.
+* A capped trace's prefixes are policy samples like any other, and its rollouts run to the usual 4,096-token cap.
+
+The frozen set (`trace_set_label.json`, sha256 in `build_audit_label.json`):
+
+| group | finished | capped | traces |
+|---|---|---|---|
+| error | 859 | 2,496 | 3,355 |
+| hard_clean | 569 | 1,196 | 1,765 |
+| easy | 469 | 285 | 754 |
+
+* 5,874 traces from 3,304 problems, with no problem in common with the 531 test forks.
+* 38,190 cuts, so 611k rollouts at k = 16.
+* 6,124 DeepSeek-incorrect steps: 3,355 first errors and 2,769 post-error steps. 1,635 come from finished traces and 4,489 from capped ones.
+* The held-out test forks are all finished first errors. Every step row carries `finished`, so risk_probe_v1 can train with and without capped traces.
 
 ## 4. Gates and outputs
 
@@ -140,5 +159,5 @@ It needs `full` views of the label-set steps at L35. The capped v2_train views c
 
 * Neighboring steps share a cut, so their risk estimates are negatively correlated through it. Evaluation resamples whole traces or problems, never single steps.
 * Risk is defined relative to this policy and sampler. Validity is a property of the text.
-* Every trace comes from a problem ReProbe's Qwen3-8B finished within 256 tokens. That scope limit is inherited from the source data.
+* Finished traces come from problems ReProbe's Qwen3-8B finished within 256 tokens. Capped traces are on average longer and harder, so the label set's mix differs from the finished-only test forks.
 * Post-error steps have a floor effect, so the first-error subset is reported separately and remains the primary target.

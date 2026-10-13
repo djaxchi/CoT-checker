@@ -11,7 +11,10 @@ sample):
   --ds_parquet ...     the label set: whole ReProbe v2 traces (all cuts 0..n),
                        parsed token-exactly as in build_fork_split.py, with every
                        problem of --exclude_fork_splits removed and per-step
-                       DeepSeek and self validity labels attached. Traces fall in
+                       DeepSeek and self validity labels attached. With
+                       --include_unfinished, traces that hit ReProbe's 256-token
+                       cap join too, cut after their last complete step line
+                       (src/analysis/step_value_labels.parse_unfinished_row). Traces fall in
                        three groups, filled in sha1(trace_id) order:
                          error       >= 1 step labeled incorrect by DeepSeek
                          hard_clean  no DeepSeek error, on a problem where some
@@ -37,7 +40,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "factorized_step_labels"))
 
 from src.analysis.factorized_step_labels import gold_answer, grade_fork  # noqa: E402
-from src.analysis.step_value_labels import cut_offsets  # noqa: E402
+from src.analysis.step_value_labels import cut_offsets, parse_unfinished_row  # noqa: E402
 
 GROUPS = ("error", "hard_clean", "easy")
 
@@ -108,8 +111,31 @@ def label_records(a, audit: dict) -> list[dict]:
         sm = self_by.get(m["trace_id"], {"y": [], "label_mask": []})
         hard[m["problem_key"]] |= any(y == 1 and k for y, k in zip(m["y"], m["label_mask"])) or \
             any(y == 1 and k for y, k in zip(sm["y"], sm["label_mask"]))
+    def unfinished():
+        for m in meta:
+            if m.get("finished") or not m.get("retained", True):
+                continue
+            s = self_by.get(m["trace_id"])
+            if s is None:
+                c["unfinished_skip_no_self_labels"] += 1
+                continue
+            row = rows[int(m["source_record_ids"][0].removeprefix("row"))]
+            p, why = parse_unfinished_row(row["input_ids"], p_ids(tok, row), list(row["claims"]), tok.decode, eos_id)
+            c[f"unfinished_parse_{why}"] += 1
+            if p is None:
+                continue
+            if len(p["step_claim_idx"]) > len(m["y"]) or len(m["y"]) != len(s["y"]):
+                c["unfinished_skip_label_length"] += 1
+                continue
+            p["answer_span"] = (p["end"], p["end"])
+            yield m, s, row, p
+
+    import itertools
     recs = []
-    for m, s, row, p in parse_split(meta, self_by, rows, tok, eos_id, c):
+    src = parse_split(meta, self_by, rows, tok, eos_id, c)
+    if a.include_unfinished:
+        src = itertools.chain(src, unfinished())
+    for m, s, row, p in src:
         if m["problem_key"] in excl:
             c["skip_eval_fork_problem"] += 1
             continue
@@ -121,9 +147,11 @@ def label_records(a, audit: dict) -> list[dict]:
         if n < a.min_steps:
             c["skip_short"] += 1
             continue
-        g = grade_fork([{"text": tok.decode(p["reply_ids"], skip_special_tokens=True), "truncated": False}],
+        finished = "end" not in p
+        g = grade_fork([{"text": tok.decode(p["reply_ids"], skip_special_tokens=True), "truncated": not finished}],
                        gold)[0]
-        hard[m["problem_key"]] |= not g["correct"]
+        if finished:                                # a capped trace has no answer to be wrong
+            hard[m["problem_key"]] |= not g["correct"]
         ks = p["step_claim_idx"]
         y_ds = [int(m["y"][k]) for k in ks]
         mask_ds = [bool(m["label_mask"][k]) for k in ks]
@@ -135,7 +163,8 @@ def label_records(a, audit: dict) -> list[dict]:
                      "step_spans": p["step_spans"], "step_claim_idx": ks,
                      "cuts": list(range(n + 1)), "cut_offsets": cut_offsets(p["step_spans"], p["answer_span"][0]),
                      "y_ds": y_ds, "mask_ds": mask_ds, "y_self": y_self, "mask_self": mask_self,
-                     "first_error_ds": first, "orig_pred": g["pred"], "orig_correct": g["correct"]})
+                     "first_error_ds": first, "finished": finished,
+                     "orig_pred": g["pred"], "orig_correct": g["correct"] if finished else None})
     for r in recs:
         r["hard_problem"] = bool(hard[r["problem_key"]])
         r["group"] = "error" if r["first_error_ds"] is not None else ("hard_clean" if r["hard_problem"] else "easy")
@@ -157,6 +186,8 @@ def main() -> None:
     ap.add_argument("--n_hard_clean", type=int, default=None, help="default: as many as error traces")
     ap.add_argument("--n_easy", type=int, default=None, help="default: 10%% of error + hard_clean")
     ap.add_argument("--max_per_problem", type=int, default=2)
+    ap.add_argument("--include_unfinished", action="store_true",
+                    help="also traces that hit ReProbe's 256-token cap, cut after their last complete line")
     ap.add_argument("--min_steps", type=int, default=2)
     ap.add_argument("--tokenizer", default="Qwen/Qwen3-8B")
     ap.add_argument("--revision", default="b968826d9c46dd6066d109eabc6255188de91218")
@@ -181,7 +212,8 @@ def main() -> None:
                              "steps": sum(r["n_steps"] for r in pool if r["group"] == g),
                              "incorrect_steps_ds": sum(sum(y and k for y, k in zip(r["y_ds"], r["mask_ds"]))
                                                        for r in pool if r["group"] == g),
-                             "problems": len({r["problem_key"] for r in pool if r["group"] == g})}
+                             "problems": len({r["problem_key"] for r in pool if r["group"] == g}),
+                             "unfinished_traces": sum(not r["finished"] for r in pool if r["group"] == g)}
                          for g in GROUPS}
         n_err = sum(r["group"] == "error" for r in pool) if a.n_error is None else a.n_error
         n_hc = n_err if a.n_hard_clean is None else a.n_hard_clean

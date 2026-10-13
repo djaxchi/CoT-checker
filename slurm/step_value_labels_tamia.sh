@@ -17,7 +17,8 @@ set -euo pipefail
 : "${SNAP:?code snapshot}" "${R:?project result dir}" "${SET_NAME:?trace set file}" "${OUT:?output dir}"
 SET="$R/split/$SET_NAME"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
-K="${K:-16}"; LIMIT="${LIMIT:-0}"; GEN_BATCH="${GEN_BATCH:-128}"; CHUNK="${CHUNK:-512}"
+K="${K:-16}"; LIMIT="${LIMIT:-0}"; GEN_BATCH="${GEN_BATCH:-256}"; CHUNK="${CHUNK:-128}"
+MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-256000}"; POOL_ROWS="${POOL_ROWS:-2048}"
 GROUP="${GROUP:-0}"; NUM_SHARDS="${NUM_SHARDS:-4}"
 RES=(); [[ "${RESUME:-0}" == 1 ]] && RES=(--resume)
 mkdir -p "$OUT/logs"
@@ -43,6 +44,7 @@ for g in 0 1 2 3; do
   CUDA_VISIBLE_DEVICES=$g python scripts/step_value_labels/label_values.py \
     --trace_set "$SET" --out_dir "$OUT" --local_files_only "${RES[@]}" \
     --k "$K" --gen_batch "$GEN_BATCH" --chunk "$CHUNK" --limit "$LIMIT" \
+    --max_batch_tokens "$MAX_BATCH_TOKENS" --pool_rows "$POOL_ROWS" \
     --shard_idx $sh --num_shards "$NUM_SHARDS" \
     > "$OUT/logs/shard$(printf %02d $sh)-${SLURM_JOB_ID}.log" 2>&1 &
   pids+=($!)

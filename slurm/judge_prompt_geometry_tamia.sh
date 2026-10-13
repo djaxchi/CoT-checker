@@ -36,6 +36,6 @@ CUDA_VISIBLE_DEVICES=3 python scripts/analysis/prm_geometry.py --out_dir "$GEO" 
 pids+=($!)
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
-tail -5 "$RUN"/logs/geometry_*-"${SLURM_JOB_ID}".log
+tail -n 5 "$RUN"/logs/geometry_*-"${SLURM_JOB_ID}".log
 (( fail == 0 )) || { echo "[FATAL] geometry failed" >&2; exit 1; }
 echo "[$(date)] geometry done"

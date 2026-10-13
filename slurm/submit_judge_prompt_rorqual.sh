@@ -1,6 +1,6 @@
 #!/bin/bash
 # judge_prompt_v1 on Rorqual, per-GPU jobs (login node: bash slurm/submit_judge_prompt_rorqual.sh)
-#   16 encode shards (h100:1, ~30 min each) -> step_tokens x d512 seed 42 -> seeds 43, 44
+#   16 encode shards (h100:1, 22-48 min each, 2 h limit: Lustre stalls timed out 6 of 16 at 1 h) -> step_tokens x d512 seed 42 -> seeds 43, 44
 # The span stores (~165 GB) live on Rorqual scratch; TamIA keeps only vectors.
 set -euo pipefail
 ACCOUNT="${ACCOUNT:-def-azouaq}"

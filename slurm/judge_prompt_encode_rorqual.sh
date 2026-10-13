@@ -4,7 +4,7 @@
 #SBATCH --gpus-per-node=h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 
 # judge_prompt_v1 on Rorqual (per-GPU allocation): encode shard SHARD of 16 under
 # the judge prompt, ProcessBench and PRM800K, into the shared span stores that

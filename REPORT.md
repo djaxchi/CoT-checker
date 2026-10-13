@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-10-08. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-13. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19).
 
 ## 1. Hypothesis
 
@@ -3937,6 +3937,224 @@ Stop varying context for this layer and readout.
 
 ---
 
+### 21.19 Validity, Downstream Risk and Necessity Come Apart (factorized_step_labels_v1)
+
+*Updated: 2026-10-13. Plan: `docs/factorized_step_labels_v1_plan.md`.*
+
+**Context.** Every verifier so far predicts one label per step: correct or
+incorrect. This experiment asks whether that label mixes properties that can be
+measured separately. Two causal properties were measured on Qwen3-8B's own
+reasoning:
+
+* **Downstream risk**: does continuing from the real step fail more often than
+  continuing from the model's own alternatives at the same point?
+* **Necessity**: does the text that follows depend on the step's internal states?
+
+**Data.** The forks come from ReProbe's Qwen3-8B trajectories (§21.17), not
+PRM800K human solutions, because a model should be continued from its own text.
+
+* A fork is a trajectory cut before step i, with the earlier steps kept.
+* Both annotators label every earlier step correct, and agree on step i.
+* The 752 ProcessBench-overlap problems are excluded through the v2 split.
+
+**Context reconstruction.** ReProbe did not sample under the pinned `chat_prompt`.
+Its released `input_ids` decode to its own instruction ("- Step k: ..." one per
+line, then "<Answer>: ..."), with "Reasoning Steps:\n" opening the assistant turn.
+`reprobe_prompt` in `src/onpolicy/prompts.py` reproduces it token for token on all
+32,484 rows. All contexts use the released token ids, never re-tokenized text.
+
+**Grading.** The project grader is reused (`is_equiv` and `answer_key` from
+`src/eval/math_grade.py`, with §21.13's per-question harmonization).
+
+* `math_grade.extract_final_answer` reads "<Answer>: 3/4" as "4", because it falls
+  back to the last number. A thin extractor (`extract_reprobe_answer`) reads the
+  answer line and rewrites plain-text spellings ("4√5", "(A) ...", "x = 5/324").
+* On v2 traces both annotators call error-free, 2.1% (dev) and 2.4% (calib) still
+  grade wrong. These are equivalence gaps in `math_grade` itself ("-1/2" against
+  `-\frac12`, "0.5" against `\$0.50`). They are left in place and reported.
+
+**What was done.** Two tracks ran on each fork.
+
+*Track 1, downstream risk (`scripts/factorized_step_labels/track1_generate.py`).*
+
+* Condition A keeps the real step i and samples k continuations to a final
+  answer.
+* Condition C samples m alternative steps i from the same prefix, each stopped at
+  its first newline token, then k continuations from each.
+* Sampling uses T = 1.0, top-p 0.95 and top-k 50. The reply cap is 4,096 tokens.
+* `risk_diff` = err(A) - mean_j err(C_j), where err is the share of continuations
+  graded wrong.
+* An SE comes from resampling continuations and alternatives. A fork is `harmful`
+  when `risk_diff` > 2 SE.
+
+*Track 2, necessity (`scripts/factorized_step_labels/track2_patch.py`).*
+
+* The original trajectory is teacher-forced.
+* Step i's content states at `hidden_states[L]` are replaced by a position-matched
+  mean of 300 `calib` traces, using das_span's `make_span_patch_hook`.
+* Necessity is the drop in log-probability of the original continuation.
+* Layers L ∈ {1, 9, 18, 27, 35}.
+
+The no-op gate patches each step with its own states. A landing check confirms
+that every patch reaches the next block unchanged.
+
+**Runs.**
+
+* *Pilot.* 30 forks from v2 `dev`, 2 validity levels x 3 positions x 5, with
+  m = 4 and k = 8. TamIA jobs 513671 to 513673.
+* *Full run.* 501 forks from v2 `train`, one per problem, with m = 8 and k = 8.
+  TamIA jobs 513779 to 513784, 45 minutes on four H100 nodes.
+  * 300 incorrect steps: 100 per position.
+  * 201 correct steps: 67 per position, only from "hard" problems, where some
+    ReProbe trace of the problem has a labeled error or a wrong answer.
+  * Problems are disjoint from the pilot and from the reference set.
+  * 36,072 continuations. 166 (0.5%) hit the cap and count as errors.
+  * 800 of 4,008 alternatives (20%) reproduced the real step exactly.
+
+**A correction made after the pilot.** In the pilot, the whole L35 necessity of
+the 6 last-step forks (about 29 nats) came from a single token: "<" of
+"<Answer>".
+
+* That token is predicted at the patched position itself, so its drop reads out
+  the overwritten state. It is not dependence carried by attention.
+* Necessity now starts one token after the span, and the boundary drop is
+  reported separately. The plan records this as a post-hoc amendment.
+* In the full run the boundary token reaches 30.5 nats at L35. It also carried
+  the apparent L35 effect of the random-noise patch: 12.8 nats in the pilot
+  with it, a median of 0.0 without it.
+
+**Results (full run).** The no-op gate passes exactly: the self-patch changes the
+continuation log-probability by 0.0 nats at every layer on all 501 forks.
+
+Error rates and risk by cell:
+
+| cell | n | err(A) | mean err(C) | risk_diff |
+|---|---|---|---|---|
+| correct / early | 67 | 0.394 | 0.368 | +0.025 |
+| correct / mid | 67 | 0.175 | 0.189 | -0.014 |
+| correct / late | 67 | 0.151 | 0.172 | -0.021 |
+| incorrect / early | 100 | 0.776 | 0.585 | +0.191 |
+| incorrect / mid | 100 | 0.767 | 0.608 | +0.159 |
+| incorrect / late | 100 | 0.899 | 0.677 | +0.222 |
+
+* err(A) is 0.814 after incorrect steps and 0.240 after correct ones. The
+  difference is 0.574, with fork-bootstrap 95% CI [0.507, 0.638].
+* 38 of 300 incorrect steps (13%) are bypassed: every continuation reaches the
+  right answer.
+  * Example: "probability of 8 heads, 2 tails is (0.5)^10" drops the C(10, 8)
+    factor. All 8 continuations still reach 45/1024, because step 1 had computed 45.
+* 44% of incorrect steps and 8.5% of correct steps have `risk_diff` above 2 SE.
+  * Example: "zucchinis per container = 2/5 = 0.4" is arithmetically true and
+    labeled correct by both annotators. Yet 7 of 8 continuations answer 3, while
+    the model's alternatives ("48 / 2 = 24") reach the gold 15 in 84% of cases.
+    `risk_diff` = +0.72.
+* Correct early steps on hard problems fail 39% of the time with `risk_diff` near
+  0. That failure belongs to the problem, not the step.
+
+Factor relations (Spearman, fork-bootstrap 95% CI; the partial correlation
+controls for log continuation length and relative position):
+
+| pair | Spearman | partial |
+|---|---|---|
+| validity, risk_diff | 0.372 [0.30, 0.44] | 0.374 [0.30, 0.44] |
+| validity, necessity per token, L9 | 0.286 [0.20, 0.36] | 0.284 [0.21, 0.36] |
+| risk_diff, necessity per token, L9 | 0.103 [0.02, 0.18] | 0.109 [0.02, 0.18] |
+
+Necessity by layer (median over forks, boundary token excluded):
+
+| | L1 | L9 | L18 | L27 | L35 |
+|---|---|---|---|---|---|
+| continuation drop, nats | 18.3 | 18.7 | 13.4 | 0.74 | 0.00 |
+
+* Step i+1 carries 16.2 of L9's 18.7 nats. The answer line moves by a median of
+  0.017 nats.
+* At L35 a patch is read by one block, the last of 36. The step's content has
+  already been copied into later positions, so the drop is 0.
+
+Among incorrect steps, necessity does not separate harmful from bypassed errors:
+AUROC 0.53, from medians of 0.38 and 0.33 nats per token at L9.
+
+**Interpretation.** The prespecified criterion holds. Both causal properties
+correlate with validity below 0.7, with their 95% intervals entirely below it,
+and they barely correlate with each other.
+
+*Risk.* Risk and validity overlap only partly:
+
+* A validity label treats bypassed errors as failures, though they cost nothing.
+* It misses some valid steps that steer the model onto a failing path.
+* Rejection decided on validity resamples steps where resampling cannot help.
+  Fewer than half of incorrect steps measurably raise failure above the model's
+  own alternatives.
+
+*Necessity.* As measured here, necessity is local reuse: the next step restates
+step i's result, so later steps read it from there. Teacher-forcing the original
+text makes this structural. The measurement cannot tell a harmful copied value
+from a harmless one. It is recorded as a negative result and dropped as a target.
+
+*Scope.*
+
+* Every fork comes from a problem the model finished in at most 256 tokens,
+  ReProbe's generation cap.
+* `risk_diff` carries an SE of 0.08 at m = 8 and k = 8.
+* Risk is defined relative to this policy and these sampling settings. Validity
+  is a property of the text.
+
+Full reference: `results/factorized_step_labels_v1/full/summary/summary.md`;
+per-fork factors in `fork_factors.jsonl` there. Pilot:
+`results/factorized_step_labels_v1/pilot/summary_xb/`.
+
+**Next step.** Test whether the frozen states carry risk beyond validity
+(§21.20).
+
+---
+
+### 21.20 Does the Verifier's Hidden State Carry Risk? (risk_probe_v0, running)
+
+*Updated: 2026-10-13. Plan: `docs/risk_probe_v0_plan.md`.*
+
+**Context.** Labeling risk costs 72 generations per step. Answer selection can
+use risk only if a hidden-state probe can supply it. This run asks three
+questions:
+
+1. Does the existing validity probe already rank risk within a validity class?
+2. Can a linear probe learn risk from the same states?
+3. Does adding a risk readout to the validity score improve detection of
+   harmful steps?
+
+**What was done.** All readouts use §21.18's setting: the 531 forks' `full`
+views, `hidden_states[35]`, and the `local` arm.
+
+*The probes scored.*
+
+* 161 of the 531 fork traces were training traces of the §21.18 v2ds probe.
+* The job therefore refits that probe (3 seeds, v1 hyperparameters) on v2_train
+  minus every fork problem: 43,117 views from 7,483 traces.
+* The §21.18 v2ds and v1human checkpoints are rescored as secondary readouts.
+
+*Reproduction gate.* The §21.18 checkpoints rescore 600 `rp_test` views through
+the new store. P(incorrect) must match the saved predictions within a median
+0.002 and a maximum 0.02.
+
+*Risk probes.* Cross-validated ridge and logistic readouts on pooled step states
+(mean and last token), against a permutation null of 200 shuffles.
+
+*Execution.* `scripts/factorized_step_labels/build_risk_probe_views.py` froze the
+view manifest. TamIA job 615510 encodes it, fits and rescores.
+`scripts/factorized_step_labels/analyze_risk_probe.py` runs the analysis.
+
+*Prespecified reading.*
+
+* Risk is readable beyond validity if both hold:
+  * the out-of-fold Spearman on validity-residualized risk exceeds the 95th
+    percentile of its permutation null;
+  * adding the risk readout raises the AUROC for `harmful` with a 95% interval
+    above 0.
+* A null at 531 forks means "not detectable at this size", not "absent".
+
+**Results.** Pending.
+
+---
+
 
 ## 22. Limitations
 
@@ -4276,6 +4494,14 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-13 (§21.19, §21.20).* Validity and downstream risk are
+separate targets (Spearman 0.37). Necessity measured by teacher-forced patching is
+local reuse and is dropped. risk_probe_v0 (TamIA 615510) tests whether the
+verifier's states carry risk beyond validity. If they do, the next experiment
+scales risk labels and compares validity, risk and combined rejection on MATH-500
+at matched token budget. If the result is null at 531 forks, the next step is more
+risk labels.
 
 *Addendum 2026-10-05 (§21.17).* All-step DeepSeek-R1 labels on Qwen3-8B's own
 trajectories did not rescue future access (full - causal -0.019 step F1, -0.138

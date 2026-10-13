@@ -87,6 +87,36 @@ def prm800k_prompt(problem: str) -> str:
     return s + f"<|im_start|>user\n{problem}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
+# The prompt ReProbe sampled its released Qwen3-8B trajectories under
+# (`rediska0123/train_prm800k_Qwen3-8B_finished`, factorized_step_labels_v1).
+# Decoded from the rows' own `input_ids`: Qwen3's chat template, non-thinking,
+# with "Reasoning Steps:\n" opening the assistant turn and a single newline after
+# </think> (not the template's two). Continuing that text under any other prompt
+# puts the model in a context it never wrote under, so the split builder checks
+# this literal against every row it keeps, token for token.
+REPROBE_INSTRUCTION = (
+    "You will be presented with a <Question>. Before providing the [Answer], you should "
+    "first think step-by-step carefully.\n\nYour response format:\n<start of response>\n"
+    "Reasoning Steps:\n- Step 1: [Your first reasoning step]\n- Step 2: [Your second "
+    "reasoning step]\n- Step 3: [Next step, and so on...]\n...\n- Step N: [Final reasoning "
+    "step]\n<Answer>: [Your final answer]\n<end of response>\n\nStrict Requirements:\n"
+    "- DO NOT include any text outside the specified format.\n- Each reasoning step MUST be "
+    "written on a **single line only**: NO line breaks, bullet points, or substeps within a "
+    "step.\n- Each step should express one precise and **self-contained** logical operation, "
+    "deduction, calculation, or fact application.\n- Steps MUST provide explicit result of the "
+    "step or concrete reasoning outcomes. Avoid vague explanations or meta-descriptions of the "
+    "reasoning process.\n    - For example:\n        - Good: \"- Step 1: Multiply 5 by 4, "
+    "which equals 20.\"\n        - Bad: \"- Step 1: Multiply 5 by 4.\" (no result of the step "
+    "or concrete reasoning outcome)\n- Continue writing steps until the problem is solved.\n"
+    "- Violating ANY requirement above is NOT acceptable.\n\nNow answer:\n<Question>: ")
+
+
+def reprobe_prompt(question: str) -> str:
+    """ReProbe's sampling context up to the first step, as a literal."""
+    return (f"<|im_start|>user\n{REPROBE_INSTRUCTION}{question}<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n</think>\nReasoning Steps:\n")
+
+
 def generation_prefix(problem: str, prefix: str) -> str:
     """Context the model had at the start of a step, given the steps before it.
 

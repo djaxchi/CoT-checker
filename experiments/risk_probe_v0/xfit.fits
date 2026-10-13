@@ -1,0 +1,3 @@
+xfit_v2ds_s42 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split v2_train_xfit --dev_split v2_dev_xfit --bucket_by step --score_splits fsl_forks gate_rp_test
+xfit_v2ds_s43 --arms local --seed 43 --lr 1e-4 --wd 0.1 --train_split v2_train_xfit --dev_split v2_dev_xfit --bucket_by step --score_splits fsl_forks gate_rp_test
+xfit_v2ds_s44 --arms local --seed 44 --lr 1e-4 --wd 0.1 --train_split v2_train_xfit --dev_split v2_dev_xfit --bucket_by step --score_splits fsl_forks gate_rp_test

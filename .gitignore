@@ -103,3 +103,12 @@ scripts/run_pipeline.sh
 
 # graphify knowledge-graph artifacts (generated locally, rebuilt on demand)
 graphify-out/
+
+# Local agent configs and unrelated scratch analyses
+.agents/
+.codex/
+AGENTS.md
+scripts/analysis/cap_online_steps.py
+scripts/analysis/online_reject_points.py
+scripts/analysis/plot_online_reject.py
+scripts/analysis/plot_online_reject.sh

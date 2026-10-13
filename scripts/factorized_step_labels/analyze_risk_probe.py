@@ -9,7 +9,7 @@ Inputs (pulled from the TamIA run):
   --views_meta  the frozen manifest's meta/fsl_forks.jsonl (view id -> fork id)
   --fork_factors  factorized_step_labels_v1 fork_factors.jsonl (full, pilot)
   --fork_splits   the two frozen fork splits (training-overlap flags)
-Writes <out_dir>/summary.json, summary.md, fork_scores.jsonl.
+Writes <out_dir>/summary.json and fork_scores.jsonl.
 """
 
 from __future__ import annotations

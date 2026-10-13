@@ -5,7 +5,7 @@
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20).
 
 ## 1. Hypothesis
 
@@ -4108,7 +4108,7 @@ per-fork factors in `fork_factors.jsonl` there. Pilot:
 
 ---
 
-### 21.20 Does the Verifier's Hidden State Carry Risk? (risk_probe_v0, running)
+### 21.20 Does the Verifier's Hidden State Carry Risk? (risk_probe_v0)
 
 *Updated: 2026-10-13. Plan: `docs/risk_probe_v0_plan.md`.*
 
@@ -4151,7 +4151,92 @@ view manifest. TamIA job 615510 encodes it, fits and rescores.
     above 0.
 * A null at 531 forks means "not detectable at this size", not "absent".
 
-**Results.** Pending.
+**Run.** TamIA job 615510 took 9 minutes on one H100 node. The three clean
+refits stopped at dev F1 0.542, 0.548 and 0.551 (best epochs 0, 0, 1). The
+§21.18 v2ds fits reached 0.555 to 0.567 on a dev set that still included the
+pilot problems.
+
+**Results.** *Gate.* All six §21.18 checkpoints reproduce their saved P(incorrect)
+on the 600 `rp_test` views with a difference of exactly 0. The scores below are
+interpretable.
+
+*Sanity.* The probes separate valid from invalid fork steps: validity AUROC 0.894
+(clean refit), 0.908 (v2ds, 370 out-of-sample forks), 0.880 (v1human). Of the 531
+forks, 98 are `harmful` (91 incorrect, 7 correct). 41 of 315 incorrect steps are
+bypassed.
+
+*Q1, does the validity score rank risk within a class?* Within the 315 incorrect
+steps (fork-bootstrap 95% CI):
+
+| validity probe | n | Spearman(score, risk_diff) | AUROC harmful | partial, all forks |
+|---|---|---|---|---|
+| clean refit (primary) | 315 | 0.044 [-0.07, 0.16] | 0.53 [0.46, 0.60] | 0.004 [-0.08, 0.09] |
+| v2ds, out of sample | 216 | -0.013 [-0.14, 0.12] | 0.52 [0.44, 0.61] | -0.048 [-0.15, 0.06] |
+| v1human | 315 | 0.124 [0.02, 0.24] | 0.56 [0.49, 0.62] | 0.044 [-0.04, 0.13] |
+
+* The primary probe scores bypassed errors like the others: AUROC 0.515 for
+  not-bypassed against bypassed.
+* Within correct steps the primary Spearman is -0.091 [-0.21, 0.05]. The 7 risky
+  correct steps sit between the 27th and 76th percentile of correct-step scores.
+
+*Q2, can a linear probe learn risk from the states?* Out-of-fold over 531 forks,
+4,096 dimensions, against the 95th percentile of 200 label shuffles:
+
+| pooling | Spearman, risk_diff (null) | Spearman, residual risk (null) | AUROC harmful (null) |
+|---|---|---|---|
+| mean | 0.095 (0.056) | 0.195 (0.055) | 0.639 (0.562) |
+| last token | 0.148 (0.056) | 0.117 (0.060) | 0.654 (0.578) |
+
+The residual removes validity, log continuation length and relative position
+linearly.
+
+*Q3, does the risk readout add to the validity score?* Out-of-fold logistic
+regression on the primary validity score, log length and relative position,
+with and without the Q2 risk prediction:
+
+| target | validity only | + risk, mean | Δ [95% CI] | + risk, last | Δ [95% CI] |
+|---|---|---|---|---|---|
+| harmful | 0.680 | 0.692 | +0.012 [-0.022, 0.044] | 0.699 | +0.019 [-0.008, 0.045] |
+| fail | 0.746 | 0.742 | -0.005 [-0.008, -0.001] | 0.744 | -0.003 [-0.009, 0.004] |
+
+*Post-hoc checks (not prespecified).*
+
+* A gradient-boosted model on validity, length and position predicts the
+  residual at Spearman 0.024. The state readout keeps 0.191 (mean) and 0.115
+  (last) after removing that prediction too, so the Q2 residual signal is not
+  nonlinear position or length.
+* Within incorrect steps the risk readout ranks risk: Spearman 0.15 [0.03, 0.26]
+  (mean) and 0.15 [0.04, 0.27] (last); AUROC harmful 0.60 [0.53, 0.67] and
+  0.63 [0.56, 0.69].
+* Within correct steps it ranks risk backwards: Spearman -0.17 [-0.31, -0.02]
+  (mean) and -0.21 [-0.34, -0.07] (last).
+* Within incorrect steps it does not track err(A) (Spearman 0.005 mean, -0.022
+  last). Its correlation with risk comes from err(C), the alternatives' error
+  rate (-0.10 mean, -0.18 last).
+
+**Interpretation.** The prespecified criterion is not met. Q2 passes: both
+residual Spearmans exceed their nulls by a factor of 2 to 3.5. Q3 fails: the
+`harmful` gain is +0.012 and +0.019 AUROC, with intervals that include 0. By the
+plan's reading, risk beyond validity is not detectable at this size.
+
+* The validity probe is blind to risk inside the incorrect class. Its AUROC for
+  `harmful` among incorrect steps, 0.53, equals necessity's (§21.19). It ranks
+  bypassed errors as confidently as harmful ones.
+* The states do hold a linear component that correlates with risk beyond
+  validity. Among incorrect steps it reads how well the model's alternatives
+  would do at that point, not how badly the real step's continuations fail. Its
+  relation to risk reverses among correct steps. It is not yet a usable risk
+  score.
+* At 98 harmful forks the Q3 interval has a half-width of about 0.03 AUROC. The
+  observed gains are below that.
+
+**Next step.** Scale risk labels on incorrect steps, where risk varies and the
+validity probe is blind. The Q3 interval half-width of about 0.03 at 98 positives
+suggests several thousand forks to resolve a 0.02 gain (rough extrapolation,
+assuming the interval shrinks with the square root of n).
+
+Outputs: `results/risk_probe_v0/summary.json`, per-fork scores in
+`results/risk_probe_v0/fork_scores.jsonl`.
 
 ---
 
@@ -4497,11 +4582,12 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 *Addendum 2026-10-13 (§21.19, §21.20).* Validity and downstream risk are
 separate targets (Spearman 0.37). Necessity measured by teacher-forced patching is
-local reuse and is dropped. risk_probe_v0 (TamIA 615510) tests whether the
-verifier's states carry risk beyond validity. If they do, the next experiment
-scales risk labels and compares validity, risk and combined rejection on MATH-500
-at matched token budget. If the result is null at 531 forks, the next step is more
-risk labels.
+local reuse and is dropped. risk_probe_v0 found the validity probe blind to risk
+within incorrect steps (AUROC 0.53 for `harmful`). A linear readout of the same
+states learns risk beyond validity above a permutation null, but adding it to the
+validity score does not improve `harmful` detection at 531 forks (+0.019 AUROC,
+CI [-0.008, 0.045]). The next step is more risk labels on incorrect steps, before
+any rejection experiment on MATH-500.
 
 *Addendum 2026-10-05 (§21.17).* All-step DeepSeek-R1 labels on Qwen3-8B's own
 trajectories did not rescue future access (full - causal -0.019 step F1, -0.138

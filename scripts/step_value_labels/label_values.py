@@ -102,9 +102,9 @@ def main() -> None:
     p.add_argument("--top_p", type=float, default=0.95)
     p.add_argument("--top_k", type=int, default=50)
     p.add_argument("--max_reply_tokens", type=int, default=4096)
-    p.add_argument("--chunk", type=int, default=128, help="new tokens per sampling round")
-    p.add_argument("--gen_batch", type=int, default=256, help="max rows per generate call")
-    p.add_argument("--max_batch_tokens", type=int, default=256_000,
+    p.add_argument("--chunk", type=int, default=256, help="new tokens per sampling round")
+    p.add_argument("--gen_batch", type=int, default=192, help="max rows per generate call")
+    p.add_argument("--max_batch_tokens", type=int, default=160_000,
                    help="max padded tokens (rows x (longest context + chunk)) per generate call")
     p.add_argument("--pool_rows", type=int, default=2048, help="rollouts sampled together (whole traces)")
     p.add_argument("--seed", type=int, default=42)

@@ -17,8 +17,8 @@ set -euo pipefail
 : "${SNAP:?code snapshot}" "${R:?project result dir}" "${SET_NAME:?trace set file}" "${OUT:?output dir}"
 SET="$R/split/$SET_NAME"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
-K="${K:-16}"; LIMIT="${LIMIT:-0}"; GEN_BATCH="${GEN_BATCH:-256}"; CHUNK="${CHUNK:-128}"
-MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-256000}"; POOL_ROWS="${POOL_ROWS:-2048}"
+K="${K:-16}"; LIMIT="${LIMIT:-0}"; GEN_BATCH="${GEN_BATCH:-192}"; CHUNK="${CHUNK:-256}"
+MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-160000}"; POOL_ROWS="${POOL_ROWS:-2048}"
 GROUP="${GROUP:-0}"; NUM_SHARDS="${NUM_SHARDS:-4}"
 RES=(); [[ "${RESUME:-0}" == 1 ]] && RES=(--resume)
 mkdir -p "$OUT/logs"
@@ -29,6 +29,7 @@ export HF_HOME="$HF_CACHE"
 unset TRANSFORMERS_CACHE
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4 TORCH_NUM_THREADS=4
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd "$SNAP"
 grep -E "snapshot|git_head" SNAPSHOT_INFO
 virtualenv --no-download "$SLURM_TMPDIR/env" >/dev/null

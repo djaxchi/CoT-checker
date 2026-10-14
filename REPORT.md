@@ -3618,6 +3618,8 @@ the PRM's judgment, not all of it, and adds nothing beyond it.
 **Next step.** Encode in the PRM's native format (`<extra_0>` separators), where
 the head reads its state, and test whether LDA on that state closes the 0.04 gap
 to the head. Figures: `results/prm_geometry_v1/{methods_auroc,lda_topk,pc_auroc,views_boundary_stats}.png`.
+§21.21 tests whether the gap to Instruct is elicitation (a verification prompt
+on Qwen3-8B): it is not.
 
 
 ### 21.16 Direct Attention to Later Steps (bidirectional_token_probe_v1)
@@ -4237,6 +4239,150 @@ assuming the interval shrinks with the square root of n).
 
 Outputs: `results/risk_probe_v0/summary.json`, per-fork scores in
 `results/risk_probe_v0/fork_scores.jsonl`.
+
+### 21.21 Telling the Backbone It Is Verifying Does Not Close the Gap to the PRM (judge_prompt_v1)
+
+*Updated: 2026-10-14. Plan: `docs/judge_prompt_v1_plan.md`.*
+
+**Context.** §21.15 found that probes read from Qwen2.5-Math-PRM-7B beat the
+same probes read from Qwen3-8B on 21 of 22 cells (best calib-20 0.661 against
+0.610). The Qwen3-8B states were encoded under the verifier template, a plain
+"Problem / Previous reasoning / Current step" layout with no chat template and
+no instruction. The PRM was trained to judge steps, so part of its lead could be
+elicitation rather than representation. This test re-encodes Qwen3-8B with an
+explicit verification prompt and asks whether its states then match the PRM's.
+
+**What was done.** Each step was re-encoded under Qwen3's chat template in
+non-thinking mode (`judge_prefix` and `JUDGE_SUFFIX` in `src/onpolicy/prompts.py`):
+
+* a system turn saying the model is a careful math verifier that must decide
+  whether the current step is correct given the problem and the previous steps;
+* a user turn with the problem, the previous steps and the current step,
+  followed by "Is the current step correct? Answer Yes or No.";
+* the opened assistant turn with an empty think block.
+
+Prefix, step and suffix are tokenized separately, so the step's token ids are
+identical to the verifier template's. One forward pass at `hidden_states[35]`
+gives three readouts:
+
+| arm | what it reads |
+|---|---|
+| judge-span | the pre-step boundary and the step's own tokens, as in every leaderboard store. Under causal attention these see the instruction but not the question. |
+| judge-verdict | the last token of the question, where the next token is the verdict |
+| zero-shot | P(No) renormalized over {Yes, No} at that token, with no probe |
+
+The cells, splits and protocol are those of §21.15: the frozen PRM800K splits
+and all four ProcessBench subsets, RESCALE=none, 30 epochs, patience 3,
+batch 256, seeds 42, 43 and 44, with seed 42's lr x wd search reused by the
+other seeds. The span arm reran the best Instruct cell (`step_tokens x d512`),
+the best PRM cell (`boundary_stats x mlp:h1024x2`) and three linear cells. The
+verdict arm ran `last_token` with a linear and an MLP learner.
+
+Execution:
+
+* The span store (about 165 GB) did not fit TamIA's shared scratch. Each encode
+  job therefore derived the vector readouts per shard
+  (`scripts/derive_vector_store.py`) and kept only those. Cells read them with
+  `--prederived`, which a test pins as byte-identical to deriving at load time.
+* TamIA jobs 513575 to 513584 ran the encodes, vector cells, verdict cells,
+  zero-shot cell and geometry.
+* The d512 cell needs the full spans, so it ran on one TamIA node that
+  re-encoded to local disk (job 615575). Seeds 42 and 44 finished. The job hit
+  its 4 h limit during seed 43, so that cell has two seeds.
+* A Rorqual copy of the d512 chain was queued as a hedge. It was slowed by
+  encode shards timing out on Lustre and was not used.
+* The paired trace bootstrap (`scripts/analysis/judge_prompt_report.py`, 300
+  resamples) resamples traces per ProcessBench subset and recomputes both sides'
+  seed-mean calib-20 F1_PB on the same resample.
+
+**Results.** The headline is ProcessBench F1_PB at calib-20, the four-subset
+mean, seed mean ± sd. In-domain F1 is f1_incorrect at the val threshold, with a
+trivial baseline of 0.667.
+
+| arm | rep x learner | AUROC | in-domain F1 | F1_PB oracle | F1_PB calib-20 |
+|---|---|---:|---:|---:|---:|
+| judge-span | boundary_stats x mlp:h1024x2 | 0.901 | 0.822 | 0.631 | 0.585 ± 0.005 |
+| instruct | boundary_stats x mlp:h1024x2 | 0.892 | 0.821 | 0.613 | 0.566 ± 0.074 |
+| prm | boundary_stats x mlp:h1024x2 | 0.922 | 0.854 | 0.701 | **0.661** ± 0.003 |
+| judge-span | step_tokens x d512 (seeds 42, 44) | 0.868 | 0.805 | 0.580 | 0.539 ± 0.021 |
+| instruct | step_tokens x d512 | 0.913 | 0.835 | 0.655 | **0.610** ± 0.007 |
+| prm | step_tokens x d512 | 0.917 | 0.846 | 0.691 | 0.646 ± 0.005 |
+| judge-span | step_mean x linear | 0.887 | 0.808 | 0.578 | 0.534 ± 0.012 |
+| instruct | step_mean x linear | 0.893 | 0.818 | 0.584 | 0.529 ± 0.002 |
+| judge-span | boundary_stats x linear | 0.879 | 0.796 | 0.563 | 0.524 ± 0.013 |
+| instruct | boundary_stats x linear | 0.888 | 0.802 | 0.601 | 0.558 ± 0.019 |
+| judge-span | last_token x linear | 0.885 | 0.815 | 0.572 | 0.521 ± 0.022 |
+| instruct | last_token x linear | 0.894 | 0.818 | 0.579 | 0.532 ± 0.012 |
+| judge-verdict | verdict token x linear | 0.883 | 0.806 | 0.604 | 0.562 ± 0.004 |
+| judge-verdict | verdict token x mlp:h1024x2 | 0.887 | 0.808 | 0.615 | 0.568 ± 0.004 |
+| zero-shot | P(No) | 0.789 | 0.732 | 0.556 | 0.534 |
+
+Paired bootstrap of the calib-20 difference:
+
+| comparison | delta | 95% CI |
+|---|---:|---|
+| best judge-span (bs x mlp) minus best Instruct (d512) | -0.025 | [-0.044, -0.006] |
+| best judge-span minus best PRM (bs x mlp) | -0.076 | [-0.096, -0.056] |
+| best judge-verdict (mlp) minus best Instruct | -0.042 | [-0.063, -0.022] |
+| best judge-verdict minus best PRM | -0.094 | [-0.114, -0.073] |
+| same cell, judge-span minus Instruct: boundary_stats x mlp | +0.019 | [+0.003, +0.035] |
+| same cell: step_mean x linear | +0.004 | [-0.009, +0.018] |
+| same cell: last_token x linear | -0.011 | [-0.028, +0.006] |
+| same cell: boundary_stats x linear | -0.034 | [-0.050, -0.018] |
+| same cell: step_tokens x d512 | -0.072 | [-0.091, -0.052] |
+
+*Geometry* (closed-form rules of §21.15 without kNN; PRM800K test AUROC, with
+ProcessBench calib-20 in parentheses):
+
+| readout | LDA, judge prompt | LDA, Instruct (§21.15) | best single PC, judge prompt |
+|---|---:|---:|---:|
+| span `last_token` | 0.888 (0.550) | 0.897 (0.555) | 0.679 (0.370) |
+| span `step_mean` | 0.883 (0.521) | 0.890 (0.540) | 0.662 (0.285) |
+| span `boundary_stats` | 0.900 (0.560) | 0.909 (0.575) | 0.636 (0.283) |
+| verdict token | 0.888 (0.574) | n/a | 0.814 (0.564) |
+
+On the verdict token, the raw class-mean axis alone reaches 0.818 (0.556) and
+LDA on the top PC alone 0.814. On the judge-span `boundary_stats` readout, LDA
+on the top 8 PCs reaches only 0.707.
+
+**Interpretation.** Against the readings fixed in the plan:
+
+1. *Help to the Instruct representation:* no. The best judge cell, from either
+   arm, lies below the best Instruct cell, and both intervals exclude 0.
+2. *On par with the PRM:* no. The gap to the PRM is 0.076 to 0.094 calib-20,
+   about as large as §21.15's best-against-best gap of 0.051. Elicitation by
+   this prompt does not explain the PRM's lead.
+3. *Span against verdict:*
+   * The instruction leaves pooled step-span readouts roughly where they were:
+     LDA moves by less than 0.01 AUROC and 0.02 calib-20.
+   * It hurts the readouts that depend on the step's token sequence. The d512
+     transformer loses 0.072, the largest change in the table.
+   * Its one significant gain, `boundary_stats x mlp` +0.019, mostly removes
+     Instruct's seed instability on that cell (sd 0.074 to 0.005).
+   * The verdict token does concentrate the signal: one direction carries most
+     of it (single PC 0.814 against 0.64 to 0.68 on any span readout here and
+     in §21.15). That compression does not add information. Verdict-token LDA
+     ties span LDA on ProcessBench (0.574 against 0.575 for Instruct
+     `boundary_stats`).
+4. *Zero-shot against probes:* asking the model directly gives 0.534 calib-20,
+   level with the weakest linear probes and 0.076 below the best Instruct cell.
+   The probe adds well over the model's own verdict.
+5. *Transfer failure:* not applicable. In-domain AUROC and F1 move in the same
+   direction as ProcessBench.
+
+The PRM's advantage is not something a verification instruction unlocks in
+Qwen3-8B at this layer. The instruction makes the signal easier to read off a
+single position (the verdict token), not stronger. The result applies to the
+one prompt fixed in advance: it does not rule out other wordings, thinking mode
+or other layers.
+
+**Next step.** None planned on prompting the backbone. The open question from
+§21.15 stands: whether LDA on the PRM's native-format state (`<extra_0>`
+separators) closes the 0.04 gap to the PRM's own head.
+
+Outputs: `results/judge_prompt_v1/leaderboard.{md,json}`; cells in
+`cot-checker-results/judge_prompt_v1/cells/{span,verdict,zeroshot}`; geometry in
+`cot-checker-results/judge_prompt_v1/geometry/`.
 
 ---
 

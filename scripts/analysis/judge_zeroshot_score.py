@@ -94,7 +94,10 @@ def main() -> None:
                 f.write(json.dumps(r) + "\n")
         print(f"[pb:{sub}] F1_PB@val={mv['F1_PB']:.4f} oracle={best_f1:.4f}", flush=True)
 
+    # dim / n_train / full_train / hp keep the cell readable by the leaderboard
+    # summariser (merge_rep_grid_leaderboard.summarise); nothing is trained.
     res = {"rep": "judge_zeroshot", "learner": "none", "seed": 0, "n_params": 0,
+           "dim": 0, "n_train": 0, "full_train": True, "hp": {"selected": None},
            "judge_store": str(a.judge_store), "pb_judge_store": str(a.pb_judge_store),
            "score": "P(No) over {Yes, No} at the verdict token",
            "in_domain": in_domain, "processbench": pb}

@@ -5,7 +5,7 @@
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24).
 
 ## 1. Hypothesis
 
@@ -4525,6 +4525,271 @@ Plots: `results/step_bert_probe_v0/plots/conditions.png`,
 `results/step_bert_probe_v0/{summary.json,summary.md,g1_*.json,hp_selection.json}`;
 per-fit outputs in `runs/step_bert_probe_v0/ft/`.
 
+### 21.23 Downstream Risk for Every Step From Shared Rollouts (step_value_labels_v1)
+
+*Updated: 2026-10-15. Plan: `docs/step_value_labels_v1_plan.md`.*
+
+**Context.** risk_probe_v0 (§21.20) could not resolve a 0.02 AUROC gain with 98
+harmful forks, and one v1 fork costs about 80 generations for one labeled step.
+This run labels downstream risk for every step of a trace from one set of
+rollouts per cut point.
+
+**What was done.**
+
+*Identity.* Cut c is the reply truncated before step line c, and err(c) is the
+share of rollouts from cut c that end wrong. A v1 alternative rollout is a free
+rollout from the cut before step s; a v1 continuation is a free rollout from the
+cut after it. So, in expectation:
+
+```
+risk(s) = err(s + 1) - err(s)
+```
+
+* k = 16 rollouts per cut label both neighboring steps.
+* `harmful` means risk > 2 SE, with the plug-in SE of the two rates.
+* Sampler and grader are v1's: Qwen3-8B at revision b968826d, ReProbe token ids
+  under `reprobe_prompt`, T = 1.0, top-p 0.95, top-k 50, a 4,096-token reply cap,
+  truncation graded wrong.
+
+*Validation gate.* On the 501 v1 forks, cuts s and s + 1 only (job 616253), with
+fork-bootstrap intervals:
+
+| comparison | mean difference [95% CI] | Spearman |
+|---|---|---|
+| err(s) - v1 mean err(C) | -0.007 [-0.017, 0.003] | 0.96 |
+| err(s + 1) - v1 err(A) | -0.0005 [-0.007, 0.006] | 0.97 |
+
+Both pass (interval includes 0, absolute mean below 0.03). The new risk
+correlates with v1's `risk_diff` at Spearman 0.74; each label carries an SE of
+0.1 to 0.2.
+
+*Label set* (`trace_set_label.json`, frozen with its sha256 before any job):
+
+* 5,874 traces from the ReProbe v2 train split, 3,304 problems, none shared with
+  the 531 forks;
+* groups: 3,355 traces with a DeepSeek error, 1,765 clean traces on hard
+  problems, 754 easy;
+* 3,977 traces (68%) hit ReProbe's 256-token cap and are cut after their last
+  complete step line;
+* 38,190 cuts, 611,040 rollouts, 32,316 labeled steps: 18.9 rollouts per
+  labeled step.
+
+*Run.* 32 shards on 8 H100 nodes (jobs 618121 to 618128), resumed by 618727,
+618979 and 619104.
+
+* The grader's sympy fallback hung on power-tower answers: `10^{10^{10}}` ran
+  beyond 40 s locally.
+* One node ran out of its 512 GB of host memory (job 618124). Two other shards
+  reached 336 and 294 GB before they were stopped.
+* `math_grade.GuardedSympy` now runs the fallback in a child process with a 10 s
+  timeout and a 4 GB address-space cap, and restarts it on timeout. The affected
+  shards resumed under it.
+* `summarize_values.py --trace_set` froze `step_values.jsonl` (sha256
+  16f92278...). `scripts/step_value_labels/analyze_labels.py` and
+  `regrade_check.py` ran the checks below.
+
+**Results.** 1,399 of 32,316 steps (4.3%) are `harmful`. A rollout-shuffle null
+expects about 330.
+
+| class | n | harmful | null | harmful 95% CI | mean err(s) |
+|---|---|---|---|---|---|
+| DeepSeek-correct | 26,080 | 2.9% | 1.0% | [2.7, 3.1] | 0.43 |
+| DeepSeek-incorrect | 6,124 | 10.6% | 1.0% | [9.9, 11.3] | 0.71 |
+| pre-error | 22,036 | 3.1% | 1.1% | [2.9, 3.3] | 0.39 |
+| first error | 3,355 | 16.6% | 1.3% | [15.4, 17.8] | 0.61 |
+| first error, finished trace | 859 | 22.1% | 1.0% | [19.3, 24.8] | 0.50 |
+| first error, capped trace | 2,496 | 14.7% | 1.3% | [13.4, 16.0] | 0.65 |
+| post-error | 6,925 | 2.3% | 0.7% | [1.9, 2.6] | 0.70 |
+
+By phase the harmful steps split into 556 first errors, 686 pre-error steps and
+157 post-error steps.
+
+*Reliability.*
+
+* Split-half risk (even against odd rollouts): Pearson 0.42 [0.40, 0.44] at 8
+  rollouts per cut, 0.59 at 16 by Spearman-Brown. A perfect predictor would
+  correlate with the label at about 0.77.
+* err(0) test-retest across the two traces of a problem: Pearson 0.947 over
+  2,570 problems.
+* Signal share, 1 - mean(SE²) / var(risk): 0.63 over all steps, 0.84 on first
+  errors, 0.52 on DeepSeek-correct steps.
+
+*Label validity.*
+
+* The error rate at the last cut separates wrong final answers at AUROC 0.984
+  over 1,897 finished traces (mean 0.005 for correct answers, 0.944 for wrong).
+* Around the first error, mean err is 0.56, 0.57 and 0.59 at cuts -3 to -1, 0.61
+  at the first error's own cut and 0.70 after it, then flat at 0.70 to 0.71.
+* In 2,186 error traces the step with the largest risk is the first error 37% of
+  the time (chance 19%); 47% fall before it and 16% after.
+* Risk alone separates DeepSeek-incorrect steps at AUROC 0.57, and first errors
+  from pre-error steps at 0.61.
+
+*Grading.* A lenient regrade (math-verify plus mixed numbers) turns 2.9% of the
+611,040 rollouts from wrong to correct. It flips 0.19% of `harmful` labels in
+each direction, and the harmful rate stays at 4.33%.
+
+**Interpretation.**
+
+* Shared cut-point rollouts reproduce v1's quantity, gated on the same 501
+  forks, at 18.9 rollouts per labeled step instead of about 80.
+* The set has 14 times v0's harmful steps (1,399 against 98), 556 of them first
+  errors.
+* Per-step risk is a noisy target (reliability 0.59). The error rate at a cut is
+  a clean one (test-retest 0.95). §21.24 trains on both.
+* Most incorrect steps are not harmful: 83% of first errors do not raise the
+  error rate by more than 2 SE. DeepSeek-correct steps are harmful at three times
+  the null rate (2.9% against 1.0%).
+
+**Next step.** Train risk readouts on these labels (§21.24).
+
+Plots: `results/step_value_labels_v1/analysis_full/event_study.png`,
+`results/step_value_labels_v1/analysis_full/risk_hist_by_phase.png`,
+`results/step_value_labels_v1/analysis_full/risk_vs_headroom.png`. Raw:
+`results/step_value_labels_v1/analysis_full/{analysis.json,analysis.md,examples.md}`,
+`results/step_value_labels_v1/regrade_full/regrade.json`,
+`results/step_value_labels_v1/label_summary/step_values.jsonl`.
+
+### 21.24 A Linear Risk Readout Adds 0.02 AUROC to Validity (risk_probe_v1)
+
+*Updated: 2026-10-15. Plan: `docs/risk_probe_v1_plan.md`. Results:
+`results/risk_probe_v1/results_summary.md`.*
+
+**Context.** With 32,316 labeled steps (§21.23), does a readout of Qwen3-8B's L35
+states add to the validity score for detecting `harmful` steps? And which target
+trains the better readout: risk directly, or the error rate at each cut,
+differenced?
+
+**What was done.**
+
+*States.* Every readout uses §21.18's `full` view (problem header, then steps 0
+to i) and `hidden_states[35]`, as in v0. Each step gives three rows:
+
+* before: the token just ahead of the step;
+* after: the step's last token;
+* mean: the mean over the step's tokens.
+
+`scripts/risk_probe_v1/build_views.py` aligned 32,316 of 32,316 label steps to
+their view (15,321 copied from the v0 store, 16,995 built).
+
+*Readouts (all linear, `src/analysis/risk_probe_v1.py`).*
+
+* Arm A, direct risk:
+  * ridge on risk from the after row (A_last, primary) or the mean row (A_mean);
+  * L2 logistic on `harmful` (A_last_h);
+  * ridge on risk residualized on validity, length and position (A_*_res).
+* Arm B, value difference:
+  * a value probe V, a binomial logistic regression on (wrong, 16) counts;
+  * the before row predicts err(s) and the after row err(s + 1);
+  * predicted risk = V(after) - V(before).
+* Ridge alpha and logistic C come from 3-fold inner CV on the training folds.
+  The smoke run chose the regularized edge of v0's grids in every fold. Before
+  any full-run fit, both grids were extended by two decades (alpha in
+  logspace(0, 8, 17), C in logspace(-6, 2, 17)); plan §11 records the change.
+
+*Validity score.* On the forks, v0's `xfit_v2ds`, unchanged. On the label set it
+cannot be used: 2,865 of the 5,874 label traces were in its training views.
+`xfit5` cross-fits the §21.18 token probe (`local` arm, v1 hyperparameters, seed
+42) over 5 problem folds. The folds cover the v2 train views minus fork problems
+plus the label views, 60,112 views in all. Dev F1 is 0.548 to 0.557, and
+validity AUROC on the label set is 0.865.
+
+*Evaluation.*
+
+* E1, primary: the arms are fit on all label steps and applied once to v0's 531
+  forks (98 harmful), through v0's code path and fork bootstrap.
+* E2: 5-fold cross-validation on the label set, folds by sha1(problem_key). Every
+  prediction is out of fold, with a problem bootstrap of 2,000 resamples.
+* Null: 200 refits on label vectors permuted between traces with the same fold
+  and step count, at the real fit's hyperparameters.
+* Q3: out-of-fold logistic regression of `harmful` on validity, log continuation
+  length and relative position, with and without each readout. With two primary
+  arms, E1 intervals are 97.5%.
+
+*Run.* TamIA job 619114 encoded the view store (46.7 GiB) and ran the 5 xfit5 fits in 14.5 min on
+one H100 node. Job 619135 fit the readouts and the null. Gates:
+
+* fork rows reproduce v0's dumped features (median cosine 1.0);
+* `xfit_v2ds` rescores 1,131 rows with a P(incorrect) difference of 0.0;
+* no label-set problem is among the fork problems.
+
+**Results.**
+
+*Q3, does a readout add to validity for `harmful`?*
+
+| set | readout | validity only | + readout | Δ AUROC [CI] |
+|---|---|---|---|---|
+| E1, 531 forks | A_last | 0.680 | 0.700 | +0.020 [-0.012, 0.054] (97.5%) |
+| E1 | B | 0.680 | 0.686 | +0.006 [-0.012, 0.024] (97.5%) |
+| E2, 32,316 steps | A_last | 0.677 | 0.699 | +0.022 [0.014, 0.030] |
+| E2 | B | 0.677 | 0.684 | +0.008 [0.002, 0.013] |
+| E2 | A_last + B | 0.677 | 0.701 | +0.024 [0.016, 0.032] |
+
+*Q2, out-of-sample readouts against the null's 95th percentile.*
+
+| set | arm | Spearman with risk (null) | AUROC harmful (null) |
+|---|---|---|---|
+| E1 | A_last | 0.228 (0.113) | 0.694 (0.595) |
+| E1 | A_last_h | | 0.694 (0.602) |
+| E1 | B | 0.076 (0.090) | 0.586 (0.561) |
+| E2 | A_last | 0.048 (0.015) | 0.682 (0.562) |
+| E2 | A_last_h | | 0.709 (0.568) |
+| E2 | B | 0.036 (0.010) | 0.588 (0.525) |
+
+* On the forks, A_last trained on the label set beats v0's readout trained on the
+  forks themselves: Spearman 0.228 against 0.148, AUROC 0.694 against 0.654.
+* On E2, Spearman with raw risk is small because most steps carry risk near 0
+  plus noise. On first errors A_last reaches 0.136.
+* v0's residual-risk result does not replicate for A_last on the forks (-0.062,
+  null 0.051). Trained on the residual directly, A_mean_res reaches 0.150 (null
+  0.076) and A_last_res 0.078 (null 0.077).
+
+*A against B.* B minus A_last, Spearman with risk: E1 -0.152 [-0.245, -0.063],
+E2 -0.012 [-0.026, 0.000]. V tracks difficulty: Spearman 0.57 between V(before)
+and err(s) on E2, and 0.44 against err(C) on the forks.
+
+*Q1, the validity score within DeepSeek-incorrect steps (E2).* Over 6,124 steps
+(649 harmful): Spearman with risk 0.091 [0.066, 0.117], AUROC for `harmful`
+0.571 [0.547, 0.594]. v0 measured 0.53 over 315 forks.
+
+*Post hoc, within a validity class* (AUROC for `harmful`, problem or fork
+bootstrap):
+
+| set | class | n (harmful) | validity probe | A_last_h |
+|---|---|---|---|---|
+| E2 | DeepSeek-incorrect | 6,124 (649) | 0.571 [0.547, 0.594] | 0.679 [0.658, 0.699] |
+| E2 | DeepSeek-correct | 26,080 (747) | 0.537 [0.516, 0.559] | 0.653 [0.632, 0.673] |
+| E1 | incorrect forks | 315 (91) | 0.532 [0.461, 0.599] | 0.597 [0.530, 0.666] |
+
+A_last correlates with the true err(s) at Spearman 0.073. Adding V(before), the
+predicted difficulty, to the validity score gains +0.010 on E2, against +0.022
+for A_last.
+
+**Interpretation.** The prespecified reading is "E2 alone positive". The readout
+helps on the label distribution; the fork test is not resolved.
+
+* The gain has one size on both sets: +0.020 on the forks, +0.022 on the label
+  set, +0.019 in v0. With 98 harmful forks the E1 half-width is about 0.033.
+  Resolving 0.02 needs a larger fork-style set or E2 as the primary test.
+* The states carry risk the validity probe misses. Within either validity class,
+  the risk readout ranks harmful steps (0.65 to 0.68) where the validity probe
+  sits near chance (0.54 to 0.57).
+* Direct risk regression is the better target. The value difference is a
+  cleaner fit (err at a cut is reliable), but V mostly learns problem difficulty,
+  and its before/after difference carries little of the step's own effect.
+* The comparison is lopsided. The validity score comes from a token transformer
+  over the step's rows. The risk readouts are linear on one row (A) or two (B).
+  For validity that gap was 0.874 against 0.828 PRM800K AUROC (§19). +0.022 is
+  the gain from the cheapest readout, not an estimate of the best one.
+
+**Next step.** Train the §21.18 token transformer with a risk head on the same
+store, folds and evaluation. Add a variant that reads each token row minus the
+step's boundary row.
+
+Outputs: `results/risk_probe_v1/analysis_prod/{summary.json,summary.md,step_scores.jsonl}`,
+`results/risk_probe_v1/prod/readouts/{preds_e1.npz,preds_e2.npz,hparams.json}`,
+`results/risk_probe_v1/results_summary.md`.
+
 ---
 
 
@@ -4866,6 +5131,14 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-15 (§21.23, §21.24).* Shared cut-point rollouts (k = 16)
+label risk(s) = err(s + 1) - err(s) for 32,316 steps at 18.9 rollouts per step,
+gated against the v1 forks. A linear risk readout of L35 states adds +0.022 AUROC
+[0.014, 0.030] to validity for `harmful` on the label set, and +0.020 [-0.012,
+0.054] on the 531 forks. The value-difference target is weaker. Next: the token
+transformer with a risk head on the same store and folds, since the linear
+readout is the cheapest one and the validity baseline is a transformer.
 
 *Addendum 2026-10-15 (§21.22).* A step-level encoder over frozen Base L35 step
 states, with masked-step pretraining, gains nothing from later steps (bidir -

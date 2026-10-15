@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-10-13. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-15. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22).
 
 ## 1. Hypothesis
 
@@ -4386,6 +4386,147 @@ Outputs: `results/judge_prompt_v1/leaderboard.{md,json}`; cells in
 
 ---
 
+### 21.22 A Step-Level Encoder Over Frozen States Gains Nothing From Later Steps (step_bert_probe_v0)
+
+*Updated: 2026-10-15. Plan: `docs/step_bert_probe_v0_plan.md`. Results: `results/step_bert_probe_v0/README.md`.*
+
+**Context.** §21.16 and §21.17 gave a token-level probe attention to later
+steps and lost F1. This test changes the unit and the objective. One token per
+step, a small encoder that slides over the trace, and unlabeled masked-step
+pretraining that asks whether a step's state is predictable from its past and
+from its future. It asks whether that design extracts a forward-looking
+correctness signal the earlier probes missed.
+
+**What was done.** The data are Qwen3-8B-Base `hidden_states[35]` from the
+ReProbe on-policy store (5,483 traces, 51,711 steps, 29.3% incorrect,
+GPT-OSS-120B labels) and the four ProcessBench subsets (3,400 traces, 25,676
+steps). Spans were pooled on TamIA and copied locally
+(`scripts/step_bert/pool_step_tokens.py`). Each step gives a pre-step boundary
+state b_i, a span mean m_i and the contribution c_i = m_i - b_i. The split is
+problem-disjoint, stratified on whether a problem has an error, and excludes
+problems that overlap ProcessBench (`scripts/step_bert/make_split.py`; 3,642 /
+784 / 746 train / val / test traces).
+
+The encoder (`src/probes/step_bert.py`) has 2 layers, d=256, 4 heads and ALiBi
+positions. A per-sequence key mask sets what each step sees:
+
+* `left`: steps j <= t
+* `right`: steps j >= t
+* `both`: all steps
+* `local`: step t only
+* optionally a window |j - t| <= W.
+
+A hidden step is never a key at any depth, which a test pins. Inputs are each
+4096-d part projected to its top 512 train-split principal components
+(`scripts/step_bert/inputs.py`).
+
+The pipeline had four stages:
+
+1. **Pretraining** (`scripts/step_bert/pretrain.py`). The model reconstructs a
+   masked step's 256-component PCA vector, variance-weighted and divided by one
+   shared scale so that a loss of 1.0 equals the mean predictor. Four runs:
+   tokens `state` ([b_i, m_i], target m_i) or `contribution` (c_i), with
+   pretraining modes {both, left, right} or left only.
+2. **Gate G0.** On a 1,000-trace subset, ridge R² of step i from a single
+   neighbour stays at 0.39 to 0.50, below the 0.9 leakage threshold
+   (`results/step_bert_probe_v0/g0_sub1000_pca512.json`).
+3. **Gate G1** (`scripts/step_bert/g1_eval.py`). G1 scores each test step by
+   its reconstruction error.
+   * The error is residualized on step index, step length, prefix tokens, later
+     steps and later tokens, with OLS fit on train.
+   * Each variant is scored by AUROC, with 95% intervals from a bootstrap that
+     resamples problems.
+   * Pass requires the residualized `both` CI above 0.5 and `both - left` above 0.
+4. **Fine-tuning** (`scripts/step_bert/finetune.py`). The classifier head reads
+   the step's encoder output, its embedded input and the reconstruction errors.
+   * Loss: BCE weighted by 1/n_steps per trace.
+   * Early stopping and the threshold come from val step F1.
+   * Contexts are cropped exactly to each condition.
+   * lr x wd were picked on seed 0 (lr 1e-4, wd 0.01; `hp_selection.json`).
+   * Every final condition ran seeds 42, 43 and 44.
+
+`scripts/step_bert/overnight.py` ran all of this on a laptop CPU in 2 h 53 min.
+
+**Results.**
+
+*Pretraining.* With both sides visible, reconstruction is easier. The mixed-mode
+bidir run reached val loss 0.554 against 0.622 for the left-only run (`state`
+tokens; 1.0 = mean predictor). G1 still fails in all four runs. On the `state`
+bidir run (7,090 test steps, prevalence 0.310):
+
+| score | raw AUROC [95% CI] | residualized AUROC [95% CI] |
+|---|---|---|
+| e_left | 0.500 [0.467, 0.534] | 0.576 [0.552, 0.600] |
+| e_right | 0.557 [0.526, 0.589] | 0.525 [0.502, 0.548] |
+| e_both | 0.552 [0.519, 0.588] | 0.559 [0.532, 0.586] |
+| structural features, logistic | 0.663 [0.626, 0.697] | |
+
+* Raw, `both - left` = +0.052 [+0.040, +0.066]. Residualized, it is -0.017
+  [-0.031, -0.003]. Contribution tokens give -0.015 [-0.026, -0.002].
+* On steps up to and including the first error, residualized `both - left` is
+  +0.018 [-0.007, +0.045]. After the first error it is -0.007 [-0.024, +0.012].
+* `state` was selected over `contribution` for fine-tuning: residualized `both`
+  AUROC 0.559 against 0.516.
+
+*Fine-tuning.* On-policy test prevalence is 0.310; always-positive F1 is 0.473.
+ProcessBench values are means over the four subsets.
+
+| condition | test F1 | test AUROC | F1 up to 1st err | PB F1_PB calib-20 | PB oracle | PB known-step AUROC |
+|---|---|---|---|---|---|---|
+| local | 0.656 | 0.841 | 0.449 | 0.386 | 0.444 | 0.788 |
+| causal, all past | 0.662 | 0.844 | 0.443 | 0.388 | 0.442 | 0.777 |
+| bidir W=1 | 0.661 | 0.844 | 0.442 | 0.374 | 0.438 | 0.792 |
+| bidir W=2 (val-best) | 0.657 | 0.846 | 0.448 | 0.376 | 0.438 | 0.791 |
+| bidir W=4 | 0.664 | 0.847 | 0.452 | 0.379 | 0.443 | 0.791 |
+| bidir, all | 0.662 | 0.845 | 0.451 | 0.381 | 0.439 | 0.792 |
+| bidir W=2, no pretraining | 0.657 | 0.841 | 0.462 | 0.386 | 0.435 | 0.802 |
+
+Paired contrasts use a problem-clustered bootstrap. The PB column gives the
+mean calib-20 difference, then each seed's difference.
+
+| contrast | test F1 diff [95% CI] | test AUROC diff [95% CI] | PB calib-20 diff (seeds) |
+|---|---|---|---|
+| bidir W=2 - causal | -0.005 [-0.022, +0.012] | +0.003 [-0.006, +0.012] | -0.011 (-0.027, +0.020, -0.027) |
+| bidir all - causal | -0.000 [-0.015, +0.014] | +0.001 [-0.007, +0.010] | -0.007 (-0.018, +0.022, -0.026) |
+| bidir W=2 - no pretraining | +0.000 [-0.011, +0.012] | +0.005 [-0.002, +0.014] | -0.010 (-0.023, +0.010, -0.015) |
+| causal - local | +0.006 [-0.007, +0.019] | +0.003 [-0.005, +0.010] | +0.001 (+0.006, -0.026, +0.024) |
+
+The pre-registered rule required the `bidir W=2 - causal` test F1 CI above 0
+and a PB difference of at least 0. It returns NO-GO.
+
+**Interpretation.**
+
+* **Later steps do not help.** Later steps make a step's state more
+  predictable, but the reconstruction errors are not more informative about
+  correctness. The raw future advantage tracks step length and position, and
+  it reverses after residualization.
+* **Context of any kind adds little.** All seven conditions fall within 0.008
+  test F1 of one another. The local probe, which sees only the step's own
+  pooled state, sits within 0.006 of the best causal model. At layer 35 the
+  causal backbone has already folded the useful prior context into each
+  step's state, which matches §21.18.
+* **Pretraining contributes nothing measurable.**
+* **One weak hint, not decision-relevant.** ProcessBench known-step AUROC is
+  0.791 to 0.802 for the bidir conditions and 0.777 for causal. The difference
+  does not reach F1_PB, where bidir is 0.007 to 0.014 lower at calib-20.
+* **Scope.** These F1_PB values come from a Base backbone trained on 3,642
+  on-policy traces. They are not comparable to the Instruct or PRM leaderboard
+  cells of §21.15.
+
+This is the third design that gives a probe access to later steps (token
+attention in §21.16, all-step labels in §21.17, step-level masked pretraining
+here) and the third null or negative result.
+
+**Next step.** None on future context. Probe-design effort stays on causal
+backbone states with a local readout.
+
+Plots: `results/step_bert_probe_v0/plots/conditions.png`,
+`results/step_bert_probe_v0/plots/g1_auroc.png`. Raw:
+`results/step_bert_probe_v0/{summary.json,summary.md,g1_*.json,hp_selection.json}`;
+per-fit outputs in `runs/step_bert_probe_v0/ft/`.
+
+---
+
 
 ## 22. Limitations
 
@@ -4725,6 +4866,11 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-15 (§21.22).* A step-level encoder over frozen Base L35 step
+states, with masked-step pretraining, gains nothing from later steps (bidir -
+causal step F1 -0.005 [-0.022, +0.012], ProcessBench calib-20 -0.011) or from
+pretraining (+0.000). Future-context probes are closed after three designs.
 
 *Addendum 2026-10-13 (§21.19, §21.20).* Validity and downstream risk are
 separate targets (Spearman 0.37). Necessity measured by teacher-forced patching is

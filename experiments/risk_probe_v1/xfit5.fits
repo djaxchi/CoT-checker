@@ -1,0 +1,5 @@
+xfit5_f0 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split xf1,xf2,xf3,xf4 --dev_split v2_dev_xfit --bucket_by step --score_splits xf0 fsl_forks
+xfit5_f1 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split xf0,xf2,xf3,xf4 --dev_split v2_dev_xfit --bucket_by step --score_splits xf1 fsl_forks
+xfit5_f2 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split xf0,xf1,xf3,xf4 --dev_split v2_dev_xfit --bucket_by step --score_splits xf2 fsl_forks
+xfit5_f3 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split xf0,xf1,xf2,xf4 --dev_split v2_dev_xfit --bucket_by step --score_splits xf3 fsl_forks
+xfit5_f4 --arms local --seed 42 --lr 1e-4 --wd 0.1 --train_split xf0,xf1,xf2,xf3 --dev_split v2_dev_xfit --bucket_by step --score_splits xf4 fsl_forks

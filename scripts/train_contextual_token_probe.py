@@ -256,7 +256,7 @@ def main() -> None:
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--ff", type=int, default=1024)
     ap.add_argument("--dropout", type=float, default=0.1)
-    ap.add_argument("--train_split", default="train")
+    ap.add_argument("--train_split", default="train", help="one split, or several joined by commas")
     ap.add_argument("--dev_split", default="dev")
     ap.add_argument("--limit_train", type=int, default=0, help="bounded pilot/smoke only")
     ap.add_argument("--limit_dev", type=int, default=0, help="smoke only")
@@ -274,7 +274,7 @@ def main() -> None:
     torch.set_num_threads(int(os.environ.get("TORCH_THREADS", "4")))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     store = TrajStore(a.store, label_override=a.label_override)
-    train_ids = store.ids(a.train_split)
+    train_ids = sorted(t for sp in a.train_split.split(",") for t in store.ids(sp))
     dev_ids = store.ids(a.dev_split)
     if a.limit_train:
         train_ids = sorted(train_ids, key=lambda t: hashlib.sha1(t.encode()).hexdigest())[:a.limit_train]

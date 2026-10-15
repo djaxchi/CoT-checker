@@ -65,7 +65,8 @@ def validate(rows: list[dict], track1_dir: Path, tol: float) -> dict:
     return out
 
 
-def step_table(rows: list[dict]) -> list[dict]:
+def step_table(rows: list[dict], finished: dict[str, bool] | None = None) -> list[dict]:
+    """One row per labeled step; `finished` (trace id -> flag, from the frozen set) marks capped traces."""
     out = []
     for r in rows:
         e0 = r["cuts"][0]["err"] if r["cuts"][0]["cut"] == 0 else None
@@ -73,6 +74,8 @@ def step_table(rows: list[dict]) -> list[dict]:
             i = s["step"]
             row = {"trace_id": r["trace_id"], "problem_key": r["problem_key"], "group": r["group"],
                    "n_steps": r["n_steps"], "err0": e0, **s}
+            if finished is not None:
+                row["finished"] = finished[r["trace_id"]]
             if "step_claim_idx" in r:
                 ci = r["step_claim_idx"][i]
                 fe = r.get("first_error_ds")
@@ -101,7 +104,9 @@ def describe(T: list[dict]) -> dict:
                             "correct": stats(lambda t: t.get("mask_ds") and t["y_ds"] == 0)},
             "by_phase": {ph: stats(lambda t, ph=ph: t.get("phase") == ph)
                          for ph in ("pre_error", "first_error", "post_error")},
-            "by_group": {g: stats(lambda t, g=g: t["group"] == g) for g in sorted({t["group"] for t in T})}}
+            "by_group": {g: stats(lambda t, g=g: t["group"] == g) for g in sorted({t["group"] for t in T})},
+            "first_error_by_finished": {str(f): stats(lambda t, f=f: t.get("phase") == "first_error"
+                                                      and t.get("finished") == f) for f in (True, False)}}
 
 
 def main() -> None:
@@ -110,15 +115,19 @@ def main() -> None:
     ap.add_argument("--out_dir", type=Path, required=True)
     ap.add_argument("--track1_dir", type=Path, default=None, help="validation set: track-1 shards to check against")
     ap.add_argument("--gate_tol", type=float, default=0.03)
+    ap.add_argument("--trace_set", type=Path, default=None,
+                    help="frozen label set, to carry each trace's `finished` flag into the step rows")
     a = ap.parse_args()
     rows = load_shards(a.values_dir)
+    fin = ({t["trace_id"]: bool(t["finished"]) for t in json.loads(a.trace_set.read_text())["traces"]}
+           if a.trace_set else None)
     a.out_dir.mkdir(parents=True, exist_ok=True)
     roll = [x for r in rows for c in r["cuts"] for x in c["rollouts"]]
     S = {"n_traces": len(rows), "n_cuts": sum(len(r["cuts"]) for r in rows), "n_rollouts": len(roll),
          "share_truncated": float(np.mean([x["truncated"] for x in roll])) if roll else None,
          "share_ungradeable": float(np.mean([not x["gradeable"] for x in roll])) if roll else None,
          "n_new_median": float(np.median([x["n_new"] for x in roll])) if roll else None}
-    T = step_table(rows)
+    T = step_table(rows, fin)
     S["steps"] = describe(T)
     if a.track1_dir:
         S["validation"] = validate(rows, a.track1_dir, a.gate_tol)

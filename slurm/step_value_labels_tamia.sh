@@ -11,7 +11,8 @@
 # set, sharded across the node's 4 GPUs, one process per GPU
 # (docs/step_value_labels_v1_plan.md section 5). Several nodes split one run with
 # GROUP (0..) and NUM_SHARDS (4 x nodes): this node runs shards 4*GROUP .. +3.
-# RESUME=1 continues shards cut by the walltime. Shards go to $OUT on project
+# RESUME=1 continues shards cut by the walltime. SHARDS (colon-separated, at most
+# 4, e.g. 6:12:14:23) runs those shard indices instead of the GROUP block. Shards go to $OUT on project
 # storage (small: one JSON row per trace).
 set -euo pipefail
 : "${SNAP:?code snapshot}" "${R:?project result dir}" "${SET_NAME:?trace set file}" "${OUT:?output dir}"
@@ -19,7 +20,7 @@ SET="$R/split/$SET_NAME"
 HF_CACHE="${HF_CACHE:-/project/aip-azouaq/$USER/hf_cache}"
 K="${K:-16}"; LIMIT="${LIMIT:-0}"; GEN_BATCH="${GEN_BATCH:-192}"; CHUNK="${CHUNK:-256}"
 MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-160000}"; POOL_ROWS="${POOL_ROWS:-2048}"
-GROUP="${GROUP:-0}"; NUM_SHARDS="${NUM_SHARDS:-4}"
+GROUP="${GROUP:-0}"; NUM_SHARDS="${NUM_SHARDS:-4}"; SHARDS="${SHARDS:-}"
 RES=(); [[ "${RESUME:-0}" == 1 ]] && RES=(--resume)
 mkdir -p "$OUT/logs"
 
@@ -39,9 +40,11 @@ pip install --no-index torch transformers numpy sympy 2>&1 | tail -1
 sha256sum "$SET"
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv -l 60 > "$OUT/logs/gpu_util-${SLURM_JOB_ID}.csv" &
 
+if [[ -n "$SHARDS" ]]; then LIST=(${SHARDS//:/ }); else LIST=($((4 * GROUP)) $((4 * GROUP + 1)) $((4 * GROUP + 2)) $((4 * GROUP + 3))); fi
+(( ${#LIST[@]} <= 4 )) || { echo "[FATAL] at most 4 shards per node" >&2; exit 2; }
 pids=()
-for g in 0 1 2 3; do
-  sh=$((4 * GROUP + g))
+for g in "${!LIST[@]}"; do
+  sh=${LIST[$g]}
   CUDA_VISIBLE_DEVICES=$g python scripts/step_value_labels/label_values.py \
     --trace_set "$SET" --out_dir "$OUT" --local_files_only "${RES[@]}" \
     --k "$K" --gen_batch "$GEN_BATCH" --chunk "$CHUNK" --limit "$LIMIT" \

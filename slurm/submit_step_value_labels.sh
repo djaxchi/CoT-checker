@@ -9,16 +9,20 @@
 #           against the full run's track-1 shards before any label run.
 # full:     trace_set_label.json, all cuts, k=16, on [nodes] nodes (default 4), into
 #           $R/label. Walltime from the validate run's measured throughput (TIME=).
+# resume:   continues the named shards of $R/label (RESUME=1), 4 per node:
+#           TIME=... NUM_SHARDS=32 bash submit_step_value_labels.sh <snap> resume 6 12 14 23
+#           Only for shards no live job is still writing.
 # The frozen set must already sit in $R/split; its sha256 is checked against its
 # build audit here. Values passed through --export must not contain spaces or commas.
 set -euo pipefail
 SNAP="${1:?snapshot dir}"
 MODE="${2:-validate}"
 NODES="${3:-4}"
+RESUME_SHARDS=("${@:3}")
 R=/project/aip-azouaq/$USER/cot_mech/step_value_labels_v1
 case "$MODE" in
   smoke|validate) TAG=validate ;;
-  full|smoke_label) TAG=label ;;
+  full|smoke_label|resume) TAG=label ;;
   *) echo "unknown mode $MODE" >&2; exit 2 ;;
 esac
 python3 - "$R/split" "build_audit_$TAG.json" <<'PY'
@@ -30,15 +34,18 @@ for name, want in audit["outputs"].items():
         sys.exit(f"[FATAL] {name} sha256 {got} != {sys.argv[2]} {want}")
 print("trace set checksums ok")
 PY
-OUT=$R/$MODE; [[ "$MODE" == full ]] && OUT=$R/label
+OUT=$R/$MODE; [[ "$MODE" == full || "$MODE" == resume ]] && OUT=$R/label
 OUT="$OUT${OUT_SUFFIX:-}"   # e.g. OUT_SUFFIX=_v2 for a second validate run
-if [[ "$MODE" != smoke* && -n "$(ls "$OUT"/values.shard*.jsonl 2>/dev/null)" ]]; then
+if [[ "$MODE" != smoke* && "$MODE" != resume && -n "$(ls "$OUT"/values.shard*.jsonl 2>/dev/null)" ]]; then
   echo "[FATAL] $OUT already has outputs (resume with RESUME=1 by hand)" >&2; exit 2
 fi
 mkdir -p "$OUT/logs"
 JOBS="$OUT/submitted_jobs.txt"; echo "snapshot $SNAP mode $MODE" >> "$JOBS"
 EXTRA=",SET_NAME=trace_set_$TAG.json,OUT=$OUT"
-sb() { sbatch --parsable --output="$OUT/logs/%x-%j.out" --export=ALL,SNAP=$SNAP,R=$R$EXTRA "$@"; }
+# AFTER=jobid[:jobid] starts the jobs once those end, whatever their state (afterany),
+# e.g. a contingency resume behind a resume that may hit its walltime
+sb() { sbatch --parsable ${AFTER:+--dependency=afterany:$AFTER} --output="$OUT/logs/%x-%j.out" \
+         --export=ALL,SNAP=$SNAP,R=$R$EXTRA "$@"; }
 S="$SNAP/slurm/step_value_labels_tamia.sh"
 case "$MODE" in
   smoke) j=$(EXTRA="$EXTRA,LIMIT=2" sb --time=00:20:00 --job-name=svl_smoke "$S"); echo "smoke $j" | tee -a "$JOBS" ;;
@@ -49,5 +56,12 @@ case "$MODE" in
       j=$(EXTRA="$EXTRA,GROUP=$g,NUM_SHARDS=$((4 * NODES))" sb --time="${TIME:?set TIME from the validate throughput}" \
           --job-name=svl_$g "$S")
       echo "label group $g $j" | tee -a "$JOBS"
+    done ;;
+  resume)
+    for ((i = 0; i < ${#RESUME_SHARDS[@]}; i += 4)); do
+      part=("${RESUME_SHARDS[@]:i:4}"); list=$(IFS=:; echo "${part[*]}")
+      j=$(EXTRA="$EXTRA,RESUME=1,SHARDS=$list,NUM_SHARDS=${NUM_SHARDS:?set NUM_SHARDS of the full run}" \
+          sb --time="${TIME:?set TIME}" --job-name=svl_r "$S")
+      echo "resume shards $list $j" | tee -a "$JOBS"
     done ;;
 esac

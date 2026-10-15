@@ -13,10 +13,12 @@ normalization if it is unavailable (offline Tamia wheelhouse may lack it).
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import re
+from typing import Callable
 
 __all__ = ["last_boxed_only_string", "remove_boxed", "normalize_answer",
-           "is_equiv", "extract_final_answer", "grade"]
+           "is_equiv", "extract_final_answer", "grade", "GuardedSympy"]
 
 
 # --------------------------------------------------------------------------- #
@@ -248,8 +250,71 @@ def _sympy_equiv(a: str, b: str) -> bool:
         return False
 
 
-def is_equiv(a: str | None, b: str | None) -> bool:
-    """Answer-equivalence: canonical string match, then optional sympy fallback."""
+def _sympy_worker(conn, mem_bytes: int) -> None:
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+    except (ImportError, ValueError, OSError):
+        pass                                    # no address-space limit on this platform
+    while True:
+        try:
+            a, b = conn.recv()
+        except EOFError:
+            return
+        conn.send(_sympy_equiv(a, b))
+
+
+class GuardedSympy:
+    """_sympy_equiv in a child process under a time and a memory cap, cached.
+
+    An answer such as 10^{10^{10}} makes sympy build the integer: in-process that
+    runs for hours and takes hundreds of GB of host memory (it killed
+    step_value_labels_v1 shards). A call that runs out of time or memory counts as
+    not equal, and the child is replaced. Pass as is_equiv(..., sympy_equiv=guard).
+    """
+
+    def __init__(self, timeout: float = 10.0, mem_bytes: int = 4 << 30):
+        self.timeout, self.mem_bytes = timeout, mem_bytes
+        self.cache: dict[tuple[str, str], bool] = {}
+        self.n_timeouts = 0
+        self._proc = None
+
+    def _start(self) -> None:
+        ctx = mp.get_context("spawn")
+        self._conn, child = ctx.Pipe()
+        self._proc = ctx.Process(target=_sympy_worker, args=(child, self.mem_bytes), daemon=True)
+        self._proc.start()
+
+    def _stop(self) -> None:
+        if self._proc is not None:
+            self._proc.kill(); self._proc.join(); self._proc = None
+
+    def __call__(self, a: str, b: str) -> bool:
+        key = (a, b)
+        if key in self.cache:
+            return self.cache[key]
+        if self._proc is None or not self._proc.is_alive():
+            self._start()
+        self._conn.send(key)
+        ok = False
+        if self._conn.poll(self.timeout):
+            try:
+                ok = bool(self._conn.recv())
+            except EOFError:                    # the child died (memory cap)
+                self._stop()
+        else:
+            self.n_timeouts += 1
+            self._stop()
+        self.cache[key] = ok
+        return ok
+
+
+def is_equiv(a: str | None, b: str | None,
+             sympy_equiv: Callable[[str, str], bool] | None = None) -> bool:
+    """Answer-equivalence: canonical string match, then optional sympy fallback.
+
+    `sympy_equiv` replaces the in-process sympy check (e.g. a GuardedSympy).
+    """
     if a is None or b is None:
         return a is None and b is None
     na, nb = normalize_answer(a), normalize_answer(b)
@@ -265,7 +330,7 @@ def is_equiv(a: str | None, b: str | None) -> bool:
             return True
     except (ValueError, TypeError):
         pass
-    return _sympy_equiv(a, b)
+    return (sympy_equiv or _sympy_equiv)(a, b)
 
 
 def grade(generated_solution: str, ground_truth_answer: str) -> dict:

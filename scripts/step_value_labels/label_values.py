@@ -16,7 +16,9 @@ are re-batched into the next round (src/analysis/step_value_labels.sample_rounds
 so batches stay full and a rare runaway row does not hold a batch to the cap.
 
 All rollouts of a trace are graded together with the project grader (one grade per
-answer identity, as in track 1). Output per shard: values.shardNN.jsonl, one row
+answer identity, as in track 1). Its sympy fallback runs in a child process with a
+--sympy_timeout and a 4 GB memory cap (math_grade.GuardedSympy): an answer such as
+10^{10^{10}} otherwise hangs the shard and exhausts host memory. Output per shard: values.shardNN.jsonl, one row
 per trace with per-cut outcomes and per-step risk, plus a manifest.
 """
 
@@ -35,6 +37,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.analysis.factorized_step_labels import grade_fork  # noqa: E402
 from src.analysis.step_value_labels import sample_rounds, step_risks  # noqa: E402
+from src.eval.math_grade import GuardedSympy, is_equiv  # noqa: E402
 
 REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
 
@@ -57,7 +60,7 @@ def make_gen(model, args, pad_id, device):
     return gen
 
 
-def label_group(gen, tok, traces: list[tuple[int, dict]], args, eos_ids) -> list[dict]:
+def label_group(gen, tok, traces: list[tuple[int, dict]], args, eos_ids, equiv=is_equiv) -> list[dict]:
     """Sample k rollouts per cut for a group of traces at once, grade per trace."""
     rows = []                                     # (trace position, cut, context, budget)
     for ti, (_, t) in enumerate(traces):
@@ -74,7 +77,7 @@ def label_group(gen, tok, traces: list[tuple[int, dict]], args, eos_ids) -> list
             off = t["cut_offsets"][t["cuts"].index(c)]
             text = tok.decode(t["reply_ids"][:off] + x["ids"], skip_special_tokens=True)
             replies.append({"text": text, "truncated": x["truncated"]})
-        grades = grade_fork(replies, t["gold"])
+        grades = grade_fork(replies, t["gold"], equiv)
         cuts = {c: [] for c in t["cuts"]}
         for ((_, c, _, _), x), g in zip(mine, grades):
             cuts[c].append({"gen_text": tok.decode(x["ids"], skip_special_tokens=True), "n_new": len(x["ids"]),
@@ -108,6 +111,7 @@ def main() -> None:
                    help="max padded tokens (rows x (longest context + chunk)) per generate call")
     p.add_argument("--pool_rows", type=int, default=2048, help="rollouts sampled together (whole traces)")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--sympy_timeout", type=float, default=10.0, help="seconds per sympy equivalence check")
     p.add_argument("--shard_idx", type=int, default=0)
     p.add_argument("--num_shards", type=int, default=1)
     p.add_argument("--limit", type=int, default=0, help="smoke: first N traces of this shard")
@@ -148,6 +152,10 @@ def main() -> None:
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     eos_ids = {tok.convert_tokens_to_ids("<|im_end|>"), tok.convert_tokens_to_ids("<|endoftext|>")}
     gen = make_gen(model, a, pad_id, device)
+    guard = GuardedSympy(a.sympy_timeout)
+
+    def equiv(x: str, y: str) -> bool:
+        return is_equiv(x, y, sympy_equiv=guard)
     print(f"[val] shard {a.shard_idx}/{a.num_shards}: {len(traces)} traces, k={a.k} T={a.temperature} "
           f"top_p={a.top_p} top_k={a.top_k} cap={a.max_reply_tokens} chunk={a.chunk} batch={a.gen_batch} "
           f"max_batch_tokens={a.max_batch_tokens} pool={a.pool_rows}",
@@ -165,16 +173,16 @@ def main() -> None:
     with open(out, "a" if done else "w", encoding="utf-8") as fh:
         for gi, grp in enumerate(groups):
             torch.manual_seed(a.seed * 100003 + grp[0][0])
-            for row in label_group(gen, tok, grp, a, eos_ids):
+            for row in label_group(gen, tok, grp, a, eos_ids, equiv):
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
                 n_done += 1; n_roll += sum(c["k"] for c in row["cuts"])
             fh.flush()
             el = time.perf_counter() - t0
             print(f"[val] group {gi+1}/{len(groups)} traces {n_done}/{len(traces)} rollouts {n_roll} "
-                  f"({n_roll / max(el, 1e-9):.1f}/s, {el:.0f}s)", flush=True)
+                  f"({n_roll / max(el, 1e-9):.1f}/s, {el:.0f}s, sympy timeouts {guard.n_timeouts})", flush=True)
     (a.out_dir / f"values.shard{a.shard_idx:02d}.manifest.json").write_text(json.dumps({
         "experiment": "step_value_labels_v1", "shard_idx": a.shard_idx, "num_shards": a.num_shards,
-        "n_traces": n_all, "n_traces_this_run": len(traces), "n_rollouts_this_run": n_roll,
+        "n_traces": n_all, "n_traces_this_run": len(traces), "n_rollouts_this_run": n_roll, "sympy_timeouts": guard.n_timeouts,
         "args": {k: str(v) for k, v in vars(a).items()},
         "trace_set_sha256": hashlib.sha256(a.trace_set.read_bytes()).hexdigest(),
         "torch": torch.__version__, "transformers": __import__("transformers").__version__,

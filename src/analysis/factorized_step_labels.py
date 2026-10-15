@@ -201,18 +201,19 @@ def plain_to_latex(s: str) -> str:
 _SQRT_ARG = re.compile(r"√\(([^()]*)\)|√(\d+|[A-Za-z])")
 
 
-def grade_fork(replies: list[dict], gold: str) -> list[dict]:
+def grade_fork(replies: list[dict], gold: str, equiv: Callable[[str, str], bool] = is_equiv) -> list[dict]:
     """Grade every continuation of one fork, sharing one grade per answer identity.
 
     Each item needs `text` (the whole reply) and `truncated`. A truncated or
     unparseable reply is an error. Within the fork, replies with the same
     `answer_key` are correct if any of them matches the gold (§21.13), so two
-    spellings of one answer never get different grades.
+    spellings of one answer never get different grades. `equiv` defaults to the
+    project's is_equiv.
     """
     out = []
     for r in replies:
         pred = None if r["truncated"] else extract_reprobe_answer(r["text"])
-        ok = pred is not None and bool(is_equiv(pred, gold))
+        ok = pred is not None and bool(equiv(pred, gold))
         out.append({"pred": pred, "answer_key": answer_key(pred) if pred is not None else None,
                     "correct_raw": ok, "gradeable": pred is not None})
     group: dict[str, bool] = defaultdict(bool)

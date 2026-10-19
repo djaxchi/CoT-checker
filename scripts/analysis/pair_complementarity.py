@@ -107,6 +107,13 @@ def main() -> None:
         res["on_pairs_conf_prefers_wrong"] = {"n": int(wrong_conf.sum()),
                                               **{k: float(P[k][wrong_conf].mean()) for k in ("prm", "probe")}}
         agree = (P["probe"] == 1) == (P[best_conf] == 1)
+        for k in ("probe", "prm"):
+            qw, v = qa[wrong_conf], P[k][wrong_conf]
+            arr = np.array([v[qw == q].mean() for q in np.unique(qw)])
+            bb = rng.integers(0, len(arr), (a.n_boot, len(arr)))
+            res.setdefault("wrong_conf_question_weighted", {})[k] = [
+                float(arr.mean()), float(np.percentile(arr[bb].mean(1), 2.5)),
+                float(np.percentile(arr[bb].mean(1), 97.5))]
         res["probe_conf_agreement"] = float(agree.mean())
         res["go"] = bool(ds == "math500" and res["probe+conf_minus_best_part"][0] >= 0.02
                          and res["probe+conf_minus_best_part"][1] > 0)

@@ -5508,7 +5508,7 @@ within-question z-sums. Question bootstrap, 2,000 resamples.
 
 **Results.** Mixed-pair accuracy (MATH-500 / GSM8K):
 
-| scorer | all mixed pairs | pairs where confidence prefers the wrong answer |
+| scorer | all mixed pairs (question-weighted) | pairs where confidence prefers the wrong answer (pair-weighted) |
 |---|---|---|
 | PRM | 0.708 / 0.819 | 0.584 / 0.736 |
 | probe | 0.643 / 0.653 | 0.416 / 0.397 |
@@ -5520,6 +5520,10 @@ within-question z-sums. Question bootstrap, 2,000 resamples.
 Probe + confidence minus the probe: -0.001 [-0.024, +0.022] on MATH-500, +0.005
 [-0.021, +0.032] on GSM8K. NO-GO. Probe and confidence agree on which candidate
 is better in 71% of pairs.
+
+Weighting each question equally, on the pairs where confidence is wrong the
+probe scores 0.441 [0.386, 0.494] on MATH-500 and 0.422 [0.367, 0.477] on GSM8K;
+the PRM scores 0.629 [0.572, 0.685] and 0.754 [0.696, 0.809].
 
 **Interpretation.** On the 985 MATH-500 pairs where token confidence picks the
 wrong answer, the probe picks the right one 42% of the time, worse than a coin:

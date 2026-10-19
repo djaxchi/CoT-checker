@@ -5,7 +5,7 @@
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization (§21.26). On the Instruct policy, step rejection beats one plain sample by +0.03 to +0.07 on MATH-500, but the run has no blind-retry control there, and on GSM8K a blind arm matches the checkers (§21.27).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats one plain sample by +0.03 to +0.07 on MATH-500, but the run has no blind-retry control there, and on GSM8K a blind arm matches the checkers (§21.27).
 
 ## 1. Hypothesis
 
@@ -4855,37 +4855,185 @@ the signal in Qwen's computation over the text rather than in surface wording.
 
 Outputs: `$STORE/cot_mech/step_bert_probe_v1/{tok,txt}/summary.md`.
 
-### 21.26 A Transformer Risk Head Does Worse Than the Linear Readout (risk_probe_v2)
+### 21.26 A Transformer Risk Head Does Worse Than the Linear Readout, and Risk Labels Cannot Help First-Error Localization (risk_probe_v2)
 
-*Updated: 2026-10-19. Plan: `docs/risk_probe_v2_plan.md`. TamIA 621050.*
+*Updated: 2026-10-19. Plan: `docs/risk_probe_v2_plan.md`. TamIA 621050 (d512 risk
+head), 620833 (v1 linear readouts on ProcessBench). Audit post hoc, after the
+null.*
 
-**Context.** §21.24 left open whether the leaderboard's top architecture,
-trained on risk labels, beats the linear readout and adds to validity on
-ProcessBench.
+**Context.** §21.24 left two questions open. Does the leaderboard's top
+architecture, trained on risk labels, beat the linear readout? Does any risk
+readout add to validity for ProcessBench first-error localization? After both
+came back negative, an audit asked whether the null has an external cause or
+is built into the target.
 
-**What was done.** `step_tokens x transformer:d512,l2,f2048,h8` on Qwen3-8B
-Instruct L35 verifier-template states, trained on the 32,316 step_value_labels_v1
-steps with two targets: a soft target, P(err after > err before) under a Beta
-posterior, and the hard `harmful` flag. Folds as in v1, seeds 42 to 44. The
-combination with the d512 validity probe is a logistic model on [validity logit,
-risk logit], fit on the label set and applied to ProcessBench.
+**What was done.**
 
-**Results.** Out-of-fold AUROC for `harmful`: hard 0.641 [0.627, 0.657], soft
-0.563, against 0.709 for the v1 linear `A_last_h`. On ProcessBench, risk alone
-reaches calib-20 0.282 (hard) and 0.230 (soft). Combined with validity (0.611),
-calib-20 changes by -0.004 (hard) and -0.002 (soft). Within DeepSeek-incorrect
-steps the d512 validity probe already ranks `harmful` at 0.620, against 0.608
-for the hard risk head. Reproduction gates pass (median |dP| below 1e-8).
+*d512 risk head.* `step_tokens x transformer:d512,l2,f2048,h8` on Qwen3-8B
+Instruct `hidden_states[35]` under the verifier template, the leaderboard
+trainer's protocol (AdamW + BCE, batch 256, at most 30 epochs, patience 3 on
+validation loss, dropout 0.1). It was trained on the 32,316
+step_value_labels_v1 steps with two targets:
 
-**Interpretation.** More readout capacity hurts on a noisy 32k-step target. The
-soft target barely trains (validation BCE near 0.70). A linear model remains the
-best risk readout, and none of the risk readouts improves ProcessBench
-localization, which is a validity task.
+* soft: P(err after > err before) under Beta(1 + wrong, 1 + right) posteriors;
+* hard: the `harmful` flag.
 
-**Next step.** Risk belongs in a decision that depends on it, such as which steps
-to resample, rather than in a first-error benchmark.
+The learning rate x weight decay grid ran on fold 0. Folds 1 to 4 and full fits
+(seeds 42 to 44) reused the selected setting. The primary combination with the
+d512 validity probe is a logistic model of DeepSeek invalidity on [validity
+logit, risk logit]. It is fit on the label set and applied to ProcessBench. Code:
+`scripts/risk_probe_v2/{build_label_jsonl,train_risk_cell,score_cells,analyze}.py`,
+`slurm/risk_probe_v2_tamia.sh`.
 
-Outputs: `$STORE/cot_mech/risk_probe_v2/prod/analysis/summary.{json,md}`.
+*v1 linear readouts on ProcessBench.* `scripts/risk_probe_v1/score_pb.py` refits
+every arm at its full-run hyperparameters on all label steps, which reproduces
+`preds_e1` exactly. It then scores the §21.18 `full` views of ProcessBench next
+to xfit5 validity.
+
+*Audit.* The audit had four parts:
+
+* pipeline and grading checks;
+* a true-label ceiling: the measured risk labels themselves added to validity
+  for DeepSeek first-error detection on the label set;
+* an oracle combination sweep on ProcessBench;
+* risk used as a gate or prior on validity rather than as an additive score.
+
+**Results.**
+
+| score | label set AUROC `harmful` (OOF) | PB calib-20 | PB oracle | PB AUROC known steps |
+|---|---|---|---|---|
+| validity, d512 leaderboard | 0.679 | 0.611 | 0.657 | 0.938 |
+| validity, xfit5 | | 0.646 | 0.682 | 0.939 |
+| risk, d512 hard | 0.641 [0.627, 0.657] | 0.282 | 0.344 | 0.733 |
+| risk, d512 soft | 0.563 [0.547, 0.579] | 0.230 | 0.275 | 0.630 |
+| risk, v1 `A_last_h` | 0.709 | 0.394 | 0.454 | 0.807 |
+| risk, v1 `A_last` | 0.682 | 0.442 | 0.499 | 0.818 |
+
+* d512 validity + d512 risk changes calib-20 by -0.002 [-0.004, +0.005] (soft)
+  and -0.004 (hard). The hard interval, [-0.003, +0.002], excludes its own point
+  estimate. Resampling traces puts duplicates into the 20-trace calibration
+  draws, which biases the bootstrap. The sign reading does not depend on it.
+* The combiner gives risk a standardized weight of 0.10 to 0.14 (soft) and -0.03
+  to 0.02 (hard), against about 1.5 for validity.
+* xfit5 + `A_last` reaches 0.651 (+0.005, no interval).
+* Choosing the weight and the threshold on ProcessBench itself, an upper bound
+  on any combiner, the d512 risk head adds +0.000 F1_PB oracle. v1 `A_last`
+  adds +0.010 to d512 validity and +0.005 to xfit5.
+
+*Pipeline and grading.*
+
+* risk equals err(s + 1) - err(s) on all 32,316 rows.
+* The 38,190 per-cut error rates match the step labels with no mismatch.
+* Out-of-fold scores cover every step. Validity rescoring reproduces the saved
+  cells (|dP| at most 8.4e-8).
+* The 4,096-token ProcessBench store drops the tail of 9 of 3,400 traces, the
+  same for every score.
+* 1.4% of rollouts are truncated and graded wrong. In 37 of the 1,399 `harmful`
+  labels, the rise in truncations from one cut to the next accounts for half the
+  risk or more.
+
+*Training.*
+
+* Every d512 fit ends above a constant base-rate predictor on validation loss:
+  * hard: BCE 0.175 to 0.200 against 0.170 to 0.189;
+  * soft: 0.696 to 0.706 against 0.693.
+* The fold-0 search chose the smallest learning rate in the grid (1e-4) for the
+  hard target.
+* The soft target is exactly 0.5 on the 53% of steps with zero risk. Its BCE
+  floor is 0.563, against 0.693 for a constant.
+
+*Label structure.*
+
+* Under the 2-SE rule with k = 16, `harmful` is impossible once err(s) is at
+  least 0.8125. That covers 36% of steps, and none of them is labeled harmful.
+* All 16 rollouts already fail before 28% of DeepSeek first errors.
+* err(s)(1 - err(s)) ranks `harmful` at AUROC 0.799, above every readout. It is
+  an oracle quantity, unavailable at test time, that depends on the prefix
+  rather than the step.
+* Under the Beta posteriors, a step labeled harmful is harmful again on fresh
+  rollouts 52% of the time. A predictor of the true risk would still reach AUROC
+  0.95, so label noise does not cap the readouts.
+
+*What the readouts encode.*
+
+* Spearman with the validity logit: 0.55 for `A_last_h`, 0.35 for the d512 hard
+  head.
+* `A_last` separates DeepSeek-invalid steps (0.731) better than `harmful` steps
+  (0.682).
+* Where harm is possible, the d512 validity probe ranks `harmful` at 0.728,
+  `A_last_h` at 0.721 and the d512 risk head at 0.646.
+* On ProcessBench, the d512 risk score tracks step length (Spearman 0.40,
+  against 0.14 on the label set). ProcessBench steps have a median of 201
+  characters, against 83 on the label set, where 68% of traces are capped at
+  256 tokens.
+
+*True-label ceiling.* Detecting the DeepSeek first error on 5,762 label-set
+traces (3,294 with an error), at the best threshold, with z(validity) + w z(risk):
+
+| added to d512 validity | F1_PB oracle | difference |
+|---|---|---|
+| nothing | 0.574 | |
+| measured risk (best w = 0.25) | 0.589 | +0.014 |
+| measured `harmful` (best w = 0.125) | 0.586 | +0.012 |
+| v1 `A_last_h` OOF (best w = 0.125) | 0.581 | +0.007 |
+| d512 risk OOF (best w = 0) | 0.574 | +0.000 |
+
+* Within a trace, the measured risk ranks the first error above earlier steps
+  56% of the time (0.561). Validity does it 89% of the time (0.890).
+* 556 of 3,355 first errors are harmful.
+* 421 error traces (12.5%) contain a harmful step before the first error, where
+  a risk flag is a premature alarm.
+
+*Risk as a gate or prior.* The predicted first error is the first step that
+satisfies the rule:
+
+* AND current: validity and risk both high at the step;
+* AND prefix: validity high at the step, risk high at the step or any earlier
+  step;
+* AND past: as AND prefix, but the risk must come from an earlier step;
+* prior: validity + w x the largest earlier risk.
+
+Thresholds were chosen on half the traces and scored on the other half (20
+repeats). Each grid includes the no-gate setting. Differences from validity
+alone:
+
+| rule | label set, measured risk | label set, d512 OOF | PB, d512 (3 seeds) | PB, v1 `A_last_h` |
+|---|---|---|---|---|
+| validity alone (F1_PB) | 0.573 | 0.573 | 0.644 | 0.644 |
+| AND current | -0.001 | -0.001 | -0.002 | -0.004 |
+| AND prefix | -0.002 | -0.001 | -0.002 | -0.004 |
+| AND past | -0.036 | -0.035 | -0.037 | -0.037 |
+| prior | +0.002 | -0.000 | -0.001 | -0.003 |
+
+* A harmful pre-error step does raise the chance of a first error at the next
+  step, from 0.128 to 0.282.
+* The current step's validity predicts that next-step error better: AUROC 0.609,
+  against 0.551 for the measured risk. On ProcessBench, over the next two steps,
+  validity reaches 0.616 and the d512 risk head 0.608.
+* Among validity's first flags, risk separates real first errors from false
+  alarms at only 0.57 to 0.65.
+
+**Interpretation.**
+
+* Capacity hurts on this target. With about 1,000 positives, the 8.7M-parameter
+  head overfits before it beats a constant predictor. The heavily regularized
+  linear readout stays the best risk readout.
+* The ProcessBench null is built into the target, not caused by the pipeline,
+  grading or combiner. Risk and first-error invalidity are different events:
+  most first errors do not raise failure, and some valid steps do.
+* Even the measured labels add at most +0.014 oracle F1 as an additive score and
+  +0.004 held-out as a gate or prior. No better probe can exceed that.
+* What the linear readout carries onto ProcessBench is mostly validity.
+* The `harmful` label depends on how solvable the prefix is as much as on the
+  step. One harmful label in two would not replicate with fresh rollouts.
+
+**Next step.** Risk is closed as a first-error localization signal. Its remaining
+use is a decision that depends on the outcome, such as which steps to resample or
+which full solution to select.
+
+Outputs: `$STORE/cot_mech/risk_probe_v2/prod/analysis/summary.{json,md}`,
+`$STORE/cot_mech/risk_probe_v1/pb/analysis/pb_metrics.{json,md}`,
+`results/risk_probe_v2/audit/{audit.json,audit.log,audit_b.log,risk_gate.json,risk_gate.log}`.
 
 ### 21.27 Rejection on the Instruct Policy: a Gain Without Its Control (online_reject_v3)
 
@@ -5305,6 +5453,13 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-19 (§21.26, risk closed).* An audit of the risk null found no
+pipeline or grading cause. Added to validity, the measured risk labels raise
+label-set first-error F1 by at most +0.014 (oracle threshold), and by at most
++0.004 when used as a gate or prior. The d512 risk head never beats a constant
+predictor on validation loss. Risk is closed as a first-error signal. It
+remains a candidate only for outcome decisions (resampling, answer selection).
 
 *Addendum 2026-10-19 (§17.1, §21.25 to §21.27).* Full token states lift the
 step encoder's ProcessBench calib-20 from 0.39 to 0.55, and later steps still add

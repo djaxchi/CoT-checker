@@ -5263,6 +5263,50 @@ example among steps where feature 55737 is active).
 
 Outputs: `results/sae_localization_v0/{loc,oc}/`.
 
+### 21.30 What a Rejection Budget Buys, Offline (rejection_value_offline_v0)
+
+*Updated: 2026-10-19. Plan: `docs/rejection_value_offline_v0_plan.md`. Local CPU, no new model calls.*
+
+**Context.** Resampling step s from its prefix replaces a continuation that fails
+at rate err(s+1) with one that fails, to first order, at err(s). The expected
+drop in final-answer error per redraw is risk(s), which §21.23 measured for
+32,316 steps. A rejection controller that flags the top q of steps by some score
+therefore buys, per redraw, the mean risk of the steps it flags.
+
+**What was done.** `scripts/analysis/rejection_value_offline.py` ranks all
+32,316 steps by each out-of-fold score of §21.24 (xfit5 validity, the `A_last`
+risk ridge, the `A_last_h` harmful logistic, and the unfitted sum of z-scored
+validity and `A_last_h`) and reports the mean risk of the top q, against a
+random flag. Paired bootstrap over 3,304 problems, 2,000 resamples.
+
+**Results.** Mean risk per flagged step (expected drop in final error per
+redraw), mean over all steps 0.0096:
+
+| q | random | validity | A_last_h | validity + A_last_h | combined minus validity [95% CI] |
+|---|---|---|---|---|---|
+| 0.05 | 0.012 | 0.058 | 0.066 | 0.069 | +0.011 [-0.000, +0.023] |
+| 0.10 | 0.009 | 0.046 | 0.049 | 0.056 | +0.010 [+0.005, +0.016] |
+| 0.20 | 0.010 | 0.033 | 0.036 | 0.036 | +0.003 [+0.000, +0.006] |
+| 0.30 | 0.010 | 0.024 | 0.028 | 0.028 | +0.003 [+0.001, +0.006] |
+
+At q = 0.10 the combination is 22.7% above validity alone, below the 25% bar set
+in advance: NO-GO by the stated criterion, with the interval clear of 0. The
+flagged 10% of steps hold 22% of all positive risk under the combination and 18%
+under validity.
+
+**Interpretation.** The validity probe already targets a redraw budget well:
+its top 10% of steps carry 5.3 times the risk of a random 10%, because incorrect
+steps are the risky ones on average. A risk readout adds about a fifth on top at
+tight budgets and little beyond q = 0.2. The offline numbers also give the
+ceiling for §21.27: a redraw at the 10% flag rate lowers final error by about
+4.6 points per flagged step on these traces, first order, before any
+interaction between redraws in one trace.
+
+**Next step.** If online_reject_v4 shows the checker beating its blind control,
+add the risk readout to the controller's score at q near 0.1.
+
+Outputs: `results/rejection_value_offline_v0/summary.json`.
+
 ---
 
 

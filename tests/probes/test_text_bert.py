@@ -99,3 +99,20 @@ def test_driver_runs_both_arms(tmp_path):
     for arm in ("tok", "txt"):
         s = json.loads((out / arm / "summary.json").read_text())
         assert "GO" in s and s["contrasts"]
+
+
+def test_tokenize_collection_drops_unstored_trailing_steps():
+    sys.path.insert(0, str(ROOT / "scripts" / "step_bert"))
+    from finetune_txt import tokenize_collection
+
+    class Tok:
+        def __call__(self, xs, add_special_tokens=False):
+            return {"input_ids": [[len(x)] for x in xs]}
+
+    steps = {"trace_id": np.array(["a", "a", "b"]), "step_idx": np.array([0, 1, 0])}
+    texts = {"a": {"problem": "p", "steps": ["x", "yy", "zzz"]}, "b": {"problem": "q", "steps": ["w"]}}
+    _, out = tokenize_collection(Tok(), steps, texts, 8, 8)
+    assert out["a"][1] == [[1], [2]] and out["b"][1] == [[1]]
+    texts["b"]["steps"] = []
+    with pytest.raises(ValueError):
+        tokenize_collection(Tok(), steps, texts, 8, 8)

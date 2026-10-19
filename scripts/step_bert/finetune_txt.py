@@ -30,17 +30,24 @@ from src.probes.text_bert import TextStepClassifier, build_example, span_window 
 
 
 def tokenize_collection(tok, steps, texts: dict, max_prob: int, max_step: int):
-    """Per trace (in steps.npz order): (problem ids, [step ids]); step count must match the store."""
+    """Per trace (in steps.npz order): (problem ids, [step ids]).
+
+    The text keeps only the steps present in the store. A few PB traces (9 of
+    3,400) are stored without their trailing steps, so Arm A never sees them
+    either; any other mismatch is an error.
+    """
     runs = C.trace_runs(steps["trace_id"])
     tids = list(runs)
+    for t in tids:
+        s0, n = runs[t]
+        if len(texts[t]["steps"]) < n or not np.array_equal(steps["step_idx"][s0:s0 + n], np.arange(n)):
+            raise ValueError(f"{t}: {len(texts[t]['steps'])} texts vs stored steps {steps['step_idx'][s0:s0 + n]}")
     probs = tok([texts[t]["problem"] for t in tids], add_special_tokens=False)["input_ids"]
-    flat = [s.strip() for t in tids for s in texts[t]["steps"]]
+    flat = [s.strip() for t in tids for s in texts[t]["steps"][:runs[t][1]]]
     flat_ids = tok(flat, add_special_tokens=False)["input_ids"]
     out, k = {}, 0
     for t, p in zip(tids, probs):
-        n = len(texts[t]["steps"])
-        if n != runs[t][1]:
-            raise ValueError(f"{t}: {n} texts vs {runs[t][1]} stored steps")
+        n = runs[t][1]
         out[t] = (p[:max_prob], [ids[:max_step] for ids in flat_ids[k:k + n]])
         k += n
     return runs, out

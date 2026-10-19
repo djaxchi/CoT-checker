@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-10-15. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-19. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization (§21.26). On the Instruct policy, step rejection beats one plain sample by +0.03 to +0.07 on MATH-500, but the run has no blind-retry control there, and on GSM8K a blind arm matches the checkers (§21.27).
 
 ## 1. Hypothesis
 
@@ -1303,6 +1303,18 @@ The results match outcome C2 of the experiment specification. The model often ho
 ### Next Step
 
 Close the decoder gap: replace the frozen mean input-embedding answer targets with unembedding-based or learned answer representations so the pre-generation answer-identity claim no longer depends on the first-token lens; then test component-level patching (attention versus MLP output) at hs_idx 24-26 to localize what carries the fact-specific content.
+
+### 17.1 Follow-ups: component, neurons, steering and SAE features (prgc, prgm, prgs, prgd)
+*Added 2026-10-19. These ran in July 2026 and were not reported at the time. Outputs under `runs/parametric_retrieval_access_v1/exp{E,F,G,H}/`.*
+
+Four follow-ups ask what in the same-fact donor state rescues a failed paraphrase.
+
+* **Component (expE).** Patching the full residual flips 46.5% of failures at layer 24. Patching only the MLP output flips 25% at layer 27; only the attention output, 9% at layer 21. The effect stays fact-specific.
+* **Minimal edit (expF).** On about 800 test pairs, a shared residual subspace of rank 64 recovers 21% of flips, against 51% for the full residual difference. At the layer-27 MLP, neurons ranked by gradient attribution recover 15% at k=1, 57% at k=64 and 94% at k=4,096. Ranking by activation magnitude plateaus near 21%. Injecting all 18,944 neurons recovers only 22%, so the full transplant carries misaligned neurons that cancel the aligned ones. Greedy forward selection from a 32-neuron pool flips 68 of 76 pairs, with a median of 1 neuron (mean 2.8, `greedy_summary.json`). The neurons are mostly fact-specific: 2,753 distinct neurons appear in the top-32 sets and none in more than half of the pairs. Attribution uses the gold gradient, so these curves measure what is linearly present, not unsupervised behaviour.
+* **Steering the neuron (expG).** Clamping each fact's top neuron on 10 unrelated prompts never produces the fact. The mention rate is 0.0 at every alpha (none, 0, 3, 6, 10) on and off the diagonal of the 80 x 80 specificity matrix (`expG/summary.json`). The clamp does act: coherence falls from 0.88 to 0.51 and own-question accuracy from 0.48 to 0.21. These neurons gate retrieval in context; they are not concept neurons.
+* **SAE decomposition (expH).** The public BatchTopK SAE `andyrdt/saes-qwen2.5-7b-instruct`, `resid_post_layer_27/trainer_1` (k=64), encodes the donor and recipient states at hs_idx 28 for 800 pairs. It reconstructs them with FVU 0.75, which fails the 0.5 gate set in advance (`expH/summary.json`). The feature difference is mildly concentrated: 20 features capture 90% of its L1 mass, against 28 for a random-donor null, and the most frequent added feature appears in 37% of pairs. Under the prespecified rule a high FVU means the basis cannot be trusted, so SAE-feature steering was not built.
+
+The public Instruct SAE fails the reconstruction gate here (0.75) as it did on the PRM800K step readout (0.58 at L20, 0.92 at L28; `scripts/public_sae/`). Both reads sit at the final token of a deep layer, where Qwen's massive activations live and where the SAE's training pipeline dropped outlier-norm activations.
 
 ---
 
@@ -3509,8 +3521,12 @@ can be read as a tree of kept and rejected steps. A gate
 (`verify_online_checkers.py`) first checks that online scores reproduce the
 offline ones on stored traces.
 
-**Status.** Smoke jobs 22057029 to 22057032 and 22057394 (10 problems each)
-running on Rorqual.
+**Status (2026-10-19).** online_reject_v2 was cancelled after the step-unit
+audit: on the chat pool, blank-line "steps" are mostly formatting (`---` rules,
+headers, lead-ins), and the `step_stats` probe flagged `---` at a mean suspicion
+of 0.60 against 0.17 for prose. Its replacement, online_reject_v3, runs on the
+`prm800k` few-shot prompt and reached a partial result before the Rorqual queue
+stalled. See §21.27.
 
 
 ### 21.15 The PRM's Own Activations as the Verifier's Input (prm_backbone_v1, prm_geometry_v1)
@@ -4790,10 +4806,168 @@ Outputs: `results/risk_probe_v1/analysis_prod/{summary.json,summary.md,step_scor
 `results/risk_probe_v1/prod/readouts/{preds_e1.npz,preds_e2.npz,hparams.json}`,
 `results/risk_probe_v1/results_summary.md`.
 
+**ProcessBench addendum (2026-10-19, TamIA 620833).** The label-set readouts
+were also scored on ProcessBench
+(`$STORE/cot_mech/risk_probe_v1/pb/analysis/pb_metrics.md`). Alone, `A_last`
+reaches calib-20 F1_PB 0.442 and known-step AUROC 0.818. Added to the xfit5
+validity score it moves the four-subset calib-20 mean from 0.646 to 0.651
+(oracle 0.682 to 0.688). No interval was computed, and the OmniMath subset drops
+(0.595 to 0.579).
+
+### 21.25 Full Token States and Raw Text Do Not Rescue Future Context (step_bert_probe_v1)
+
+*Updated: 2026-10-19. Plan: `docs/step_bert_probe_v1_plan.md`. TamIA 620832 (tok, txt search), 629151 (txt finals).*
+
+**Context.** v0 (§21.22) fed the step encoder 512 PCA components of pooled
+states. v1 asks whether later steps help once the encoder reads every token
+state, or the raw step text.
+
+**What was done.** Same split, labels and metrics as v0 (Qwen3-8B-Base L35
+on-policy store, GPT-OSS-120B labels, test prevalence 0.310, always-positive F1
+0.473). Arm `tok` reads the full 4,096-d token states of each step. Arm `txt`
+fine-tunes ModernBERT-base on the step text, with visibility set by truncating
+the input. Seeds 42, 43 and 44.
+
+**Results.** Arm `tok`:
+
+| condition | test F1 | test AUROC | PB calib-20 | PB oracle |
+|---|---|---|---|---|
+| local | 0.673 | 0.854 | 0.524 | 0.574 |
+| causal, all past | 0.681 | 0.869 | 0.551 | 0.600 |
+| bidir, all | 0.683 | 0.862 | 0.535 | 0.581 |
+
+* bidir - causal: test F1 +0.002 [-0.012, +0.014], test AUROC -0.008
+  [-0.014, -0.001], PB calib-20 -0.016 (every seed negative). NO-GO.
+* causal - local: AUROC +0.016 [+0.006, +0.025], PB calib-20 +0.027.
+
+Arm `txt`: local 0.548, causal 0.589, bidir 0.599 test F1. bidir - causal is
++0.010 [-0.006, +0.026] F1 and +0.000 PB calib-20. NO-GO. Its best PB calib-20,
+0.285, sits 0.27 below the token-state arm.
+
+**Interpretation.** Full token states lift ProcessBench calib-20 from v0's 0.386
+(local) to 0.524 and from 0.388 (causal) to 0.551, so v0's PCA pooling discarded
+most of the transferable signal. Later steps still add nothing: this is the fifth
+future-access design to return null or negative. Text alone, read by a
+150M-parameter encoder, is far weaker than the backbone's states, which places
+the signal in Qwen's computation over the text rather than in surface wording.
+
+**Next step.** None on future context.
+
+Outputs: `$STORE/cot_mech/step_bert_probe_v1/{tok,txt}/summary.md`.
+
+### 21.26 A Transformer Risk Head Does Worse Than the Linear Readout (risk_probe_v2)
+
+*Updated: 2026-10-19. Plan: `docs/risk_probe_v2_plan.md`. TamIA 621050.*
+
+**Context.** §21.24 left open whether the leaderboard's top architecture,
+trained on risk labels, beats the linear readout and adds to validity on
+ProcessBench.
+
+**What was done.** `step_tokens x transformer:d512,l2,f2048,h8` on Qwen3-8B
+Instruct L35 verifier-template states, trained on the 32,316 step_value_labels_v1
+steps with two targets: a soft target, P(err after > err before) under a Beta
+posterior, and the hard `harmful` flag. Folds as in v1, seeds 42 to 44. The
+combination with the d512 validity probe is a logistic model on [validity logit,
+risk logit], fit on the label set and applied to ProcessBench.
+
+**Results.** Out-of-fold AUROC for `harmful`: hard 0.641 [0.627, 0.657], soft
+0.563, against 0.709 for the v1 linear `A_last_h`. On ProcessBench, risk alone
+reaches calib-20 0.282 (hard) and 0.230 (soft). Combined with validity (0.611),
+calib-20 changes by -0.004 (hard) and -0.002 (soft). Within DeepSeek-incorrect
+steps the d512 validity probe already ranks `harmful` at 0.620, against 0.608
+for the hard risk head. Reproduction gates pass (median |dP| below 1e-8).
+
+**Interpretation.** More readout capacity hurts on a noisy 32k-step target. The
+soft target barely trains (validation BCE near 0.70). A linear model remains the
+best risk readout, and none of the risk readouts improves ProcessBench
+localization, which is a validity task.
+
+**Next step.** Risk belongs in a decision that depends on it, such as which steps
+to resample, rather than in a first-error benchmark.
+
+Outputs: `$STORE/cot_mech/risk_probe_v2/prod/analysis/summary.{json,md}`.
+
+### 21.27 Rejection on the Instruct Policy: a Gain Without Its Control (online_reject_v3)
+
+*Updated: 2026-10-19. Partial run; Rorqual jobs stalled in queue after 2026-09-30.*
+
+**Context.** §20.17 and §21 found step rejection worth +7 to +12 points over a
+blind retry loop on Qwen3-8B-Base. v3 repeats it on Qwen3-8B Instruct.
+
+**What was done.** Qwen3-8B Instruct under the `prm800k` few-shot prompt, which
+yields PRM800K-like steps (§21.14). Checkers: `boundary_stats x mlp:h1024x2`,
+`step_stats x mlp:h1024` and Qwen2.5-Math-PRM-7B, each rejecting at quantiles
+q in {0.50, 0.65, 0.80} of its own step scores; up to two retries; blind arms
+with a coin at the measured retry rate. Paired by problem with the plain arm.
+Paired differences below use a problem bootstrap (2,000 resamples) on whatever
+problems each arm finished (`cot-checker-results/online_v3/runs/`,
+`scripts/analysis/online_reject_points.py`).
+
+**Results.** Accuracy minus plain:
+
+| arm | GSM8K (n=200, plain 0.900) | MATH-500 (n, plain on same problems) |
+|---|---|---|
+| blind, boundary_stats rate | +0.045 [+0.020, +0.075] | not run |
+| blind, step_stats rate | +0.000 [-0.035, +0.040] | not run |
+| reject boundary_stats q50 | not run | +0.058 [+0.027, +0.092] (446, 0.767) |
+| reject boundary_stats q80 | +0.025 [-0.005, +0.055] | +0.042 [+0.009, +0.075] (456, 0.772) |
+| reject step_stats q65 | +0.040 [+0.010, +0.075] | +0.034 [-0.003, +0.071] (351, 0.792) |
+| reject PRM q50 | +0.040 [+0.005, +0.075] | +0.065 [+0.033, +0.100] (428, 0.773) |
+| reject PRM q80 | +0.050 [+0.025, +0.085] | +0.044 [+0.012, +0.076] (410, 0.777) |
+
+On MATH-500 the rejection arms spend 812 to 1,468 generated tokens against
+plain's 428.
+
+* On GSM8K one blind arm gains as much as the best checker (+0.045, 9 wins and 0
+  losses) while the other gains nothing (7 and 7). The blind code path takes a
+  uniform draft, so its output distribution equals plain sampling; the two blind
+  arms bracket the checker arms, and the GSM8K run cannot separate the checker
+  from noise.
+* On MATH-500 every rejection arm beats plain by +0.03 to +0.07, but no blind arm
+  ran there, so the gain is not yet attributed to the checker. Arm sizes differ
+  (351 to 500 problems), each compared with plain on its own subset.
+* The two probes and the PRM land within about 0.03 of each other wherever both
+  ran.
+
+**Interpretation.** Rejection still raises accuracy on the Instruct policy, but
+the run lacks the control that made §20.17 interpretable, and on GSM8K the one
+control that did run shows a gain of the same size. Until a MATH-500 blind arm
+runs on the same problems, the honest statement is "rejection plus retries beats
+one sample at 2 to 3x the tokens", not "the checker pays".
+
+**Next step.** Run plain, one blind arm and the best probe arm on the same
+MATH-500 problems, at one threshold, and compare against self-consistency at the
+same generated-token budget.
+
 ---
 
 
 ## 22. Limitations
+
+*Current limitations (2026-10-19).*
+
+- **Mechanism and verifier live on different backbones.** The mechanistic results
+  of §15 to §18 (low-variance direction, L20 above L28, readout rather than lever)
+  come from Qwen2.5-7B base at L20/L28. The verifiers of §21 read Qwen3-8B at L35
+  or Qwen2.5-Math-PRM-7B at L27. None of the mechanistic facts was re-tested on
+  those backbones.
+- **No SAE result on the current backbones.** The public Instruct SAE fails the
+  reconstruction gate on final-token deep-layer reads (FVU 0.58, 0.75, 0.92). The
+  SAE question of §1 is open.
+- **Effects shrink as the policy strengthens.** The verifier tie-break lift at N=2
+  falls from +6.30 (Base) to +1.67 (Instruct) on MATH-500, and the Instruct
+  rejection run lacks its blind control on MATH-500 (§21.27).
+- **Grading moves numbers as much as the effects.** The regrade of §21.10 turned
+  215 Instruct GSM8K answers from wrong to right; lifts under study are 0.5 to 2
+  points.
+- **Exploratory selection.** 93 aggregation rules, 22-cell grids and per-subset
+  calib-20 thresholds were inspected on the same pools; the confirmatory split
+  recommended by the 2026-09-28 audit is not yet enforced in
+  `tts_rule_contrast.py`.
+- **Target mismatch.** Probes train on validity, which correlates with downstream
+  risk at Spearman 0.37 (§21.19); risk labels have split-half reliability 0.59
+  (§21.23), and 68% of the risk traces hit ReProbe's 256-token cap.
+- **One model family.** Every backbone is Qwen.
 
 *Stage-1 scope. These are the limitations of the SSAE probe work in §14 and were
 never rewritten as the project moved to dense probes and the on-policy arm. The
@@ -5131,6 +5305,16 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-19 (§17.1, §21.25 to §21.27).* Full token states lift the
+step encoder's ProcessBench calib-20 from 0.39 to 0.55, and later steps still add
+nothing (fifth null). A d512 risk head is worse than the linear readout. Instruct
+rejection needs a MATH-500 blind arm before the checker gets credit. The public
+SAE fails its reconstruction gate on the retrieval states too (FVU 0.75). Next,
+in order of cost: the frozen repair experiment (`docs/verifier_repair_v1_plan.md`),
+learner-free tests on existing states (one-class density on correct steps, layer
+sweep on Qwen3-8B), the PRM against its own parent model, and the native-format
+PRM encode.
 
 *Addendum 2026-10-15 (§21.23, §21.24).* Shared cut-point rollouts (k = 16)
 label risk(s) = err(s + 1) - err(s) for 32,316 steps at 18.9 rollouts per step,

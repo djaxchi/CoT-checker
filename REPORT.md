@@ -5119,6 +5119,74 @@ one sample at 2 to 3x the tokens", not "the checker pays".
 MATH-500 problems, at one threshold, and compare against self-consistency at the
 same generated-token budget.
 
+### 21.28 The Verifier Recognizes a Genuine Repair, and So Does Likelihood (verifier_repair_v1)
+
+*Updated: 2026-10-19. Plan frozen 2026-09-29: `docs/verifier_repair_v1_plan.md`. TamIA 494754 (extraction), scored locally.*
+
+**Context.** The September deep audit of the Instruct verifiers
+(`docs/verifier_signal_deep_audit_2026-09-29.md`) found they react to whether a
+step fits the step before it. That leaves open what they do with a correction:
+does a step that repairs an earlier error read as valid, and is that
+distinguishable from a repair that is itself wrong?
+
+**What was done.** 64 numeric families (32 affine equations, 32
+multiplications) cross a correct or wrong prefix, a true or inherited
+conclusion, four candidate forms (`direct`, `recompute`, `check`: "Let me check
+the calculation.", `repair`: "Let me correct the calculation.") and two stages
+(the candidate, then a follow-up that adds one). 2,048 rows, 24 test families per
+domain. Qwen3-8B Instruct `hidden_states[35]`, verifier template, scored by the
+16 hash-verified Instruct leaderboard checkpoints (6 cells, 2 or 3 seeds). The
+same forward pass records each candidate's token log-likelihood. Bootstrap over
+families after averaging seeds.
+
+**Results.** Suspicion of a genuine against a false repair after a wrong prefix,
+test families:
+
+| cell | affine: genuine / false | false - genuine [95% CI] | mult.: genuine / false | false - genuine [95% CI] |
+|---|---|---|---|---|
+| last_token x linear | 0.776 / 0.516 | -0.259 [-0.304, -0.214] | 0.370 / 0.479 | +0.109 [+0.020, +0.180] |
+| step_mean x linear | 0.605 / 0.833 | +0.228 [+0.193, +0.265] | 0.132 / 0.785 | +0.654 [+0.592, +0.715] |
+| step_tokens x attn_query | 0.467 / 0.871 | +0.404 [+0.374, +0.435] | 0.109 / 0.925 | +0.816 [+0.748, +0.862] |
+| step_tokens x d512 | 0.334 / 0.897 | +0.563 [+0.536, +0.590] | 0.085 / 0.980 | +0.896 [+0.842, +0.930] |
+
+Every `step_tokens` cell prefers the genuine repair in all 24 test families of
+both domains. `last_token x linear` prefers the false one in every affine family.
+
+The secondary endpoints, for d512 (affine / multiplication):
+
+* *Repair against an unsupported jump.* After a wrong prefix, writing the
+  correct answer directly scores 0.997 / 0.12 suspicion, the genuine repair
+  0.33 / 0.08. The difference is +0.66 / +0.04.
+* *Wording.* "correct" minus "check", identical arithmetic: +0.20 / +0.25 after a
+  correct prefix with correct arithmetic, -0.21 / -0.06 after a wrong prefix
+  with correct arithmetic. Announcing a correction raises suspicion when nothing
+  needs correcting and lowers it when something does.
+* *Prefix.* The same genuine repair scores -0.01 / -0.23 after a wrong prefix
+  against a correct one.
+* *Follow-up.* The step after a false repair scores +0.002 / +0.046 above the
+  step after a genuine repair. Both follow-ups are locally valid.
+* *Likelihood.* The math tokens of the false repair carry more NLL than the
+  genuine one in every test family (+0.16 / +0.43 nats per token). For the
+  `step_tokens` cells, verifier and likelihood agree in 100% of families; no
+  family has the verifier right and likelihood wrong.
+
+**Interpretation.** The leading verifiers treat a correct recomputation as a
+valid step and a false one as an error, and they read the discourse of
+correction against its context. They judge each step on its own terms: the
+follow-up to a false repair is not penalized for its history, and an
+unexplained jump to the right answer is condemned on affine problems. Every one
+of these preferences is shared by the backbone's own likelihood, so the
+experiment cannot separate verification from conditional surprise on these
+synthetic families. The cheapest cell, `last_token x linear`, gets the primary
+contrast backwards on affine problems, which matches its weak ProcessBench
+transfer.
+
+**Next step.** A test where likelihood and validity disagree by construction:
+correct but unusual steps against fluent wrong ones, matched on NLL.
+
+Outputs: `results/verifier_repair_v1/analysis/{summary.md,analysis.json}`,
+`results/verifier_repair_v1/scores/`.
+
 ---
 
 

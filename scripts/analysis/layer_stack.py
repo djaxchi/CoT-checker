@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.analysis.backbone_geometry import SUBSETS, evaluate, load_split  # noqa: E402
 
-CS = (1e-4, 1e-3, 1e-2, 1e-1)
+CS = tuple(float(c) for c in __import__("os").environ.get("LAYER_STACK_CS", "1e-4,1e-3,1e-2,1e-1").split(","))
 
 
 def block(S, key, blocks, layers):

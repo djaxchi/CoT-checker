@@ -5450,6 +5450,42 @@ correctness readout and the causally effective subspace are different objects.
 
 Outputs: `results/das_probe_direction_v0/probe_direction_L{12,20}.{json,log}`.
 
+### 21.33 Stacking Qwen3-8B Layers Adds 0.02 calib-20 (layer_stack_v0)
+
+*Updated: 2026-10-19. TamIA 629448 (prespecified run), 629519 (C-grid follow-up). CPU only, on the pooled vectors saved by §21.31.*
+
+**Context.** §21.31 found Qwen3-8B's layers 24 to 36 flat one at a time. Flat
+layers can still be complementary.
+
+**What was done.** `scripts/analysis/layer_stack.py`: one standardized L2
+logistic probe on the concatenation of several (layer, readout) blocks, against
+the same probe on each block alone; 60,000 training rows, C by val AUROC. The
+prespecified run used C in {1e-4, ..., 1e-1} and the rule "best stack minus best
+single >= 0.03 calib-20". Its winning stack sat at the grid edge, so a second run
+extended C down to 1e-6.
+
+**Results.** Test AUROC / ProcessBench known-step AUROC / calib-20:
+
+| probe | first run | extended C grid |
+|---|---|---|
+| L35 last token | 0.891 / 0.895 / 0.554 | 0.888 / 0.901 / 0.562 |
+| L30 last token | 0.893 / 0.897 / 0.553 | 0.889 / 0.902 / 0.570 |
+| 7 blocks (mean at 18, 24, 30, 35; last at 24, 30, 35) | 0.903 / 0.926 / 0.592 | 0.903 / 0.926 / 0.592 |
+| all 12 blocks | | 0.902 / 0.927 / 0.590 |
+
+The first run met the rule (+0.038). With the extended grid the single blocks
+improve and the margin falls to +0.022, under the bar.
+
+**Interpretation.** Layers carry partly complementary signal: stacking raises
+ProcessBench known-step AUROC by about 0.025 and calib-20 by about 0.02 over the
+best single block, for a linear model on 60,000 rows. That is the size of §16's
+offline gain on Qwen2.5-7B, and it does not approach the PRM's separator readout
+(0.704). Counted as NO-GO; the first-run GO was an artifact of the C grid.
+
+**Next step.** None.
+
+Outputs: `results/layer_stack_v0/layer_stack_q3{,_cgrid}.json`.
+
 ---
 
 

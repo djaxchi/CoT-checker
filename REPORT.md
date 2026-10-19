@@ -5187,6 +5187,82 @@ correct but unusual steps against fluent wrong ones, matched on NLL.
 Outputs: `results/verifier_repair_v1/analysis/{summary.md,analysis.json}`,
 `results/verifier_repair_v1/scores/`.
 
+### 21.29 Qwen-Scope SAE Features Keep the Signal Without Localizing It (sae_localization_v0)
+
+*Updated: 2026-10-19. Plan: `docs/sae_localization_v0_plan.md`. TamIA 629277 (ladder), 629278 (one-class), CPU only.*
+
+**Context.** §1 asks whether SAE features carry step correctness. In August the
+rep grid on Qwen3-8B-Base (`hidden_states[35]`, the Qwen-Scope TopK SAE
+`SAE-Res-Qwen3-8B-Base-W64K-L0_50` at `layer34`, k=50, FVU 0.327 on the PRM800K
+step store) trained every dense readout's SAE twin under the same protocol, and
+it was never reported. Keeping the signal in a 65,536-wide code is weaker than
+localizing it to a few features, which is the interpretability claim.
+
+**What was done.** *The twins (August, three seeds, `cot-checker-results/rep_grid_q3`).*
+Mean over seeds, PRM800K test AUROC and ProcessBench oracle F1_PB:
+
+| readout | dense, linear | SAE, linear | dense, best MLP | SAE, MLP h1024 |
+|---|---|---|---|---|
+| step mean | 0.869 / 0.527 | 0.867 / 0.462 | 0.895 / 0.545 | 0.883 / 0.514 |
+| last token | 0.849 / 0.469 | 0.775 / 0.275 | 0.869 / 0.471 | 0.814 / 0.341 |
+| step stats | 0.874 / 0.501 | 0.855 / 0.462 | 0.893 / 0.588 | 0.888 / 0.553 |
+| step tokens (attn query) | 0.885 / 0.606 | 0.874 / 0.469 | | |
+
+*The ladder (new).* `scripts/analysis/sae_feature_localization.py` ranks the
+65,536 `sae_mean` features and the 4,096 dense `step_mean` coordinates by
+|Cohen's d| on the training split, then refits a logistic probe on the top k
+(200,000 training rows, C by val AUROC). *One-class (new).*
+`scripts/analysis/one_class_correct.py` fits a shrunk Gaussian to correct steps
+only and scores Mahalanobis distance, against two-class LDA.
+
+**Results.** Top-k ladder, PRM800K test AUROC / ProcessBench known-step AUROC /
+calib-20 F1_PB:
+
+| k | SAE features | dense coordinates |
+|---|---|---|
+| 1 | 0.640 / 0.677 / 0.341 | 0.630 / 0.540 / 0.161 |
+| 16 | 0.713 / 0.719 / 0.332 | 0.699 / 0.732 / 0.312 |
+| 128 | 0.794 / 0.825 / 0.439 | 0.782 / 0.803 / 0.376 |
+| 1,024 | 0.844 / 0.826 / 0.400 | 0.840 / 0.848 / 0.431 |
+| all | 0.867 (twin cell) | 0.869 / 0.876 / 0.475 |
+
+The prespecified GO (k=16 SAE test AUROC >= 0.80 and 0.05 above dense) fails:
+0.713 against 0.699. The single best feature (|d| 0.48) is barely stronger than
+the best coordinate (|d| 0.47). The SAE basis leads by 0.01 to 0.02 AUROC up to
+k=128 and transfers better there (calib-20 0.439 against 0.376), then the dense
+basis catches up.
+
+The top features are readable, and none of them reads error. The strongest
+positive ones fire on steps that assert a computed value: 55737 on bare numeric
+results ("That is $1048.7$.", "It is: 789112610022400"), 65115 on calculator
+outputs and long matrices, 50003 on short "So $n=52$" conclusions, 56135 on
+lists of arithmetic remainders. The strongest negative ones fire on planning and
+discourse ("Let's start by expanding the expression.", "Why?", "Right."). Each
+is active in both classes: 55737 on 37.7% of incorrect and 11.1% of correct
+steps.
+
+One-class density fails outright. Mahalanobis distance to the correct-step
+Gaussian gives test AUROC 0.525 (`step_mean`) and 0.557 (`last_token`) against
+LDA's 0.860 and 0.853, and ProcessBench calib-20 0.096 against 0.482. The mirror
+fit on incorrect steps does slightly better (0.639). Euclidean distance to the
+correct centroid is below chance (0.428).
+
+**Interpretation.** At this layer the Qwen-Scope dictionary preserves the
+correctness signal but spreads it over hundreds of features, as the dense basis
+does. Its most discriminative features encode the kind of step, a step that
+commits to a number against a step that plans, which is where errors can occur,
+rather than whether the step is wrong. Correct steps are not a compact density
+that incorrect steps leave: the correctness direction is one low-variance axis
+among thousands, and an unsupervised distance is dominated by the rest. Both
+results agree with §15.4. The SAE question of §1 gets a negative answer for the
+Qwen-Scope k=50 dictionary at `layer34`.
+
+**Next step.** None on this dictionary. A residual test is whether the probe
+still separates correct from incorrect steps within a fixed step type (for
+example among steps where feature 55737 is active).
+
+Outputs: `results/sae_localization_v0/{loc,oc}/`.
+
 ---
 
 

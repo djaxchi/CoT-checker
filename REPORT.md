@@ -5404,6 +5404,52 @@ Outputs: `results/backbone_geometry_v0/geometry_{prm_ver,parent_ver,prm_native,q
 logs in `results/backbone_geometry_v0/logs/`. Pooled vectors for `prm_ver` and
 `q3_ver` are kept on TamIA at `$SCRATCH/cot_mech/backbone_geometry_v0/vectors/`.
 
+### 21.32 Patching the Readout Direction Does Not Move the Answer; the Learned Causal Subspace Is the Siblings' Content Difference (das_probe_direction_v0)
+
+*Updated: 2026-10-19. Plan: `docs/das_probe_direction_v0_plan.md`. TamIA 629301.*
+
+**Context.** §15.8 closed additive steering along the probe direction and named
+activation patching of that component as the open loophole. §18.1's caches allow
+it as a pure evaluation: on PRM800K forks (Qwen2.5-7B base), replace only the
+component of the wrong sibling's last eight step-token states that lies in a
+fixed subspace Q with the correct sibling's, and read the teacher-forced
+gold-answer margin. Same 223 held-out forks and recovery metric as §18.1.
+
+**What was done.** `scripts/das_branch/das_probe_direction.py`. Q, built from the
+519 training forks: the mean sibling difference (k=1), shrunk LDA on step-mean
+states (k=1, the probe analogue), the top 1, 4 and 16 principal directions of the
+per-fork sibling differences, random frames (five seeds), and §18.1's learned
+DAS subspaces (seed 0). Gate: L20 DAS k=16 reproduces 0.2445, its stored value.
+
+**Results.** Held-out margin recovery (fraction of the correct-minus-wrong gap):
+
+| Q | L12 | L20 |
+|---|---|---|
+| mean sibling difference, k=1 | -0.076 | -0.107 |
+| LDA direction, k=1 | -0.097 | -0.066 |
+| random, k=1 (mean of 5) | -0.094 | -0.088 |
+| top difference PC, k=1 | +0.029 | +0.099 |
+| top 16 difference PCs | -0.001 | +0.227 |
+| random, k=16 (mean of 5) | -0.096 | -0.105 |
+| learned DAS, k=8 / k=16 | +0.060 / -0.020 | +0.392 / +0.244 |
+| full state | +1.619 | +0.583 |
+
+Against random k=1 (paired Wilcoxon): mean difference p = 0.45, LDA p = 0.25,
+top difference PC p = 0.054. NO-GO by the prespecified rule.
+
+**Interpretation.** Swapping the readout component between siblings moves the
+answer margin no more than swapping a random direction. With §15.8 this closes
+the probe direction as a causal variable under both additive and interchange
+interventions. At layer 20 the top 16 principal directions of how the two
+siblings' states differ, found without any objective, recover 0.227, close to
+the learned DAS subspace (0.244). The causal subspace DAS found is the main axes
+of content difference between the two steps, not a correctness axis. The
+correctness readout and the causally effective subspace are different objects.
+
+**Next step.** None on single directions.
+
+Outputs: `results/das_probe_direction_v0/probe_direction_L{12,20}.{json,log}`.
+
 ---
 
 

@@ -59,3 +59,14 @@ Index 28 (36 for Qwen3) is the post-norm final state, the head's input.
 One H100:4 node, one config per GPU, pooled vectors on node-local disk only;
 geometry on the same node's CPUs. Outputs: `geometry.json` and logs in
 `$SCRATCH/cot_mech/backbone_geometry_v0/`.
+
+## Addendum (2026-10-19, after the main run, before the cross-model test)
+
+Q1 came out GO. Because the PRM is fine-tuned from the parent, residual
+coordinates are comparable. `scripts/analysis/cross_model_direction.py` fits LDA
+in each model and applies each direction to the other model's states (rows
+aligned by uid), at layer 27 step mean, layer 28 last token and layer 20 last
+token. Reading fixed now: the PRM direction applied to parent states reaching
+the parent's own LDA calib-20 within 0.02 means process supervision amplified a
+direction the parent already had; falling more than 0.05 below it means the
+PRM's direction is new.

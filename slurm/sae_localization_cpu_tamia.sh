@@ -8,9 +8,9 @@
 #SBATCH --output=%x-%j.out
 
 # sae_localization_v0 (docs/sae_localization_v0_plan.md): CPU-only analyses on
-# vectors already on scratch. WHAT=loc (SAE top-k ladder) or WHAT=oc (one-class).
+# vectors already on scratch. WHAT=loc (SAE top-k ladder), oc (one-class) or strata (step-type strata).
 set -euo pipefail
-: "${WHAT:?loc or oc}"
+: "${WHAT:?loc, oc or strata}"
 module load StdEnv/2023 python/3.12 gcc arrow/24.0.0
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 BASE="${BASE:-$SCRATCH/cot_mech/qwen3_8b_v1}"
@@ -26,6 +26,10 @@ pip install --no-index numpy scipy scikit-learn 2>&1 | tail -1
 if [[ "$WHAT" == loc ]]; then
   python scripts/analysis/sae_feature_localization.py --sae_dir "$BASE/sae_reps" \
     --dense_cache "$BASE/cache/grid_vectors" --out "$OUT/loc"
+elif [[ "$WHAT" == strata ]]; then
+  python scripts/analysis/step_type_strata.py --sae_dir "$BASE/sae_reps" \
+    --dense_cache "$BASE/cache/grid_vectors" --top_features "$OUT/loc/top_features.json" \
+    --out "$OUT/strata/summary.json"
 else
   python scripts/analysis/one_class_correct.py --dense_cache "$BASE/cache/grid_vectors" \
     --out "$OUT/oc"

@@ -33,7 +33,7 @@ from sklearn.metrics import roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from scripts.analysis.sae_feature_localization import SUBSETS, load_dense, pb_traces  # noqa: E402
+from scripts.analysis.sae_feature_localization import SUBSETS, known_mask, load_dense, pb_traces  # noqa: E402
 from scripts.merge_rep_grid_leaderboard import calib20_subset  # noqa: E402
 
 SHRINK = (1e-4, 1e-3, 1e-2, 0.1, 0.5)
@@ -105,7 +105,8 @@ def main() -> None:
                 sc = f(np.asarray(px, np.float64), lam)
                 # calib-20 thresholds on raw scores via a rank-preserving map to (0,1)
                 rk = (np.argsort(np.argsort(sc)) + 0.5) / len(sc)
-                aus.append(roc_auc_score(py, sc)); cs.append(calib20_subset(pb_traces(meta, rk)))
+                k = known_mask(meta)
+                aus.append(roc_auc_score(py[k], sc[k])); cs.append(calib20_subset(pb_traces(meta, rk)))
                 r[f"pb_{s}_auroc"] = float(aus[-1]); r[f"pb_{s}_calib20"] = float(cs[-1])
             r["pb_auroc"] = float(np.mean(aus)); r["pb_calib20"] = float(np.mean(cs))
             res[name] = r

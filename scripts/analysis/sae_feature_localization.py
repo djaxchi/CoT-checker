@@ -15,7 +15,7 @@ baseline: dense coordinates are not a privileged basis, and if the SAE's top-k
 does no better than the dense top-k, the dictionary has not isolated anything.
 
 Reported per k and basis: PRM800K test AUROC, ProcessBench known-step AUROC and
-calib-20 F1_PB (four-subset means). Prespecified GO (docs/sae_localization_v0_plan.md):
+calib-20 F1_PB (four-subset means; AUROC on known steps only). Prespecified GO (docs/sae_localization_v0_plan.md):
 at k=16 the SAE probe reaches test AUROC >= 0.80 and beats the dense top-16 by
 at least 0.05. The top features are dumped with class statistics and their
 most-activating training rows for reading.
@@ -101,16 +101,20 @@ def cols(x, idx: np.ndarray) -> np.ndarray:
 
 def pb_traces(meta: list[dict], scores: np.ndarray) -> list:
     """(first-error index or -1, scores in step order) per trace, the layout
-    calib20_subset expects. A trace's gold first error is its first y=1 step."""
+    calib20_subset expects. ProcessBench meta carries the trace's first-error
+    index in `label` on every step row; post-error steps are stored too."""
     by: dict[str, list] = {}
+    fe: dict[str, int] = {}
     for m, s in zip(meta, scores):
-        by.setdefault(m["id"], []).append((m["step_idx"], m["label"], float(s)))
-    out = []
-    for rows in by.values():
-        rows.sort()
-        lab = next((i for i, (_, y, _) in enumerate(rows) if y == 1), -1)
-        out.append((lab, [s for _, _, s in rows]))
-    return out
+        by.setdefault(m["id"], []).append((m["step_idx"], float(s)))
+        fe[m["id"]] = int(m["label"])
+    return [(fe[k], [s for _, s in sorted(v)]) for k, v in by.items()]
+
+
+def known_mask(meta: list[dict]) -> np.ndarray:
+    """Steps whose label is defined: every step of a correct trace, and steps up
+    to and including the first error. Post-error steps are excluded from AUROC."""
+    return np.array([m["label"] == -1 or m["step_idx"] <= m["label"] for m in meta])
 
 
 def fit_eval(xtr, ytr, xva, yva, xte, yte, pb, rng_seed=0):
@@ -129,7 +133,8 @@ def fit_eval(xtr, ytr, xva, yva, xte, yte, pb, rng_seed=0):
     pa, pc = [], []
     for sub, (xp, yp, meta) in pb.items():
         s = 1 / (1 + np.exp(-clf.decision_function(z(xp))))
-        pa.append(roc_auc_score(yp, s))
+        k = known_mask(meta)
+        pa.append(roc_auc_score(yp[k], s[k]))
         pc.append(calib20_subset(pb_traces(meta, s)))
         res[f"pb_{sub}_auroc"] = float(pa[-1]); res[f"pb_{sub}_calib20"] = float(pc[-1])
     res["pb_auroc"] = float(np.mean(pa)); res["pb_calib20"] = float(np.mean(pc))

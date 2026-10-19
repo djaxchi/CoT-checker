@@ -5391,7 +5391,11 @@ best single principal component 0.347, from the 11th direction. At the PRM's
 separator the correctness axis is the first principal component of within-class
 variation, and the unwhitened class-mean axis alone reaches 0.685, 98% of the
 head. PRM training takes a signal that the parent already holds (LDA 0.498) and
-makes it the dominant direction at one trained position. This is the first
+makes it the dominant direction at one trained position. Along the PRM's depth the change appears between
+layers 14 and 20: at the separator, the unwhitened class-mean axis gives
+calib-20 0.217 at layer 14, 0.621 at layer 20, 0.643 at 24, 0.664 at 27 and 0.685
+at 28, and the first principal component is the correctness axis from layer 24
+on. This is the first
 setting in this project where correctness is visible without supervision-heavy
 geometry, and it is produced by training, not found in a pretrained or
 instruction-tuned model.

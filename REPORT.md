@@ -5261,7 +5261,18 @@ Qwen-Scope k=50 dictionary at `layer34`.
 still separates correct from incorrect steps within a fixed step type (for
 example among steps where feature 55737 is active).
 
-Outputs: `results/sae_localization_v0/{loc,oc}/`.
+*Step-type strata (TamIA 629302).* Defining step type by the six strongest
+positive and six strongest negative features (selected on train), dense
+`step_mean` LDA keeps its ranking within type: test AUROC 0.860 overall, 0.842
+among steps where both kinds of feature fire (n = 1,359) and 0.845 among
+planning-only steps (n = 628). On ProcessBench known steps the within-type
+AUROC runs 0.850 to 0.898 against 0.859 to 0.880 overall. The twelve type
+features alone reach 0.712 on test. Step type is a prior on where errors occur;
+the dense readout separates errors within a type about as well as across types.
+(The strata are coarse: under step-mean pooling most steps activate both kinds
+of feature.)
+
+Outputs: `results/sae_localization_v0/{loc,oc,strata}/`.
 
 ### 21.30 What a Rejection Budget Buys, Offline (rejection_value_offline_v0)
 
@@ -5306,6 +5317,92 @@ interaction between redraws in one trace.
 add the risk readout to the controller's score at q near 0.1.
 
 Outputs: `results/rejection_value_offline_v0/summary.json`.
+
+### 21.31 Process Supervision Turns a Hidden Margin Into the Dominant Direction at the Read Position (backbone_geometry_v0)
+
+*Updated: 2026-10-19. Plan frozen before the run: `docs/backbone_geometry_v0_plan.md`. TamIA 629288 (one node, 26 min).*
+
+**Context.** §21.15 left three things mixed in "the PRM's states are better":
+process supervision, a math-specialised parent and a different model family,
+and it left a 0.04 calib-20 gap between LDA on PRM states and the PRM's own head.
+Qwen2.5-Math-PRM-7B is initialised from Qwen2.5-Math-7B-Instruct, so the parent
+isolates process supervision; the PRM's native template isolates the position
+its head reads.
+
+**What was done.** `scripts/encode_pooled_multilayer.py` encoded, in one forward
+pass per item and without a token store, the step mean, the step's last token,
+the pre-step boundary and, under the native template, the `<extra_0>` separator
+closing the step, at several `hidden_states` indices. Four configs ran on one
+GPU each: the PRM and its parent under the verifier template, the PRM under its
+native template, and Qwen3-8B (Instruct) under the verifier template. Items: a
+fixed 60,000-row subsample of `probe_train_full` (seed 0), val_5k, test_2k and
+all 25,697 ProcessBench steps (none dropped at 4,096 tokens).
+`scripts/analysis/backbone_geometry.py` fit, on the train subsample only,
+shrunk LDA, the raw class-mean axis and the best single principal component of
+the pooled within-class covariance.
+
+**Gates.** PRM, verifier template, layer 27 step mean: LDA test AUROC 0.9048
+against §21.15's 0.9055 with the full training split. The PRM head, read from
+the native pass, reaches calib-20 0.7002 against §21.15's 0.701.
+
+**Results.** PRM800K test AUROC / ProcessBench known-step AUROC / calib-20 F1_PB
+(four-subset mean):
+
+| backbone, template, read position | LDA | raw class-mean axis | best single PC (index) |
+|---|---|---|---|
+| parent, verifier, L27 step mean | 0.872 / 0.882 / 0.498 | 0.647 / 0.582 / 0.219 | 0.630 / 0.763 / 0.347 (10) |
+| PRM, verifier, L27 step mean | 0.905 / 0.920 / 0.593 | 0.735 / 0.790 / 0.421 | 0.690 / 0.788 / 0.419 (3) |
+| PRM, verifier, L28 last token | 0.907 / 0.929 / 0.629 | | 0.785 / / 0.544 (3) |
+| PRM, native, L28 step mean | 0.906 / 0.919 / 0.590 | | 0.716 / / 0.436 (1) |
+| PRM, native, L28 last token | 0.912 / 0.933 / 0.642 | | 0.796 / / 0.351 (3) |
+| **PRM, native, L28 separator** | **0.922 / 0.959 / 0.704** | 0.903 / 0.954 / 0.685 | 0.896 / 0.952 / 0.682 (0) |
+| PRM head on the same state | 0.907 / 0.957 / 0.700 | | |
+| Qwen3-8B, verifier, L35 step mean | 0.884 / 0.897 / 0.530 | | 0.640 / 0.698 / 0.291 (8) |
+| Qwen3-8B, verifier, L35 last token | 0.890 / 0.897 / 0.568 | | 0.694 / / 0.310 (3) |
+
+Per subset at the native separator, LDA against the head: GSM8K 0.798 / 0.804,
+MATH 0.744 / 0.748, OlympiadBench 0.654 / 0.620, Omni-MATH 0.620 / 0.629.
+
+Qwen3-8B by layer, LDA calib-20, step mean / last token: L12 0.350 / 0.317, L18
+0.431 / 0.419, L24 0.540 / 0.538, L30 0.535 / 0.552, L35 0.530 / 0.568, L36 0.542
+/ 0.546.
+
+Readings fixed in advance:
+
+* **Q1, process supervision: GO.** PRM minus parent at layer 27, step mean LDA
+  calib-20: +0.094 (bar +0.03). The parent sits with Qwen3-8B (0.498 against
+  0.530), not with the PRM.
+* **Q2, format and position: GO.** LDA on the native separator state at layer
+  28 reaches 0.704 against the head's 0.700 (bar: within 0.01).
+* **Q3, Qwen3-8B layer: NO-GO.** The best layer beats layer 35 by +0.012 (step
+  mean, L36), under the +0.02 bar. Layers 24 to 36 are flat.
+
+**Interpretation.** The gap between the PRM's head and every probe on its states
+was the read position, not the head's nonlinearity: at the separator token the
+head reads, a closed-form linear discriminant matches it. Reading the same pass
+at the step's own tokens loses most of the advantage (last token 0.642, step
+mean 0.590), and the native template alone changes little at a fixed position
+(last token 0.642 native against 0.629 verifier).
+
+Process supervision changes the geometry, not only the score. In the parent, as
+in Qwen3-8B and in §15's Qwen2.5-7B, the correctness signal is a low-variance
+margin that needs whitening: the raw class-mean axis gives calib-20 0.219 and the
+best single principal component 0.347, from the 11th direction. At the PRM's
+separator the correctness axis is the first principal component of within-class
+variation, and the unwhitened class-mean axis alone reaches 0.685, 98% of the
+head. PRM training takes a signal that the parent already holds (LDA 0.498) and
+makes it the dominant direction at one trained position. This is the first
+setting in this project where correctness is visible without supervision-heavy
+geometry, and it is produced by training, not found in a pretrained or
+instruction-tuned model.
+
+**Next step.** Test whether the same reorganisation can be induced cheaply in
+the policy model: a LoRA or a single trained read token on Qwen3-8B, scored by
+the same closed-form geometry.
+
+Outputs: `results/backbone_geometry_v0/geometry_{prm_ver,parent_ver,prm_native,q3_ver}/geometry.json`,
+logs in `results/backbone_geometry_v0/logs/`. Pooled vectors for `prm_ver` and
+`q3_ver` are kept on TamIA at `$SCRATCH/cot_mech/backbone_geometry_v0/vectors/`.
 
 ---
 

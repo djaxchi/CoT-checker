@@ -178,6 +178,30 @@ def test_dump_rows_from_store(tmp_path):
     assert np.allclose(z["mean"][0], H[3:6].astype(np.float32).mean(0))
 
 
+def test_dump_rows_other_splits_without_label_views(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    sd = tmp_path / "store" / "shard_000"
+    sd.mkdir(parents=True)
+    H = np.arange(9 * 4, dtype=np.float16).reshape(9, 4)
+    np.save(sd / "h.npy", H)
+    np.save(sd / "lengths.npy", np.array([5, 4]))
+    metas = [{"trace_id": "pb_math_a#0", "split": "pb_math", "step_starts": [2], "step_ends": [5]},
+             {"trace_id": "rp_f#2", "split": "fsl_forks", "step_starts": [1], "step_ends": [4]}]
+    (sd / "meta.jsonl").write_text("".join(json.dumps(m) + "\n" for m in metas))
+    (sd / "step_labels.jsonl").write_text("".join(json.dumps({"trace_id": m["trace_id"], "y": [0], "label_mask": [True]}) + "\n" for m in metas))
+    (sd / "DONE").write_text("")
+    out = tmp_path / "rows.npz"
+    subprocess.run([sys.executable, str(root / "scripts/risk_probe_v1/dump_rows.py"), "--store", str(tmp_path / "store"),
+                    "--splits", "pb_math", "--out", str(out)], check=True, cwd=root)
+    z = np.load(out)
+    assert z["ids"].tolist() == ["pb_math_a#0"] and z["split"].tolist() == ["pb_math"]
+    assert z["before"][0].tolist() == H[1].tolist() and z["after"][0].tolist() == H[4].tolist()
+
+
 def synth_label_set(n_traces=120, d=6, seed=0):
     """Traces whose cut error rate is a logistic function of a 1-d feature of the row."""
     import math
@@ -303,3 +327,125 @@ def test_analyze_end_to_end(tmp_path):
     assert S["gates"]["leakage"]["pass"] and S["n_null_perms"] == 3
     assert S["q2_e2"]["all"]["B"]["spearman_risk"] > 0.3          # the synthetic value probe works out of fold
     assert "verdict" in S["reading"] and (out / "summary.md").exists()
+
+
+def _score_pb():
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    sys.path.insert(0, str(root)); sys.path.insert(0, str(root / "scripts" / "risk_probe_v1"))
+    import score_pb
+    return score_pb
+
+
+def _pb_meta(sp, tid, ys):
+    """Views of one PB trace; ys per step: 0 correct, 1 incorrect, None unknown."""
+    return [{"trace_id": f"{tid}#{i}", "split": sp, "orig_trace_id": tid, "orig_step": i, "orig_n_steps": len(ys),
+             "y": [0 if y is None else y], "label_mask": [y is not None]} for i, y in enumerate(ys)]
+
+
+def test_pb_traces_first_error_and_order():
+    sp = _score_pb()
+    meta = _pb_meta("pb_math", "t1", [0, 0, 1, None]) + _pb_meta("pb_math", "t2", [0, 0])
+    tr = sp.pb_traces(list(reversed(meta)))["pb_math"]
+    assert tr["t1"]["label"] == 2 and tr["t1"]["views"] == ["t1#0", "t1#1", "t1#2", "t1#3"]
+    assert tr["t1"]["y"] == [0, 0, 1, -1] and tr["t2"]["label"] == -1
+    with pytest.raises(SystemExit):
+        sp.pb_traces(_pb_meta("pb_math", "t3", [0, None]))
+
+
+def test_pb_metrics_perfect_and_inverted_scores():
+    sp = _score_pb()
+    meta = []
+    for k in range(30):                       # 30 error traces (error at step 1), 30 correct traces
+        meta += _pb_meta("pb_math", f"e{k}", [0, 1, None]) + _pb_meta("pb_math", f"c{k}", [0, 0, 0])
+    tr = sp.pb_traces(meta)
+    good = {m["trace_id"]: float(m["y"][0] == 1) + (0.5 if not m["label_mask"][0] else 0) for m in meta}
+    r = sp.pb_metrics(good, tr)["pb_math"]
+    assert r["auroc_known"] == 1.0 and r["f1_pb_oracle"] == 1.0 and r["f1_pb_calib20"] == 1.0
+    bad = {k: -v for k, v in good.items()}
+    assert sp.pb_metrics(bad, tr)["pb_math"]["auroc_known"] == 0.0
+
+
+def test_score_pb_end_to_end(tmp_path):
+    """fit_readouts real on a synthetic label set, then score_pb.py on synthetic PB views."""
+    import gzip
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    rows, lab, sv, traces, w = synth_label_set(n_traces=150)
+    for r in sv:
+        r["view_id"] = f"{r['trace_id']}#{r['step']}"
+    (tmp_path / "ts.json").write_text(json.dumps({"traces": list(traces.values())}))
+    (tmp_path / "sv.jsonl").write_text("".join(json.dumps(r) + "\n" for r in sv))
+    (tmp_path / "lab.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lab))
+    np.savez(tmp_path / "rows.npz", **rows)
+    ro = tmp_path / "readouts"
+    subprocess.run([sys.executable, str(root / "scripts/risk_probe_v1/fit_readouts.py"), "--rows", str(tmp_path / "rows.npz"),
+                    "--lab_views", str(tmp_path / "lab.jsonl"), "--step_values", str(tmp_path / "sv.jsonl"),
+                    "--trace_set", str(tmp_path / "ts.json"), "--out_dir", str(ro), "--device", "cpu"],
+                   check=True, cwd=root, capture_output=True)
+    rng = np.random.default_rng(5)
+    (tmp_path / "e2.jsonl").write_text("".join(json.dumps({"view_id": r["view_id"], "xfit5": float(rng.normal() + 2 * r["y_ds"])}) + "\n" for r in sv))
+    # PB: per subset 25 error traces (first error at step 1 of 3) and 25 correct traces
+    meta_dir = tmp_path / "pb_meta"; meta_dir.mkdir()
+    pb_ids, B, A, M = [], [], [], []
+    scores = tmp_path / "scores"; scores.mkdir()
+    saved = tmp_path / "saved"
+    logit = {}
+    for sp in ("pb_gsm8k", "pb_math", "pb_olympiadbench", "pb_omnimath"):
+        meta = []
+        for k in range(25):
+            meta += _pb_meta(sp, f"{sp}_e{k}", [0, 1, None]) + _pb_meta(sp, f"{sp}_c{k}", [0, 0, 0])
+        (meta_dir / f"{sp}.jsonl").write_text("".join(json.dumps(m) + "\n" for m in meta))
+        for m in meta:
+            H = rng.normal(size=(2, 6))
+            pb_ids.append(m["trace_id"]); B.append(H[0]); A.append(H[1]); M.append(H.mean(0))
+            logit[m["trace_id"]] = float(rng.normal() + 3 * m["y"][0])
+    np.savez(tmp_path / "pb_rows.npz", ids=np.array(pb_ids), split=np.array(["pb"] * len(pb_ids)),
+             before=np.array(B, np.float16), after=np.array(A, np.float16), mean=np.array(M, np.float16))
+    for name in [f"xfit5_f{k}" for k in range(5)] + [f"full_v2ds_s{s}" for s in (42, 43, 44)]:
+        (scores / f"{name}.jsonl").write_text("".join(json.dumps({"trace_id": v, "step": 0, "logit": logit[v]}) + "\n" for v in pb_ids))
+    for s in (42, 43, 44):
+        d = saved / f"full_v2ds_s{s}" / "local"; d.mkdir(parents=True)
+        with gzip.open(d / "predictions.jsonl.gz", "wt") as f:
+            f.write("".join(json.dumps({"trace_id": v, "logit": logit[v]}) + "\n" for v in pb_ids))
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(root / "scripts/risk_probe_v1/score_pb.py"), "--label_rows", str(tmp_path / "rows.npz"),
+                    "--lab_views", str(tmp_path / "lab.jsonl"), "--step_values", str(tmp_path / "sv.jsonl"),
+                    "--trace_set", str(tmp_path / "ts.json"), "--readouts", str(ro), "--e2_scores", str(tmp_path / "e2.jsonl"),
+                    "--pb_rows", str(tmp_path / "pb_rows.npz"), "--pb_meta", str(meta_dir), "--scores_dir", str(scores),
+                    "--saved_v2ds", str(saved), "--out_dir", str(out), "--device", "cpu"], check=True, cwd=root)
+    res = json.loads((out / "pb_metrics.json").read_text())
+    assert res["gates"]["refit_reproduces_e1"]["pass"] and res["gates"]["v2ds_rescoring"]["pass"]
+    assert res["metrics"]["validity xfit5"]["mean"]["auroc_known"] > 0.9          # the planted validity signal
+    assert 0.3 < res["metrics"]["risk A_last"]["mean"]["auroc_known"] < 0.7       # random PB rows
+    assert len((out / "pb_scores.jsonl").read_text().splitlines()) == len(pb_ids)
+
+
+def test_build_pb_manifest_keeps_only_processbench(tmp_path):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    src = tmp_path / "full"
+    for d in ("inputs", "meta"):
+        (src / d).mkdir(parents=True)
+    rows = []
+    for sp, n, shard in (("pb_gsm8k", 2, 0), ("pb_math", 1, 3), ("pb_olympiadbench", 1, 3), ("pb_omnimath", 1, 5), ("v1_train", 3, 1)):
+        for i in range(n):
+            rows.append({"trace_id": f"{sp}_{i}#0", "split": sp, "shard": shard})
+        for d in ("inputs", "meta"):
+            (src / d / f"{sp}.jsonl").write_text("".join(json.dumps({"trace_id": f"{sp}_{i}#0"}) + "\n" for i in range(n)))
+    (src / "encode_manifest.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "pb"
+    cmd = [sys.executable, str(root / "scripts/risk_probe_v1/build_pb_manifest.py"), "--src", str(src), "--out", str(out)]
+    subprocess.run(cmd, check=True, cwd=root, capture_output=True)
+    audit = json.loads((out / "build_audit.json").read_text())
+    assert audit["n_views"] == 5 and audit["shards"] == [0, 3, 5]
+    assert not (out / "inputs" / "v1_train.jsonl").exists()
+    assert all(json.loads(l)["split"].startswith("pb_") for l in open(out / "encode_manifest.jsonl"))
+    assert subprocess.run(cmd, cwd=root, capture_output=True).returncode != 0      # never overwrites

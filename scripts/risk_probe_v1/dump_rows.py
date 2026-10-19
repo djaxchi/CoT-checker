@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Per-view L35 rows for the risk_probe_v1 readouts (docs/risk_probe_v1_plan.md, section 2).
 
-For every label-step view (lab_views.jsonl, across xf0..xf4) and every fork view
-(fsl_forks): the row ahead of the step (`before`, cut s), the step's last row
+For every label-step view (lab_views.jsonl, across xf0..xf4, when given) and every
+view of --splits (default fsl_forks; e.g. the ProcessBench views): the row ahead of the step (`before`, cut s), the step's last row
 (`after`, cut s + 1) and the mean over the step's rows (risk_probe_v0's `mean`),
 from the node-local store. Writes <out>.npz with ids, split, before, after, mean
 (float16).
@@ -27,14 +27,14 @@ from train_contextual_token_probe import TrajStore  # noqa: E402
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--store", type=Path, required=True)
-    ap.add_argument("--lab_views", type=Path, required=True)
-    ap.add_argument("--fork_split", default="fsl_forks")
+    ap.add_argument("--lab_views", type=Path, default=None)
+    ap.add_argument("--splits", nargs="+", default=["fsl_forks"], help="every view of these splits")
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args()
-    lab = [json.loads(l)["view_id"] for l in open(a.lab_views) if l.strip()]
-    splits = {f"xf{k}" for k in range(5)} | {a.fork_split}
+    lab = [json.loads(l)["view_id"] for l in open(a.lab_views) if l.strip()] if a.lab_views else []
+    splits = ({f"xf{k}" for k in range(5)} if lab else set()) | set(a.splits)
     store = TrajStore(a.store, splits=splits)
-    ids = lab + store.ids(a.fork_split)
+    ids = lab + [t for sp in a.splits for t in store.ids(sp)]
     missing = [t for t in ids if t not in store.items]
     if missing:
         sys.exit(f"[dump] {len(missing)} views not in the store, e.g. {missing[:3]}")

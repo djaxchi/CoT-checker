@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""A learned read token on a frozen policy model (read_token_v0).
+
+§21.31 found that at the separator token Qwen2.5-Math-PRM-7B's head reads,
+correctness is the first principal component and closed-form LDA matches the
+head, while in every untrained backbone the same signal is a low-variance margin
+read from the step's own tokens (Qwen3-8B best LDA calib-20 0.568). The PRM got
+there by full fine-tuning. This asks whether a frozen Qwen3-8B can be given the
+same read position by training only m appended soft-token embeddings (m x 4096
+parameters) and a linear head on the final state of the last one.
+
+Causality makes this cheap: no earlier position attends to the appended tokens,
+so the prefix (verifier template + step) runs once without gradients, and the
+backward pass covers only the m appended positions over the cached keys and
+values. Batches are left-padded with explicit position ids so every row's soft
+tokens sit at the end with their true positions.
+
+Phases: `train` (soft tokens + head, BCE, label 1 = incorrect) writes
+`read_token.pt`; `encode` writes the read-token states (final layer) and head
+scores for train-subsample/val/test/ProcessBench as in
+scripts/encode_pooled_multilayer.py, so scripts/analysis/backbone_geometry.py
+scores them unchanged (rep `sep`, layer -1).
+Plan: docs/read_token_v0_plan.md.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from scripts.encode_pooled_multilayer import pb_items, prm800k_items  # noqa: E402
+from src.onpolicy.prompts import verifier_prefix  # noqa: E402
+
+
+class ReadToken(torch.nn.Module):
+    def __init__(self, m: int, d: int, init: torch.Tensor):
+        super().__init__()
+        self.soft = torch.nn.Parameter(init.clone().float())  # (m, d)
+        self.head = torch.nn.Linear(d, 1)
+        self.m = m
+
+
+def tokenize(tok, it: dict) -> list[int]:
+    pre = tok(verifier_prefix(it["problem"], it["prefix"]), add_special_tokens=True)["input_ids"]
+    return pre + tok(it["step"], add_special_tokens=False)["input_ids"]
+
+
+def batches(lengths: list[int], max_tokens: int, shuffle_seed: int | None):
+    order = sorted(range(len(lengths)), key=lambda i: lengths[i])
+    out, i = [], 0
+    while i < len(order):
+        j = i
+        while j < len(order) and (j - i + 1) * lengths[order[j]] <= max_tokens:
+            j += 1
+        j = max(j, i + 1)
+        out.append(order[i:j])
+        i = j
+    if shuffle_seed is not None:
+        np.random.default_rng(shuffle_seed).shuffle(out)
+    return out
+
+
+def read_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool):
+    """Final-layer (post-norm) state at the last read token, for a left-padded batch."""
+    B, L = len(ids_list), max(len(t) for t in ids_list)
+    ids = torch.full((B, L), pad, dtype=torch.long)
+    att = torch.zeros((B, L), dtype=torch.long)
+    for r, t in enumerate(ids_list):
+        ids[r, L - len(t):] = torch.tensor(t)
+        att[r, L - len(t):] = 1
+    ids, att = ids.to(dev), att.to(dev)
+    pos = (att.cumsum(1) - 1).clamp(min=0)
+    with torch.no_grad():
+        out = model.model(input_ids=ids, attention_mask=att, position_ids=pos, use_cache=True)
+    cache = out.past_key_values
+    lens = att.sum(1)
+    m = rt.m
+    soft_pos = lens[:, None] + torch.arange(m, device=dev)[None]
+    att2 = torch.cat([att, torch.ones((B, m), dtype=att.dtype, device=dev)], 1)
+    emb = rt.soft.to(model.dtype)[None].expand(B, -1, -1)
+    with torch.set_grad_enabled(grad):
+        out2 = model.model(inputs_embeds=emb, attention_mask=att2, position_ids=soft_pos,
+                           past_key_values=cache, use_cache=True)
+    return out2.last_hidden_state[:, -1].float()
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("phase", choices=["train", "encode"])
+    p.add_argument("--model", default="Qwen/Qwen3-8B")
+    p.add_argument("--m", type=int, default=4)
+    p.add_argument("--init", choices=["vocab", "text"], default="vocab")
+    p.add_argument("--init_text", default="\n\nIs this step correct?")
+    p.add_argument("--train", type=Path)
+    p.add_argument("--n_train", type=int, default=40000)
+    p.add_argument("--epochs", type=int, default=1)
+    p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--max_tokens", type=int, default=16000)
+    p.add_argument("--max_seq_len", type=int, default=3072)
+    p.add_argument("--prm800k", nargs="*", default=[], help="encode: name:path[:limit]")
+    p.add_argument("--pb", nargs="*", default=[], help="encode: subset:path")
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--smoke", type=int, default=0)
+    a = p.parse_args()
+    a.out.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(a.seed)
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(a.model, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(a.model, dtype=torch.bfloat16, local_files_only=True)
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(dev).eval()
+    for q in model.parameters():
+        q.requires_grad_(False)
+    pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    d = model.config.hidden_size
+    emb = model.get_input_embeddings().weight
+
+    if a.phase == "train":
+        if a.init == "text":
+            tids = tok(a.init_text, add_special_tokens=False)["input_ids"]
+            tids = (tids * a.m)[:a.m] if len(tids) < a.m else tids[-a.m:]
+            init = emb[torch.tensor(tids, device=emb.device)].detach().float()
+        else:
+            g = torch.Generator().manual_seed(a.seed)
+            idx = torch.randint(0, emb.shape[0], (a.m,), generator=g)
+            init = emb[idx.to(emb.device)].detach().float()
+        rt = ReadToken(a.m, d, init.cpu()).to(dev)
+        items = prm800k_items(a.train, a.n_train, a.seed)
+        if a.smoke:
+            items = items[:a.smoke]
+        toks = [tokenize(tok, it) for it in items]
+        keep = [i for i, t in enumerate(toks) if len(t) <= a.max_seq_len]
+        toks = [toks[i] for i in keep]
+        # Gate: the cached left-padded read state must equal a plain full forward.
+        with torch.no_grad():
+            got = read_states(model, rt, toks[:2], pad, dev, grad=False)
+            for r in range(2):
+                e = model.get_input_embeddings()(torch.tensor([toks[r]], device=dev))
+                full = torch.cat([e, rt.soft.to(model.dtype)[None]], 1)
+                ref = model.model(inputs_embeds=full).last_hidden_state[0, -1].float()
+                rel = float((got[r] - ref).norm() / ref.norm())
+                print(f"[gate] row {r}: relative difference {rel:.4f}", flush=True)
+                if rel > 0.05:
+                    raise SystemExit("cached read state does not match the full forward")
+        y = torch.tensor([items[i]["label"] for i in keep], dtype=torch.float32)
+        opt = torch.optim.AdamW([{"params": [rt.soft], "lr": a.lr},
+                                 {"params": rt.head.parameters(), "lr": a.lr, "weight_decay": 0.0}],
+                                weight_decay=0.0)
+        bl = batches([len(t) for t in toks], a.max_tokens, a.seed)
+        steps = a.epochs * len(bl)
+        sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=steps, pct_start=0.05)
+        t0, step, run = time.perf_counter(), 0, 0.0
+        for ep in range(a.epochs):
+            for bi, b in enumerate(bl if ep == 0 else batches([len(t) for t in toks], a.max_tokens, a.seed + ep)):
+                h = read_states(model, rt, [toks[i] for i in b], pad, dev, grad=True)
+                logit = rt.head(h).squeeze(-1)
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(logit, y[b].to(dev))
+                opt.zero_grad(); loss.backward()
+                torch.nn.utils.clip_grad_norm_(list(rt.parameters()), 1.0)
+                opt.step(); sched.step(); step += 1
+                run = 0.98 * run + 0.02 * float(loss) if step > 1 else float(loss)
+                if step % 50 == 0 or step == steps:
+                    print(f"[train m={a.m}] step {step}/{steps} loss {run:.4f} "
+                          f"({time.perf_counter()-t0:.0f}s)", flush=True)
+        torch.save({"soft": rt.soft.detach().cpu(), "head": rt.head.state_dict(), "m": a.m,
+                    "model": a.model, "init": a.init}, a.out / "read_token.pt")
+        return
+
+    ck = torch.load(a.out / "read_token.pt", weights_only=False)
+    rt = ReadToken(ck["m"], d, ck["soft"]).to(dev)
+    rt.head.load_state_dict(ck["head"])
+    splits = []
+    for spec in a.prm800k:
+        name, path, *lim = spec.split(":")
+        splits.append((name, prm800k_items(Path(path), int(lim[0]) if lim else 0, a.seed + 1)))
+    for spec in a.pb:
+        sub, path = spec.split(":")
+        splits.append((f"pb_{sub}", pb_items(Path(path), sub)))
+    for name, items in splits:
+        if a.smoke:
+            items = items[:a.smoke]
+        toks = [tokenize(tok, it) for it in items]
+        keep = [i for i, t in enumerate(toks) if len(t) <= a.max_seq_len]
+        H = np.zeros((len(items), 1, d), np.float16)
+        S = np.full(len(items), np.nan, np.float32)
+        t0 = time.perf_counter()
+        for b in batches([len(toks[i]) for i in keep], a.max_tokens, None):
+            rows = [keep[i] for i in b]
+            with torch.no_grad():
+                h = read_states(model, rt, [toks[i] for i in rows], pad, dev, grad=False)
+                s = torch.sigmoid(rt.head(h).squeeze(-1)).cpu().numpy()
+            H[rows, 0] = h.cpu().numpy()
+            S[rows] = s
+        np.savez(a.out / f"{name}.shard0.npz", layers=np.array([-1]),
+                 y=np.array([it["label"] for it in items], np.int8),
+                 kept=np.isin(np.arange(len(items)), keep), head_p_correct=1 - S, sep=H)
+        with open(a.out / f"{name}.shard0.meta.jsonl", "w") as f:
+            for it in items:
+                f.write(json.dumps({k: it[k] for k in ("uid", "id", "step_idx", "first_error", "label")
+                                    if k in it}) + "\n")
+        print(f"[encode] {name}: {len(keep)}/{len(items)} in {time.perf_counter()-t0:.0f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

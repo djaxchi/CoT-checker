@@ -5490,6 +5490,51 @@ offline gain on Qwen2.5-7B, and it does not approach the PRM's separator readout
 
 Outputs: `results/layer_stack_v0/layer_stack_q3{,_cgrid}.json`.
 
+### 21.34 The Probe Fails Where Token Confidence Fails; the PRM Does Not (pair_complementarity_v0)
+
+*Updated: 2026-10-19. Plan: `docs/pair_complementarity_v0_plan.md`. Local, saved Instruct T=1.0 pool of §21.13.*
+
+**Context.** §21.13 found the best probe and the PRM nearly tied as tie-breakers
+at N=2, with mean token confidence behind both. Selection gains need a scorer
+that is right where the others are wrong.
+
+**What was done.** `scripts/analysis/pair_complementarity.py`. Every
+within-question pair of candidates with one correct and one incorrect final
+answer (different answer keys): 2,427 pairs over 158 MATH-500 questions, 2,691
+over 165 GSM8K questions. Accuracy = P(the scorer prefers the correct one),
+averaged within question first. Scorers: PRM and `boundary_stats x mlp_h1024x2`
+(worst step), mean token confidence and bottom-10% group confidence, and
+within-question z-sums. Question bootstrap, 2,000 resamples.
+
+**Results.** Mixed-pair accuracy (MATH-500 / GSM8K):
+
+| scorer | all mixed pairs | pairs where confidence prefers the wrong answer |
+|---|---|---|
+| PRM | 0.708 / 0.819 | 0.584 / 0.736 |
+| probe | 0.643 / 0.653 | 0.416 / 0.397 |
+| mean token confidence | 0.602 / 0.628 | 0 by construction |
+| probe + confidence | 0.642 / 0.658 | |
+| probe + PRM | 0.715 / 0.799 | |
+| PRM + confidence | 0.688 / 0.805 | |
+
+Probe + confidence minus the probe: -0.001 [-0.024, +0.022] on MATH-500, +0.005
+[-0.021, +0.032] on GSM8K. NO-GO. Probe and confidence agree on which candidate
+is better in 71% of pairs.
+
+**Interpretation.** On the 985 MATH-500 pairs where token confidence picks the
+wrong answer, the probe picks the right one 42% of the time, worse than a coin:
+its errors are the confident model's errors. The PRM keeps 58% there (74% on
+GSM8K), so its advantage over the probe concentrates on exactly the cases a
+policy-state readout shares with the policy's own confidence. This is the
+selection-level face of §21.31: a probe on the policy's states inherits the
+policy's blind spots, and an externally trained verifier does not.
+
+**Next step.** Score the same pairs with LDA on the PRM's separator state, to
+confirm the linear readout of §21.31 keeps the PRM's independence from
+confidence.
+
+Outputs: `results/pair_complementarity_v0/summary.json`.
+
 ---
 
 

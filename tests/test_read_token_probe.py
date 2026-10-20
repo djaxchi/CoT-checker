@@ -145,11 +145,9 @@ def test_readouts_run_end_to_end(tmp_path, monkeypatch):
     assert all(r["test_auroc"] > 0.8 for r in rows)
 
 
-def test_eager_soft_pass_matches_sdpa_and_restores_impl():
+def test_no_cudnn_soft_pass_matches_default():
     model = tiny_model()
     rt = ReadToken(2, 32, torch.randn(2, 32) * 0.02)
-    impl = model.config._attn_implementation
     a = read_all_states(model, rt, SEQS, 0, DEV, grad=False)
-    b = read_all_states(model, rt, SEQS, 0, DEV, grad=False, soft_attn="eager")
+    b = read_all_states(model, rt, SEQS, 0, DEV, grad=False, soft_attn="no_cudnn")
     assert torch.allclose(a, b, atol=1e-5)
-    assert model.config._attn_implementation == impl

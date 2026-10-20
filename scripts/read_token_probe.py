@@ -113,24 +113,25 @@ def batches(lengths: list[int], max_tokens: int, shuffle_seed: int | None):
 
 
 @contextlib.contextmanager
-def attn_impl(model, impl: str | None):
-    """Run the enclosed forward under another attention implementation, then restore."""
-    old = model.config._attn_implementation
-    if impl:
-        model.config._attn_implementation = impl
-    try:
+def soft_kernels(soft_attn: str | None):
+    """no_cudnn: SDPA without its cuDNN backend (flash, memory-efficient or math)."""
+    if soft_attn != "no_cudnn":
         yield
-    finally:
-        model.config._attn_implementation = old
+        return
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+        yield
 
 
 def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool,
                     soft_attn: str | None = None):
     """Final-layer (post-norm) states at all m read tokens, (B, m, d), left-padded batch.
 
-    soft_attn="eager" runs only the m-token soft pass with eager attention. On
-    Qwen2.5-Math-7B-Instruct the cuDNN SDPA backward returns NaN gradients on some
-    left-padded batches (read_token_v1 Stage C, job 629664); eager does not.
+    soft_attn="no_cudnn" keeps SDPA for the m-token soft pass but excludes its cuDNN
+    backend. On Qwen2.5-Math-7B-Instruct the cuDNN backward returns NaN gradients on
+    some left-padded batches (read_token_v1 Stage C, job 629664). Eager attention
+    avoids the NaN but drifts from SDPA by 7-8% in bf16 on that model (job 630734
+    failed the cache gate), while SDPA without cuDNN stays within 2%.
     """
     B, L = len(ids_list), max(len(t) for t in ids_list)
     ids = torch.full((B, L), pad, dtype=torch.long)
@@ -148,7 +149,7 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
     soft_pos = lens[:, None] + torch.arange(m, device=dev)[None]
     att2 = torch.cat([att, torch.ones((B, m), dtype=att.dtype, device=dev)], 1)
     emb = rt.soft.to(model.dtype)[None].expand(B, -1, -1)
-    with torch.set_grad_enabled(grad), deep_hooks(model, rt), attn_impl(model, soft_attn):
+    with torch.set_grad_enabled(grad), deep_hooks(model, rt), soft_kernels(soft_attn):
         out2 = model.model(inputs_embeds=emb, attention_mask=att2, position_ids=soft_pos,
                            past_key_values=cache, use_cache=True)
     return out2.last_hidden_state.float()
@@ -193,8 +194,8 @@ def main() -> None:
     p.add_argument("--read", choices=["last", "mean"], default="last")
     p.add_argument("--head", choices=["linear", "mlp"], default="linear")
     p.add_argument("--deep", action="store_true")
-    p.add_argument("--soft_attn", choices=["sdpa", "eager"], default=None,
-                   help="attention for the soft-token pass only (default: the model's, sdpa)")
+    p.add_argument("--soft_attn", choices=["no_cudnn"], default=None,
+                   help="soft-token pass only: SDPA without the cuDNN backend (default: any SDPA backend)")
     p.add_argument("--keep_all", action="store_true", help="encode: also store all m states")
     p.add_argument("--train", type=Path)
     p.add_argument("--n_train", type=int, default=40000)

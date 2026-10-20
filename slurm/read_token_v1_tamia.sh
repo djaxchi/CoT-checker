@@ -10,8 +10,8 @@
 # read_token_v1 (docs/read_token_v1_plan.md), after read_token_v0. STAGE picks the node:
 #   B  GPU0 B1 frozen slot, then B6 re-encodes; GPU1-2 B2 seeds 1, 2; GPU3 B3 400k steps
 #   C  GPU0-2 parent Qwen2.5-Math-7B-Instruct seeds 0-2; GPU3 B7 (mean of all m read tokens)
-#   Cparent  GPU0-2 parent seeds 0-2 only, eager soft pass (rerun of C's parent arm)
-#   D  GPU0-2 deep read token seeds 0-2 (HEAD=linear|mlp), eager soft pass
+#   Cparent  GPU0-2 parent seeds 0-2 only, soft pass without cuDNN SDPA (rerun of C's parent arm)
+#   D  GPU0-2 deep read token seeds 0-2 (HEAD=linear|mlp), soft pass without cuDNN SDPA
 # Every stage first re-encodes PRM800K val with v0's four tokens and picks C* and
 # m_all on val AUROC (scripts/analysis/read_token_select.py). B and C stop if the
 # v0 gate sends the experiment to Stage D. Only results, tokens and logs leave the node.
@@ -118,16 +118,16 @@ case "$STAGE" in
     ;;
   Cparent)
     # Stage C rerun without B7: the cuDNN SDPA backward gave NaN gradients on the
-    # parent (job 629664), so the soft pass runs with eager attention.
+    # parent (job 629664), so the soft pass excludes that backend (eager drifts 7-8% in bf16).
     for s in 0 1 2; do
       run $s "c_parent_seed$s" $PARENT "$CSTAR_M" "$CSTAR_INIT" --n_train 100000 --seed $s \
-        --soft_attn eager & pids+=($!)
+        --soft_attn no_cudnn & pids+=($!)
     done
     ;;
   D)
     for s in 0 1 2; do
       run $s "d_deep_${HEAD}_seed$s" $Q3 "$CSTAR_M" "$CSTAR_INIT" --deep --head "$HEAD" \
-        --n_train 100000 --seed $s --soft_attn eager & pids+=($!)
+        --n_train 100000 --seed $s --soft_attn no_cudnn & pids+=($!)
     done
     ;;
   *) echo "unknown STAGE=$STAGE"; exit 1 ;;

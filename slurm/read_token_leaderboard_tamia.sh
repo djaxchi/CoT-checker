@@ -5,17 +5,19 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=06:00:00
+#SBATCH --time=06:30:00
 #SBATCH --output=%x-%j.out
 # read_token_v1 Stage F (docs/read_token_v1_plan.md): leaderboard learners on a
 # trained deep read token. STAGE picks the job:
 #   store  pick the token on PRM800K val AUROC, write its rt_layers and rt_append
 #          stores for every item of the Qwen3-8B Instruct step-span stores (train,
-#          val, test, four ProcessBench subsets) on 4 GPUs, then train F-A, F-B and
-#          F-C in parallel at seed 42, one lane per GPU, each cell searching lr / wd
-#          as the leaderboard's seed-42 cells do. rt_layers (~45 GB) stays on
-#          node-local disk, since shared scratch is near quota; rt_append (~4 GB)
-#          is copied out so `fc` can add seeds later.
+#          val, test, four ProcessBench subsets) on 4 GPUs, plus rt_traj (its final
+#          state at the current and every previous step), then train at seed 42,
+#          one lane per GPU, every cell searching lr / wd as the leaderboard's
+#          seed-42 cells do: F-C (GPU 0, starts as soon as rt_append exists), F-B
+#          d512, F-T (d512 over rt_traj), and the three F-A cells in turn. The
+#          stores stay on node-local disk, since shared scratch is near quota;
+#          rt_append (~4 GB) is copied out so `fc` can add seeds later.
 #   fc     optional extra F-C seeds ($SEEDS, default "43 44"), reusing the seed-42
 #          F-C selection (--hp_from), one GPU per seed
 set -euo pipefail
@@ -132,17 +134,19 @@ for side in prm pb; do
 done
 echo "$FTOKEN" > "$F/token.txt"
 
-# --- F-A, F-B, F-C in parallel at seed 42, one lane per GPU --------------------------
-# Memory: F-C preloads 163 GB of step spans, each F-B lane ~42 GB of rt_layers,
-# on a 500 GB node. F-A's three cells are minutes each and share one lane.
+# --- cells at seed 42, one lane per GPU ----------------------------------------------
+# F-C needs only rt_append and starts now on GPU 0; GPUs 1-3 first encode the
+# previous steps for rt_traj, then run F-B d512, F-T and the three F-A cells.
+# Memory: F-C preloads 163 GB of step spans, F-B ~42 GB of rt_layers, F-T ~32 GB
+# of rt_traj, on a 500 GB node.
 FAB="$F/cells_fab"
 lane_fc() { cell 0 "$F/cells_fc" "$REF/step_spans" "$REF/pb_step_spans" step_tokens \
   transformer:d512,l2,f2048,h8 42 --append_store "$L/prm/rt_append" \
   --append_pb_store "$L/pb/rt_append" --preload_budget_gb 185; }
 lane_fb_d512() { cell 1 "$FAB" "$L/prm/rt_layers" "$L/pb/rt_layers" step_tokens \
   transformer:d512,l2,f2048,h8 42 --preload_budget_gb 100; }
-lane_fb_attn() { cell 2 "$FAB" "$L/prm/rt_layers" "$L/pb/rt_layers" step_tokens \
-  attn_query 42 --preload_budget_gb 100; }
+lane_ft() { cell 2 "$F/cells_traj" "$L/prm/rt_traj" "$L/pb/rt_traj" step_tokens \
+  transformer:d512,l2,f2048,h8 42 --preload_budget_gb 100; }
 lane_fa() {
   local fail=0 l
   for l in linear mlp:h1024 mlp:h1024x2; do
@@ -151,8 +155,38 @@ lane_fa() {
   done
   return $fail
 }
+lane_fc & fc_pid=$!
+
+# --- rt_traj: the read token's final state at every previous step --------------------
 pids=()
-for lane in lane_fc lane_fb_d512 lane_fb_attn lane_fa; do "$lane" & pids+=($!); done
+for g in 1 2 3; do
+  (
+    set -e
+    export CUDA_VISIBLE_DEVICES=$g
+    for k in "${!refs[@]}"; do
+      python scripts/read_token_traj.py nodes --model $Q3 --ckpt "$CKPT" \
+        --layers "$L/${outs[$k]}/rt_layers/$(basename "${refs[$k]}")" \
+        --source "${srcs[$k]}" --out "$L/${outs[$k]}" --shards "$((g - 1))/3"
+    done
+  ) > "$LOGS/traj_gpu$g-$SLURM_JOB_ID.log" 2>&1 &
+  pids+=($!)
+done
+fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
+(( fail == 0 )) || { tail -n 5 "$LOGS"/traj_gpu*-"$SLURM_JOB_ID".log; kill $fc_pid; exit 1; }
+pids=()
+for k in "${!refs[@]}"; do
+  python scripts/read_token_traj.py assemble \
+    --layers "$L/${outs[$k]}/rt_layers/$(basename "${refs[$k]}")" \
+    --source "${srcs[$k]}" --out "$L/${outs[$k]}" > "$LOGS/traj_assemble_$k-$SLURM_JOB_ID.log" 2>&1 &
+  pids+=($!)
+done
+fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
+(( fail == 0 )) || { tail -n 5 "$LOGS"/traj_assemble_*-"$SLURM_JOB_ID".log; kill $fc_pid; exit 1; }
+cat "$LOGS"/traj_assemble_*-"$SLURM_JOB_ID".log
+du -sh "$L/prm/rt_traj" "$L/pb/rt_traj"
+
+pids=($fc_pid)
+for lane in lane_fb_d512 lane_ft lane_fa; do "$lane" & pids+=($!); done
 fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
 echo "[$(date)] stage F cells done, fail=$fail"
 exit $fail

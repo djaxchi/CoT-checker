@@ -220,18 +220,30 @@ PRM800K label disagreement stops the job:
   post-norm state, the one the head reads. About 45 GB for train.
 * `rt_append`: the last read token's block-34 output (hidden_states[35], the
   layer the step-span store holds), one row per item.
+* `rt_traj` (`scripts/read_token_traj.py`): per item, the read token's final
+  post-norm state at the current step, then at each previous step of the same
+  trajectory, most recent first, each read under its own prefix as that step
+  would be read as an item. Most recent first puts the current step at position
+  0 and makes position p mean "p steps back" whatever the trajectory's length.
+  ProcessBench previous steps are the trace's own steps and are all items of
+  the store, so none is re-encoded. PRM800K previous steps are the prefix split
+  on blank lines (a step containing one becomes two rows); in train, 2,928,144
+  previous-step rows reduce to 276,201 texts that are not themselves train items
+  and need encoding (val 3,623 of 27,590, test 1,515 of 10,341). Mean 5.7
+  previous steps per train item, about 32 GB.
 
 **Cells.**
 
 | id | rep | learners | what it asks |
 |---|---|---|---|
 | F-A | final read-token state (`last_token` over rt_layers) | linear, mlp h1024, mlp h1024x2 | bridge to the head; nonlinear headroom |
-| F-B | read token through the layers (`step_tokens` over rt_layers) | attn_query, transformer d512 | do intermediate layers hold more than the final state? |
+| F-B | read token through the layers (`step_tokens` over rt_layers) | transformer d512 | do intermediate layers hold more than the final state? |
+| F-T | read token along the trajectory (`step_tokens` over rt_traj) | transformer d512 | do the previous steps' verdicts add to the current one? |
 | F-C | step tokens + the read token's row appended (`--append_store`) | transformer d512 | does the read token add to the leaderboard's best cell? |
 
 Every cell searches lr and weight decay as the leaderboard's seed-42 cells do
 (the Instruct `step_tokens x d512` seed-42 search and refit took 3,310 s).
-One seed per cell, so the three ablations run in parallel on one node: the
+One seed per cell, so the ablations run in parallel on one node: the
 leaderboard's seed std is 0.003 to 0.007 for these cells, so the 0.02 margins
 below are about 3 std of one seed, and gaps under 0.02 are unread. Seeds 43
 and 44 can be added to F-C afterwards (`fc`, reusing its seed-42 selection).
@@ -242,8 +254,14 @@ and 44 can be added to F-C afterwards (`fc`, reusing its seed-42 selection).
   scoring and the leaderboard's agree, and Stage D's numbers carry over.
 * F-A MLP at least 0.02 above F-A linear: the deep token left nonlinear headroom
   (the plain token did not, B6).
-* Best F-B at least 0.02 above best F-A: the read token's intermediate states
+* F-B at least 0.02 above best F-A: the read token's intermediate states
   hold signal its final state does not pass on.
+* F-T at least 0.02 above best F-A: the read states of the previous steps add to
+  the current one, although the current read token already attends to their text.
+  PRM800K previous steps are labeler-chosen and almost never wrong, so F-T learns
+  what a clean history looks like. On ProcessBench, the steps up to the first
+  error have the same clean history, and those steps decide the first-error
+  prediction.
 * F-C at least 0.02 above `step_tokens x d512` (0.610), with the paired trace
   bootstrap of §21.13 excluding 0: the read token adds to the step tokens. F-C at
   least 0.02 above best F-A: the step tokens add to the read token.
@@ -252,10 +270,11 @@ and 44 can be added to F-C afterwards (`fc`, reusing its seed-42 selection).
   is within 0.01 of 0.661. A claim on the table itself needs seeds 43 and 44.
 
 **Jobs** (`slurm/read_token_leaderboard_tamia.sh`): `store` after D2, one node:
-pick, stores, then one lane per GPU in parallel (F-C; F-B d512; F-B attn_query;
-the three F-A cells in turn). rt_layers stays on node-local disk because shared
-scratch is near quota. Memory: F-C preloads 163 GB of step spans, each F-B lane
-about 42 GB, on a 500 GB node. `fc` adds F-C seeds later. Calib-20 for each cell
+pick, stores, then one lane per GPU in parallel: F-C on GPU 0 as soon as
+rt_append exists, while GPUs 1-3 encode rt_traj's previous steps (about 16 min);
+then F-B, F-T and the three F-A cells in turn. The stores stay on node-local disk
+because shared scratch is near quota. Memory: F-C preloads 163 GB of step spans,
+F-B about 42 GB, F-T about 32 GB, on a 500 GB node. `fc` adds F-C seeds later. Calib-20 for each cell
 directory with `scripts/merge_rep_grid_leaderboard.py`.
 
 ## Code needed

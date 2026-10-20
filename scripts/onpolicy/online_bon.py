@@ -26,6 +26,9 @@ Five arms, sharing problems and seeds so the comparison is paired per problem:
                    only if the checker condemns it, up to --max_retries
     reject_blind   the same retry loop with the coin flipped at random instead of
                    by the checker, to price the loop itself
+    reject_length  the same retry loop condemning any draft longer than
+                   --length_tau characters, the length preference of the
+                   boundary_stats checker with no checker in it (REPORT §21.36)
 
 plain -> random measures the search. random -> guided measures the checker. Only
 the second is a claim about the verifier.
@@ -91,7 +94,7 @@ from src.onpolicy.prompts import (context, generation_prefix,  # noqa: E402
                                   verifier_prefix)
 from src.eval.math_grade import grade  # noqa: E402
 
-ARMS = ("plain", "random", "guided", "reject", "reject_blind")
+ARMS = ("plain", "random", "guided", "reject", "reject_blind", "reject_length")
 # What runs when a caller names no arms. Not every arm: adding the rejection arms
 # to ARMS quietly enrolled every existing caller in them, including the gate,
 # which asks for no arms at all.
@@ -361,20 +364,26 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
                 u = 1.0 if rng.random() < args.blind_retry_rate else 0.0
                 if getattr(args, "score_all_drafts", False):
                     checker.score_steps(problem, steps, [cand])
+            elif arm == "reject_length":
+                u = float(len(cand))
+                if getattr(args, "score_all_drafts", False):
+                    checker.score_steps(problem, steps, [cand])
             else:
                 u = checker.score_steps(problem, steps, [cand])[0]
             tried.append((u, cand))
-            scored = (not blind) or getattr(args, "score_all_drafts", False)
+            scored = (not blind and arm != "reject_length") or getattr(args, "score_all_drafts", False)
             all_scores.append(dict(checker.last[0]) if scored and getattr(checker, "last", None)
                               else {})
-            passes = (u == 0.0) if blind else (u <= args.reject_tau)
+            tau = args.length_tau if arm == "reject_length" else args.reject_tau
+            passes = (u == 0.0) if blind else (u <= tau)
             if passes:
                 kept = len(tried) - 1
                 break
         if kept is None:
             # Retries exhausted. The checker takes the least condemned it saw;
             # the blind arm takes a uniform one, which is what keeps its output
-            # distribution identical to plain sampling.
+            # distribution identical to plain sampling. The length arm takes
+            # the shortest.
             kept = (rng.randrange(len(tried)) if blind
                     else min(range(len(tried)), key=lambda j: tried[j][0]))
         accepted = tried[kept]
@@ -400,8 +409,8 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
             "gen_tokens": gen_tokens,
             # Every draw is scored, so the head runs once per attempt, not once
             # per step: the retry loop costs checker calls as well as tokens.
-            "checker_calls": 0 if blind else sum(attempts_per_step),
-            "scored_candidates": 0 if blind else sum(attempts_per_step),
+            "checker_calls": 0 if blind or arm == "reject_length" else sum(attempts_per_step),
+            "scored_candidates": 0 if blind or arm == "reject_length" else sum(attempts_per_step),
             "attempts_per_step": attempts_per_step,
             # rejected_drafts[i] holds every draft of step i that was not kept, in
             # the order drawn; kept_attempt[i] indexes pool_scores[i] so the two
@@ -416,7 +425,7 @@ def rollout_reject(arm: str, problem: str, gold: str, backbone, tok, checker,
 
 def rollout(arm: str, problem: str, gold: str, backbone, tok, checker,
             args, rng: random.Random) -> dict:
-    if arm in ("reject", "reject_blind"):
+    if arm in ("reject", "reject_blind", "reject_length"):
         return rollout_reject(arm, problem, gold, backbone, tok, checker, args, rng)
     steps: list[str] = []
     chosen_scores: list[float] = []
@@ -638,6 +647,9 @@ def main() -> None:
     p.add_argument("--max_retries", type=int, default=2,
                    help="extra draws allowed per step, so 2 means at most three "
                         "attempts before the least condemned one is taken.")
+    p.add_argument("--length_tau", type=float, default=None,
+                   help="reject_length condemns a draft longer than this many "
+                        "characters.")
     p.add_argument("--blind_retry_rate", type=float, default=None,
                    help="retry probability for reject_blind. Set it to the "
                         "measured resample_rate of the reject arm so the two "
@@ -747,6 +759,8 @@ def main() -> None:
                                                    a.max_retries)
             print(f"[blind] {a.blind_target_extra_draws:.4f} extra draws/step "
                   f"with {a.max_retries} retries -> p={a.blind_retry_rate:.4f}")
+        if "reject_length" in a.arms and a.length_tau is None:
+            raise SystemExit("reject_length needs --length_tau")
         if "reject_blind" in a.arms and a.blind_retry_rate is None:
             raise SystemExit(
                 "reject_blind prices the retry loop, so it needs "

@@ -27,6 +27,10 @@ CELLS="${CELLS:-/project/aip-azouaq/$USER/cot_mech/instruct_leaderboard_v1/cells
 PROBLEMS="${PROBLEMS:-$OUT/problems/online_math500.jsonl}"
 TAU="${TAU:-0.128792}"
 EXTRA_DRAWS="${EXTRA_DRAWS:-0.618}"
+# reject_length (REPORT §21.36 follow-up): condemn drafts longer than this many
+# characters; 110 is the 0.667 quantile of plain-arm step lengths, so it
+# condemns the share of first drafts the probe arm condemned (33%).
+LENGTH_TAU="${LENGTH_TAU:-110}"
 ARMS="${ARMS:-plain reject_blind reject}"
 mkdir -p "$OUT/runs" "$OUT/logs"
 module purge
@@ -57,6 +61,7 @@ for i in 0 1 2 3; do
         plain) extra=(--active none) ;;
         reject_blind) extra=(--active none --reject_tau 1.0 --blind_target_extra_draws "$EXTRA_DRAWS") ;;
         reject) extra=(--active boundary_stats__mlp_h1024x2__seed42 --reject_tau "$TAU") ;;
+        reject_length) extra=(--active none --reject_tau 1.0 --length_tau "$LENGTH_TAU" --score_all_drafts) ;;
       esac
       mkdir -p "$OUT/runs/$arm"
       CUDA_VISIBLE_DEVICES=$i python scripts/onpolicy/online_bon.py "${common[@]}" --arms "$arm" \

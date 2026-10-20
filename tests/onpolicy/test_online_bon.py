@@ -386,6 +386,26 @@ def test_the_blind_arm_never_retries_when_its_rate_is_zero(draws):
     assert r["attempts_per_step"] == [1] and r["gen_tokens"] == 7
 
 
+def test_the_length_arm_condemns_long_drafts_without_the_checker(draws):
+    queue, _ = draws
+    queue.extend(["a much longer draft", "short \\boxed{4}"])
+    chk = FakeChecker({})
+    r = online_bon.rollout("reject_length", "p?", "4", None, None, chk,
+                           _reject_args(length_tau=16), random.Random(0))
+    assert r["attempts_per_step"] == [2]
+    assert r["steps"] == ["short \\boxed{4}"]
+    assert chk.calls == 0 and r["checker_calls"] == 0
+
+
+def test_the_length_arm_takes_the_shortest_when_every_draft_is_too_long(draws):
+    queue, _ = draws
+    queue.extend(["xxxxxxxxxxxxxxxxxxxx", "xx \\boxed{4}", "xxxxxxxxxxxxxxx"])
+    r = online_bon.rollout("reject_length", "p?", "4", None, None, FakeChecker({}),
+                           _reject_args(length_tau=5), random.Random(0))
+    assert r["attempts_per_step"] == [3]
+    assert r["steps"] == ["xx \\boxed{4}"]
+
+
 def test_the_step_budget_still_binds_the_rejection_arm(draws):
     queue, _ = draws
     chk = FakeChecker({})

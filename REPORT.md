@@ -5539,6 +5539,70 @@ confidence.
 
 Outputs: `results/pair_complementarity_v0/summary.json`.
 
+### 21.35 Four Trained Read Tokens on Frozen Qwen3-8B Reach 0.605 calib-20, Short of the Bar (read_token_v0)
+
+*Updated: 2026-10-19. Plan frozen before the run: `docs/read_token_v0_plan.md`. TamIA 629399 (one node, 40 min).*
+
+**Context.** §21.31 found that at the PRM's separator, correctness is the first
+principal component and LDA matches the head (calib-20 0.704), while frozen
+Qwen3-8B tops out at 0.568 (LDA, L35 last token). The PRM was fully fine-tuned.
+This asks whether training only a few appended input embeddings gives a frozen
+Qwen3-8B a read position of the same kind.
+
+**What was done.** `scripts/read_token_probe.py`: verifier template plus step,
+then m soft tokens; a linear head on the final post-norm state of the last soft
+token, BCE with 1 = incorrect. The prefix runs once without gradients and only
+the soft positions are backpropagated. 100,000 PRM800K training steps (seed 0),
+one epoch, AdamW lr 3e-3, one-cycle. Four configs, one GPU each: m = 1, 4, 16
+initialised from random vocabulary rows, and m = 4 initialised from the
+embeddings of "\n\nIs this step correct?" (`m4text`). The gate (cached
+left-padded read states against a full forward) passed with relative
+differences 0.007 to 0.012. The read-token state was then scored with the
+trained head and with `scripts/analysis/backbone_geometry.py` (LDA, raw
+class-mean axis, best single PC, fit on a separate 30,000-row train subsample).
+
+**Results.** PRM800K test AUROC / ProcessBench known-step AUROC / calib-20 F1_PB:
+
+| config | trained head | LDA | raw class-mean axis | best single PC (index) |
+|---|---|---|---|---|
+| m1 | 0.855 / 0.899 / 0.539 | 0.884 / 0.894 / 0.559 | 0.737 / 0.644 / 0.240 | 0.751 / 0.748 / 0.324 (6) |
+| m4 | 0.867 / 0.907 / 0.567 | 0.883 / 0.896 / 0.552 | 0.809 / 0.754 / 0.370 | 0.728 / 0.753 / 0.262 (5) |
+| m16 | 0.867 / 0.905 / 0.565 | 0.884 / 0.906 / 0.570 | 0.787 / 0.767 / 0.379 | 0.700 / 0.684 / 0.266 (6) |
+| **m4text** | 0.884 / 0.928 / 0.595 | **0.896 / 0.924 / 0.605** | 0.852 / 0.897 / 0.554 | 0.841 / 0.854 / 0.471 (1) |
+| frozen Qwen3-8B, L35 last token (§21.31) | | 0.890 / 0.897 / 0.568 | | 0.694 / / 0.310 (3) |
+| PRM separator, L28 (§21.31) | 0.907 / 0.957 / 0.700 | 0.922 / 0.959 / 0.704 | 0.903 / 0.954 / 0.685 | 0.896 / 0.952 / 0.682 (0) |
+
+Per subset, m4text LDA: GSM8K 0.670, MATH 0.622, OlympiadBench 0.557,
+Omni-MATH 0.569.
+
+* **GO bar (calib-20 >= 0.62): not met.** The best config, m4text with LDA,
+  reaches 0.605. That is 0.005 under the best trained Qwen3-8B cell (0.610, d512,
+  8.7M parameters, 513k steps) with 20,481 trained parameters and 100k steps, and
+  +0.037 over the frozen L35 last token.
+* Random-vocabulary initialisation buys nothing: m1, m4 and m16 land at 0.55 to
+  0.57 with either readout, the same as the frozen last token. More tokens do
+  not help.
+* The question-text initialisation changes the geometry. Its raw class-mean axis
+  reaches 0.554 (m4: 0.370) and the best single PC is the second direction with
+  0.471, against the frozen last token's fourth direction at 0.310. It moves part
+  of the way toward the PRM separator (0.685 and PC0 at 0.682) without reaching
+  it.
+
+**Interpretation.** A handful of trained input embeddings does not reproduce
+what full process-supervision fine-tuning did to the PRM. The one config that
+helps is the one that starts from an explicit question, and this run cannot
+tell how much of its gain comes from training the slots and how much from
+the question text itself, read frozen. Random slots learn little in one epoch
+of 100k steps, which suggests that the frozen network gives the read position
+little to work with unless the prompt already points it at verification.
+
+**Next step.** read_token_v1 (plan `docs/read_token_v1_plan.md`, TamIA
+629663/629664, running) adds the frozen-slot control that separates training
+from the question text, a parent-model arm and deep per-layer offsets.
+
+Outputs: `cot-checker-results/read_token_v0/geometry_{m1,m4,m16,m4text}/geometry.json`,
+logs in `cot-checker-results/read_token_v0/logs/`.
+
 ---
 
 

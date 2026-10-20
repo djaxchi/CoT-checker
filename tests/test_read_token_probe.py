@@ -143,3 +143,13 @@ def test_readouts_run_end_to_end(tmp_path, monkeypatch):
     rows = json.loads((tmp_path / "o" / "readouts.json").read_text())
     assert [r["method"] for r in rows] == ["linear", "mlp:h1024", "attn_query"]
     assert all(r["test_auroc"] > 0.8 for r in rows)
+
+
+def test_eager_soft_pass_matches_sdpa_and_restores_impl():
+    model = tiny_model()
+    rt = ReadToken(2, 32, torch.randn(2, 32) * 0.02)
+    impl = model.config._attn_implementation
+    a = read_all_states(model, rt, SEQS, 0, DEV, grad=False)
+    b = read_all_states(model, rt, SEQS, 0, DEV, grad=False, soft_attn="eager")
+    assert torch.allclose(a, b, atol=1e-5)
+    assert model.config._attn_implementation == impl

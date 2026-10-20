@@ -112,8 +112,26 @@ def batches(lengths: list[int], max_tokens: int, shuffle_seed: int | None):
     return out
 
 
-def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool):
-    """Final-layer (post-norm) states at all m read tokens, (B, m, d), left-padded batch."""
+@contextlib.contextmanager
+def attn_impl(model, impl: str | None):
+    """Run the enclosed forward under another attention implementation, then restore."""
+    old = model.config._attn_implementation
+    if impl:
+        model.config._attn_implementation = impl
+    try:
+        yield
+    finally:
+        model.config._attn_implementation = old
+
+
+def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool,
+                    soft_attn: str | None = None):
+    """Final-layer (post-norm) states at all m read tokens, (B, m, d), left-padded batch.
+
+    soft_attn="eager" runs only the m-token soft pass with eager attention. On
+    Qwen2.5-Math-7B-Instruct the cuDNN SDPA backward returns NaN gradients on some
+    left-padded batches (read_token_v1 Stage C, job 629664); eager does not.
+    """
     B, L = len(ids_list), max(len(t) for t in ids_list)
     ids = torch.full((B, L), pad, dtype=torch.long)
     att = torch.zeros((B, L), dtype=torch.long)
@@ -130,7 +148,7 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
     soft_pos = lens[:, None] + torch.arange(m, device=dev)[None]
     att2 = torch.cat([att, torch.ones((B, m), dtype=att.dtype, device=dev)], 1)
     emb = rt.soft.to(model.dtype)[None].expand(B, -1, -1)
-    with torch.set_grad_enabled(grad), deep_hooks(model, rt):
+    with torch.set_grad_enabled(grad), deep_hooks(model, rt), attn_impl(model, soft_attn):
         out2 = model.model(inputs_embeds=emb, attention_mask=att2, position_ids=soft_pos,
                            past_key_values=cache, use_cache=True)
     return out2.last_hidden_state.float()
@@ -140,9 +158,10 @@ def reduce_states(rt: ReadToken, H: torch.Tensor) -> torch.Tensor:
     return H.mean(1) if rt.read == "mean" else H[:, -1]
 
 
-def read_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool):
+def read_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool,
+                soft_attn: str | None = None):
     """The state the head reads: the last read token, or the mean of all m (--read mean)."""
-    return reduce_states(rt, read_all_states(model, rt, ids_list, pad, dev, grad))
+    return reduce_states(rt, read_all_states(model, rt, ids_list, pad, dev, grad, soft_attn))
 
 
 def full_forward_states(model, rt: ReadToken, ids: list[int], dev) -> torch.Tensor:
@@ -174,6 +193,8 @@ def main() -> None:
     p.add_argument("--read", choices=["last", "mean"], default="last")
     p.add_argument("--head", choices=["linear", "mlp"], default="linear")
     p.add_argument("--deep", action="store_true")
+    p.add_argument("--soft_attn", choices=["sdpa", "eager"], default=None,
+                   help="attention for the soft-token pass only (default: the model's, sdpa)")
     p.add_argument("--keep_all", action="store_true", help="encode: also store all m states")
     p.add_argument("--train", type=Path)
     p.add_argument("--n_train", type=int, default=40000)
@@ -223,12 +244,12 @@ def main() -> None:
         toks = [toks[i] for i in keep]
         # Gate: the cached left-padded read states must equal a plain full forward.
         with torch.no_grad():
-            got = read_all_states(model, rt, toks[:2], pad, dev, grad=False)
+            got = read_all_states(model, rt, toks[:2], pad, dev, grad=False, soft_attn=a.soft_attn)
             for r in range(2):
                 ref = full_forward_states(model, rt, toks[r], dev)
                 rel = float((got[r] - ref).norm() / ref.norm())
                 print(f"[gate] row {r}: relative difference {rel:.4f}", flush=True)
-                if rel > 0.05:
+                if not rel <= 0.05:  # also catches NaN
                     raise SystemExit("cached read state does not match the full forward")
         y = torch.tensor([items[i]["label"] for i in keep], dtype=torch.float32)
         opt = make_optimizer(rt, a.lr, a.freeze_soft)
@@ -242,7 +263,8 @@ def main() -> None:
         t0, step, run = time.perf_counter(), 0, 0.0
         for ep in range(a.epochs):
             for bi, b in enumerate(bl if ep == 0 else batches([len(t) for t in toks], a.max_tokens, a.seed + ep)):
-                h = read_states(model, rt, [toks[i] for i in b], pad, dev, grad=state_grad)
+                h = read_states(model, rt, [toks[i] for i in b], pad, dev, grad=state_grad,
+                                soft_attn=a.soft_attn)
                 logit = rt.logit(h)
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(logit, y[b].to(dev))
                 if not torch.isfinite(loss):
@@ -257,6 +279,7 @@ def main() -> None:
         torch.save({"soft": rt.soft.detach().cpu(), "head": rt.head.state_dict(), "m": a.m,
                     "model": a.model, "init": a.init, "read": a.read, "head_kind": a.head,
                     "freeze_soft": a.freeze_soft, "seed": a.seed, "n_train": a.n_train,
+                    "soft_attn": a.soft_attn,
                     "deep": None if rt.deep is None else rt.deep.detach().cpu()},
                    a.out / "read_token.pt")
         return
@@ -269,6 +292,7 @@ def main() -> None:
     if deep is not None:
         rt.deep.data.copy_(deep.to(dev))
     rt.eval()
+    soft_attn = a.soft_attn or ck.get("soft_attn")
     splits = []
     for spec in a.prm800k:
         name, path, *lim = spec.split(":")
@@ -290,7 +314,8 @@ def main() -> None:
         for b in batches([len(toks[i]) for i in keep], a.max_tokens, None):
             rows = [keep[i] for i in b]
             with torch.no_grad():
-                hall = read_all_states(model, rt, [toks[i] for i in rows], pad, dev, grad=False)
+                hall = read_all_states(model, rt, [toks[i] for i in rows], pad, dev, grad=False,
+                                       soft_attn=soft_attn)
                 h = reduce_states(rt, hall)
                 s = torch.sigmoid(rt.logit(h)).cpu().numpy()
             H[rows, 0] = h.cpu().numpy()

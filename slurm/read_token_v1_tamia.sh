@@ -12,11 +12,12 @@
 #   C  GPU0-2 parent Qwen2.5-Math-7B-Instruct seeds 0-2; GPU3 B7 (mean of all m read tokens)
 #   Cparent  GPU0-2 parent seeds 0-2 only, soft pass without cuDNN SDPA (rerun of C's parent arm)
 #   D  GPU0-2 deep read token seeds 0-2 (HEAD=linear|mlp), soft pass without cuDNN SDPA
-# Every stage first re-encodes PRM800K val with v0's four tokens and picks C* and
+#   DQ GPU0-3 Stage D2, deep read token start-point ablation, seed 0, m = start text length
+# Every stage but DQ first re-encodes PRM800K val with v0's four tokens and picks C* and
 # m_all on val AUROC (scripts/analysis/read_token_select.py). B and C stop if the
 # v0 gate sends the experiment to Stage D. Only results, tokens and logs leave the node.
 set -euo pipefail
-STAGE="${STAGE:?set STAGE=B, C, Cparent or D}"
+STAGE="${STAGE:?set STAGE=B, C, Cparent, D or DQ}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 V0="${V0:-$SCRATCH/cot_mech/read_token_v0}"
 OUT="${OUT:-$SCRATCH/cot_mech/read_token_v1}"
@@ -46,6 +47,7 @@ LOGS="$OUT/logs"
 export OMP_NUM_THREADS=12 OPENBLAS_NUM_THREADS=12 MKL_NUM_THREADS=12
 
 # --- selection: v0's four tokens on PRM800K val ------------------------------------
+if [[ "$STAGE" != DQ ]]; then
 v0=(m1 m4 m16 m4text)
 pids=()
 for i in 0 1 2 3; do
@@ -65,6 +67,7 @@ eval "$line"
 if [[ "$STAGE" != D && "$GATE_STAGE" == D ]]; then
   echo "[gate] v0 best ProcessBench calib-20 <= 0.568: the plan sends this to Stage D; stage $STAGE does not run"
   exit 0
+fi
 fi
 
 # --- one run: train, encode, geometry, keep the token ---------------------------------
@@ -129,6 +132,15 @@ case "$STAGE" in
       run $s "d_deep_${HEAD}_seed$s" $Q3 "$CSTAR_M" "$CSTAR_INIT" --deep --head "$HEAD" \
         --n_train 100000 --seed $s --soft_attn no_cudnn & pids+=($!)
     done
+    ;;
+  DQ)
+    # Stage D2: same as Stage D seed 0, only the start text (and so m) changes.
+    # Qwen3 tokens: " Is step correct?" 4, " correct?" 2, "?" 1, " correct" 1.
+    dq=(--deep --head "$HEAD" --n_train 100000 --seed 0 --soft_attn no_cudnn)
+    run 0 dq_is_step_correct $Q3 4 text --init_text " Is step correct?" "${dq[@]}" & pids+=($!)
+    run 1 dq_correct_q $Q3 2 text --init_text " correct?" "${dq[@]}" & pids+=($!)
+    run 2 dq_q $Q3 1 text --init_text "?" "${dq[@]}" & pids+=($!)
+    run 3 dq_correct $Q3 1 text --init_text " correct" "${dq[@]}" & pids+=($!)
     ;;
   *) echo "unknown STAGE=$STAGE"; exit 1 ;;
 esac

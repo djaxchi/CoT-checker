@@ -167,6 +167,35 @@ as Stage B.
   one does not absorb, and Stages C to E read all m tokens (mean, or attention
   pooling if it wins). Within 0.01: keep the last token.
 
+## Stage D2: start point of the deep read token (added after Stage D's GO)
+
+Stage D passed with C* = m4text, whose start is the last four tokens of
+"\n\nIs this step correct?" (` this step correct?`). v0 picked m = 4 because
+that start was cut to four tokens; a one-token start from text was never run.
+Stage D2 asks how much of Stage D's result needs a question-shaped start, and
+whether one read token is enough. Everything is as in Stage D seed 0 (deep,
+linear head, 100k steps, cuDNN SDPA excluded); only the start text changes, and
+m is its Qwen3 token count.
+
+| run | start text | m |
+|---|---|---|
+| dq_is_step_correct | ` Is step correct?` | 4 |
+| dq_correct_q | ` correct?` | 2 |
+| dq_q | `?` | 1 |
+| dq_correct | ` correct` | 1 |
+
+Readings, from LDA PB calib-20 with the head alongside. Stage D's seeds span
+0.638 to 0.649, so gaps under 0.01 are not read.
+
+* `dq_is_step_correct` within 0.01 of Stage D seed 0 (0.639): the question
+  wording beyond "step correct?" does not matter (sanity check).
+* A one-token run (`dq_q` or `dq_correct`) at or above 0.638: one deep read
+  token is enough, and Stage E uses it (four times fewer read positions).
+* `dq_correct_q` or `dq_q` at least 0.01 above `dq_correct`: the question mark,
+  not the word, carries the useful start.
+* All four within 0.01 of one another: once per-layer offsets exist, the start
+  point does not matter.
+
 ## Code needed
 
 * `scripts/read_token_probe.py`: `--freeze_soft` (embedding excluded from the

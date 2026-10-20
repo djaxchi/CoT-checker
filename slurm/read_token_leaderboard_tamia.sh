@@ -5,18 +5,20 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=03:00:00
+#SBATCH --time=05:00:00
 #SBATCH --output=%x-%j.out
 # read_token_v1 Stage F (docs/read_token_v1_plan.md): leaderboard learners on a
 # trained deep read token. STAGE picks the job:
-#   store  pick the token on PRM800K val AUROC, then write its rt_layers and
-#          rt_append stores for every item of the Qwen3-8B Instruct step-span
-#          stores (train, val, test, four ProcessBench subsets), 4 GPUs
-#   fab    F-A and F-B cells over rt_layers, seeds 42-44, the leaderboard trainer
+#   store  pick the token on PRM800K val AUROC, write its rt_layers and rt_append
+#          stores for every item of the Qwen3-8B Instruct step-span stores (train,
+#          val, test, four ProcessBench subsets) on 4 GPUs, then train the F-A and
+#          F-B cells over rt_layers (seeds 42-44, the leaderboard trainer).
+#          rt_layers (~45 GB) stays on node-local disk, since shared scratch is
+#          near quota; rt_append (~4 GB) is copied out for F-C.
 #   fc     F-C: step_tokens x d512 with the read token's row appended, seeds $SEEDS,
 #          the Instruct d512 cell's selected lr / weight decay (--hp_from)
 set -euo pipefail
-STAGE="${STAGE:?set STAGE=store, fab or fc}"
+STAGE="${STAGE:?set STAGE=store or fc}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 OUT="${OUT:-$SCRATCH/cot_mech/read_token_v1}"
 F="${F:-$OUT/stage_f}"
@@ -31,16 +33,6 @@ LOGS="$F/logs"
 mkdir -p "$LOGS"
 cd "$PROJECT_ROOT"
 echo "git $(git rev-parse --short HEAD) stage=$STAGE"
-
-if [[ "$STAGE" == fab ]]; then
-  export PRM_STORE="$F/prm/rt_layers" PB_STORE="$F/pb/rt_layers" OUT_ROOT="$F/cells_fab"
-  export VEC_CACHE="$SLURM_TMPDIR/rt_vectors"
-  export CELLS_FILE="$PROJECT_ROOT/experiments/read_token_v1_stage_f/fab.cells"
-  export RESCALE=none SEEDS="42 43 44" EPOCHS=30 BATCH_SIZE=256 HP_SEARCH_CAP=100000
-  export N_GPUS=4 PRELOAD_BUDGET_GB=100 HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-  module purge
-  exec bash "$PROJECT_ROOT/slurm/train_rep_grid_7b_tamia.sh"
-fi
 
 module purge
 module load StdEnv/2023 python/3.12 gcc arrow/24.0.0
@@ -96,11 +88,12 @@ CKPT="$OUT/tokens/$FTOKEN/read_token.pt"
 # --- every reference item must match its text before any GPU work ------------------
 refs=(); srcs=(); outs=()
 for s in "${STEMS[@]}"; do
-  refs+=("$REF/step_spans/$s"); srcs+=("prm800k:$DATA/prm800k_$s.jsonl"); outs+=("$F/prm")
+  refs+=("$REF/step_spans/$s"); srcs+=("prm800k:$DATA/prm800k_$s.jsonl"); outs+=(prm)
 done
 for s in "${SUBSETS[@]}"; do
-  refs+=("$REF/pb_step_spans/$s"); srcs+=("pb:$s:$PB/processbench_$s.jsonl"); outs+=("$F/pb")
+  refs+=("$REF/pb_step_spans/$s"); srcs+=("pb:$s:$PB/processbench_$s.jsonl"); outs+=(pb)
 done
+L="$SLURM_TMPDIR/stage_f"
 for k in "${!refs[@]}"; do
   python scripts/read_token_store.py --check --ref "${refs[$k]}" --source "${srcs[$k]}"
 done
@@ -113,11 +106,26 @@ for g in 0 1 2 3; do
     export CUDA_VISIBLE_DEVICES=$g
     for k in "${!refs[@]}"; do
       python scripts/read_token_store.py --model $Q3 --ckpt "$CKPT" --ref "${refs[$k]}" \
-        --source "${srcs[$k]}" --out_root "${outs[$k]}" --shards "$g/4"
+        --source "${srcs[$k]}" --out_root "$L/${outs[$k]}" --shards "$g/4"
     done
   ) > "$LOGS/store_gpu$g-$SLURM_JOB_ID.log" 2>&1 &
   pids+=($!)
 done
 fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
-du -sh "$F/prm" "$F/pb" || true
-exit $fail
+(( fail == 0 )) || { tail -n 5 "$LOGS"/store_gpu*-"$SLURM_JOB_ID".log; exit 1; }
+du -sh "$L/prm/rt_layers" "$L/prm/rt_append" "$L/pb/rt_layers"
+for side in prm pb; do
+  mkdir -p "$F/$side"
+  rm -rf "$F/$side/rt_append"
+  cp -r "$L/$side/rt_append" "$F/$side/rt_append"
+done
+echo "$FTOKEN" > "$F/token.txt"
+
+# --- F-A and F-B: the leaderboard trainer over rt_layers ----------------------------
+export PROJECT_ROOT PRM_STORE="$L/prm/rt_layers" PB_STORE="$L/pb/rt_layers" OUT_ROOT="$F/cells_fab"
+export VEC_CACHE="$SLURM_TMPDIR/rt_vectors"
+export CELLS_FILE="$PROJECT_ROOT/experiments/read_token_v1_stage_f/fab.cells"
+export RESCALE=none SEEDS="42 43 44" EPOCHS=30 BATCH_SIZE=256 HP_SEARCH_CAP=100000
+export N_GPUS=4 PRELOAD_BUDGET_GB=100
+module purge
+bash "$PROJECT_ROOT/slurm/train_rep_grid_7b_tamia.sh"

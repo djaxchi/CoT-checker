@@ -249,9 +249,10 @@ F-B search as every leaderboard cell does.
   0.610 with the paired bootstrap excluding 0, and matches the PRM states if it
   is within 0.01 of 0.661.
 
-**Jobs** (`slurm/read_token_leaderboard_tamia.sh`): `store` after D2 (one node),
-then `fab` (one node) and `fc` (two nodes, seeds 42 and 43 on one, 44 on the
-other, two 163 GB span preloads per node at most). Calib-20 for each cell
+**Jobs** (`slurm/read_token_leaderboard_tamia.sh`): `store` after D2 (one node:
+pick, stores, then the F-A and F-B cells; rt_layers stays on node-local disk
+because shared scratch is near quota), then `fc` (two nodes, seeds 42 and 43 on
+one, 44 on the other, two 163 GB span preloads per node at most). Calib-20 for each cell
 directory with `scripts/merge_rep_grid_leaderboard.py`.
 
 ## Code needed

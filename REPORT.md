@@ -5763,6 +5763,114 @@ head from one pass.
 Outputs: `results/external_reader_v0/pairs.json`, log
 `results/external_reader_v0/ext_pairs-630297.out`.
 
+### 21.38 A Length Rule Does Not Reproduce the Rejection Gain (online_length_control_v0)
+
+*Updated: 2026-10-20. Plan frozen before the run: `docs/online_length_control_v0_plan.md`. TamIA 630852, 631146 (resume). Analysis: `scripts/analysis/online_length_control.py`.*
+
+**Context.** §21.36 found the probe checker keeping short steps, because its
+floor output is far more common on short drafts, and the PRM preferring the kept
+redraw in 70.2% of swaps. Both could be a length preference.
+
+**What was done.** A fourth arm on the same 500 MATH-500 problems, sampler and
+retry loop: `reject_length` condemns any draft longer than 110 characters (the
+0.667 quantile of plain-arm step lengths, so the probe arm's 33% first-draft
+rate) and keeps the shortest when every retry is condemned. The panel scored
+every draft without steering the rollout. Swap bootstrap clustered by problem;
+accuracy bootstrap over problems.
+
+**Results.**
+
+| arm | accuracy | mean tokens | steps per trace | extra draws per step |
+|---|---|---|---|---|
+| blind | 0.784 | 786 | 11.9 | 0.621 |
+| probe (`reject`) | 0.812 | 1,107 | 17.0 | 0.606 |
+| length (`reject_length`) | 0.764 | 968 | 15.1 | 0.480 |
+
+PRM prefers the kept draft over the rejected first draft:
+
+| swaps | probe arm | length arm |
+|---|---|---|
+| all | 0.702 [0.679, 0.725] (1,807) | 0.630 [0.604, 0.657] (1,278) |
+| kept shorter by more than 15 characters | 0.772 (877) | 0.659 (1,074) |
+| lengths within 15 characters | 0.628 (527) | 0.485 (194) |
+| kept longer by more than 15 characters | 0.644 (382) | none by construction |
+
+* **PRM reading (primary): unresolved.** The length arm's 0.630 is 7.2 points
+  below the probe arm, between the "length effect" bar (within 5) and the
+  "beyond length" bar (at or below 0.55).
+* **Accuracy reading: length does not carry the gain.** Length minus blind is
+  -0.020 [-0.052, +0.012], 31 wins against 41. Probe minus length is +0.048
+  [+0.016, +0.080], 45 against 21.
+* The length rule draws less than the probe (0.480 extra draws per step against
+  0.606), so it is not a matched-cost arm.
+
+**Interpretation.** A length rule at the checker's rejection rate gives no
+accuracy and does worse than the probe by 0.048. The PRM's agreement with the
+probe's swaps is partly a shared preference for shorter drafts: it prefers the
+length rule's shorter draft 66% of the time. But at matched length the PRM sides
+with the probe's choice 63% of the time and with the length rule's 49%, so the
+probe's swaps carry information the length rule does not. The length preference
+of §21.36 is a side effect of the probe's floor, not the source of its gain.
+
+**Next step.** None for this arm. The probe's +0.028 over blind remains a single
+run with its interval at zero.
+
+Outputs: `cot-checker-results/online_v4/length_control.json`, rollouts in
+`cot-checker-results/online_v4/runs/reject_length/`.
+
+### 21.39 At the PRM's Separator, LDA Nearly Keeps the Head's Independence From Confidence (external_reader_v1)
+
+*Updated: 2026-10-20. Plan frozen before the run: `docs/external_reader_v1_plan.md`. TamIA 631136 (one node, 18 min).*
+
+**Context.** §21.37 found LDA on the PRM's verifier-template states at 0.557 on
+the 985 MATH-500 pairs where token confidence prefers the wrong answer, against
+the head's 0.629 from §21.34. §21.31 put the head-matching linear readout at the
+native `<extra_0>` separator.
+
+**What was done.** One native-template pass of Qwen2.5-Math-PRM-7B at
+hidden_states 20 and 28 over the 60,000-row PRM800K subsample, val_5k and the
+88,370 TTS step items of §21.37, sharded over four GPUs. Scorers: the head's
+P(correct) from the same pass, and LDA fit on that pass's training vectors
+(`scripts/analysis/external_reader_sep.py`). Worst step per trace,
+question-weighted pair accuracy, question bootstrap.
+
+**Gate.** The head on all mixed pairs: 0.700 against §21.34's 0.708 (within
+0.02). Pass.
+
+**Results.** All 2,427 mixed pairs / the 985 confidence-wrong pairs:
+
+| reader | all | confidence wrong [95% CI] |
+|---|---|---|
+| PRM head, this pass | 0.700 | 0.612 [0.554, 0.666] |
+| **LDA, L28 separator** | **0.706** | **0.597 [0.536, 0.659]** |
+| LDA, L28 last token (native) | 0.676 | 0.572 [0.511, 0.634] |
+| LDA, L20 separator | 0.650 | 0.485 [0.428, 0.543] |
+| LDA, L28 step mean (verifier, §21.37) | 0.683 | 0.557 [0.499, 0.614] |
+| parent LDA, L27 step mean (§21.37) | 0.627 | 0.451 [0.392, 0.510] |
+
+* **GO bar (separator LDA >= 0.60 with the interval above 0.5): missed by
+  0.003.** The interval clears 0.5; the point estimate is 0.597.
+* Separator LDA trails the head by 0.015 on the confidence-wrong pairs and leads
+  it by 0.006 on all pairs.
+* At layer 20, where the separator's correctness axis already gives calib-20
+  0.621 on ProcessBench (§21.31), LDA is at chance on the confidence-wrong pairs.
+
+**Interpretation.** One linear direction at the PRM's final-layer separator
+carries nearly all of the head's advantage on the cases token confidence gets
+wrong (0.597 against 0.612), so the independence from confidence lives in the
+final-layer separator state, not in the head's nonlinearity. It forms late: at
+layer 20 the same position separates ProcessBench steps but follows confidence
+on these pairs. With §21.37, the ordering on the confidence-wrong pairs is: the
+parent and Qwen3-8B-Base below chance, the policy at chance, the PRM's
+step-token states at 0.54 to 0.56, and the PRM's separator at 0.60 to 0.61.
+
+**Next step.** The question for the policy model is now concrete: train a read
+position on Qwen3-8B (read_token_v1, LoRA if needed) and score it on these
+pairs, where frozen readouts sit at 0.52.
+
+Outputs: `results/external_reader_v1/pairs_sep.json`, logs in
+`results/external_reader_v1/logs/`.
+
 ---
 
 

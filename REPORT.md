@@ -5673,6 +5673,70 @@ Outputs: `cot-checker-results/online_v4/control.json`,
 `cot-checker-results/online_v4/control_with_v3.json`, rollouts in
 `cot-checker-results/online_v4/runs/`.
 
+### 21.37 Another Model's Weights Do Not Escape the Confidence Blind Spot; Process Supervision Partly Does (external_reader_v0)
+
+*Updated: 2026-10-20. Plan frozen before the run: `docs/external_reader_v0_plan.md`. TamIA 630296 (encode, 62 min), 630297 (pairs, CPU).*
+
+**Context.** §21.34: on MATH-500 mixed pairs where the policy's mean token
+confidence prefers the wrong answer, the trained probe on the policy's own states
+picks the correct candidate 0.441 of the time (question-weighted) and the PRM's
+head 0.629. Either the PRM escapes because it reads with different weights, or
+because process supervision trained it to. Qwen2.5-Math-7B-Instruct, the PRM's
+parent, is a different model that was never process-supervised.
+
+**What was done.** Every step of the 1,580 candidates on the 158 MATH-500
+questions that have a mixed pair, 88,370 step items under the verifier template
+(`scripts/analysis/build_tts_step_items.py`), encoded by four backbones: Qwen3-8B
+(the policy) and Qwen3-8B-Base at L35, the parent and the PRM at L27 and L28.
+Each backbone is read by closed-form LDA fit on its own PRM800K training vectors
+(the 60,000-row subsample of §21.31; Qwen3-8B-Base from its grid vectors),
+worst step per trace, then the pair analysis of §21.34
+(`scripts/analysis/external_reader_pairs.py`). Question-weighted accuracy,
+question bootstrap.
+
+**Results.** P(prefers the correct candidate), all 2,427 mixed pairs / the 985
+pairs where confidence prefers the wrong one:
+
+| reader | all mixed pairs | confidence wrong [95% CI] |
+|---|---|---|
+| Qwen3-8B LDA, L35 step mean | 0.658 | 0.521 [0.459, 0.579] |
+| Qwen3-8B LDA, L35 last token | 0.642 | 0.511 [0.452, 0.569] |
+| Qwen3-8B-Base LDA, L35 step mean | 0.572 | 0.427 [0.366, 0.483] |
+| Qwen3-8B-Base LDA, L35 last token | 0.592 | 0.484 [0.425, 0.540] |
+| parent LDA, L27 step mean (best parent block on all pairs) | 0.627 | **0.451 [0.392, 0.510]** |
+| parent LDA, L28 step mean | 0.612 | 0.471 [0.418, 0.526] |
+| PRM LDA, L27 step mean | 0.681 | 0.539 [0.481, 0.596] |
+| PRM LDA, L28 step mean | 0.683 | 0.557 [0.499, 0.614] |
+| PRM LDA, L28 last token | 0.675 | 0.538 [0.481, 0.601] |
+| *trained probe on Qwen3-8B (§21.34)* | *0.643* | *0.441 [0.386, 0.494]* |
+| *PRM head (§21.34)* | *0.708* | *0.629 [0.572, 0.685]* |
+
+* **GO bar (parent >= 0.55 with the interval above 0.5): not met.** The parent
+  sits at 0.451 on the confidence-wrong pairs, below the policy's own LDA.
+  Reading with a different model's weights does not escape the policy's
+  confidence.
+* The PRM's linear readouts are the only ones with point estimates above 0.53 on
+  those pairs, and none of their intervals clears 0.5 by more than a hair. The
+  PRM head keeps 0.07 over its best linear readout here.
+* Closed-form LDA on the policy's own states sits at chance (0.521), not below
+  it like the trained MLP probe of §21.34 (0.441). Part of the probe's coupling
+  to confidence comes from training, not from the states.
+
+**Interpretation.** By the prespecified reading, the cause is process
+supervision, not an external reader: the parent, which differs from the policy
+in every way except PRM training, does no better than the policy on the cases
+confidence gets wrong. The PRM's independence from confidence is only partly
+carried by its states under the verifier template; most of it shows up only in
+the head. §21.31 places the head-matching readout at the native separator, which
+this run did not encode.
+
+**Next step.** external_reader_v1 (plan `docs/external_reader_v1_plan.md`, TamIA
+631136): the same pairs read at the PRM's native separator by LDA and by the
+head from one pass.
+
+Outputs: `results/external_reader_v0/pairs.json`, log
+`results/external_reader_v0/ext_pairs-630297.out`.
+
 ---
 
 

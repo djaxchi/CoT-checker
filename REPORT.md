@@ -5,7 +5,7 @@
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Reading full token states instead of pooled steps raises calib-20 F1_PB from 0.388 to 0.551 at matched causal visibility, yet later steps still add nothing (+0.002 [-0.012, +0.014] step F1), and ModernBERT fine-tuned on raw step text trails the frozen states by 0.092 step F1 (§21.25). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats one plain sample by +0.03 to +0.07 on MATH-500, but the run has no blind-retry control there, and on GSM8K a blind arm matches the checkers (§21.27).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Reading full token states instead of pooled steps raises calib-20 F1_PB from 0.388 to 0.551 at matched causal visibility, yet later steps still add nothing (+0.002 [-0.012, +0.014] step F1), and ModernBERT fine-tuned on raw step text trails the frozen states by 0.092 step F1 (§21.25). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats a blind-retry control on MATH-500 by +0.028 [-0.002, +0.058], while blind retries alone add nothing (+0.004); part of the checker's preference is for short steps (§21.27, §21.36).
 
 ## 1. Hypothesis
 
@@ -5117,7 +5117,7 @@ one sample at 2 to 3x the tokens", not "the checker pays".
 
 **Next step.** Run plain, one blind arm and the best probe arm on the same
 MATH-500 problems, at one threshold, and compare against self-consistency at the
-same generated-token budget.
+same generated-token budget. Done in §21.36: +0.028 [-0.002, +0.058] over the blind arm.
 
 ### 21.28 The Verifier Recognizes a Genuine Repair, and So Does Likelihood (verifier_repair_v1)
 
@@ -5603,6 +5603,76 @@ from the question text, a parent-model arm and deep per-layer offsets.
 Outputs: `cot-checker-results/read_token_v0/geometry_{m1,m4,m16,m4text}/geometry.json`,
 logs in `cot-checker-results/read_token_v0/logs/`.
 
+### 21.36 With Its Blind Control, Rejection on the Instruct Policy Gains +0.028 on MATH-500, Unresolved (online_reject_v4)
+
+*Updated: 2026-10-19. TamIA 629292, 629779 (resume). Analysis: `scripts/analysis/online_v4_control.py`.*
+
+**Context.** §21.27 found every rejection arm beating one plain sample on
+MATH-500 by +0.03 to +0.07, with no blind-retry arm there to attribute the gain
+to the checker. v4 runs the missing control.
+
+**What was done.** Same sampler, prompt and settings as v3 (Qwen3-8B Instruct,
+`prm800k` few-shot prompt, T = 1.0, top-p 0.95, top-k 50, up to two retries), three
+arms on all 500 MATH-500 problems: plain; blind, the retry loop with a coin set to
+the extra-draw rate v3's best probe arm measured (0.618 per step), which keeps a
+uniform draft and so samples from the plain distribution; and reject,
+`boundary_stats x mlp:h1024x2` seed 42 at v3's q50 threshold (0.128792). A resumed
+job redid 29 problems; the analysis keeps the first rollout of each. Paired by
+problem, bootstrap over problems (20,000 resamples).
+
+**Results.**
+
+| arm | accuracy | mean / median generated tokens | steps per trace | extra draws per step |
+|---|---|---|---|---|
+| plain | 0.780 | 435 / 282 | 10.0 | 0 |
+| blind | 0.784 | 786 / 448 | 11.9 | 0.621 |
+| reject | 0.812 | 1,107 / 534 | 17.0 | 0.606 |
+
+* **Reject minus blind: +0.028 [-0.002, +0.058]**, 37 problems won and 23 lost
+  (sign test p = 0.09). The interval touches zero.
+* Blind minus plain: +0.004 [-0.028, +0.036], 36 against 34. Retrying blindly
+  buys nothing on MATH-500.
+* Reject minus plain: +0.032 [+0.002, +0.062].
+* v3's run of the same checker and threshold, on the 446 problems it finished,
+  scores +0.038 [+0.007, +0.070] over the v4 blind arm. Averaging the two
+  independent reject runs against the one blind arm gives +0.033 [+0.005,
+  +0.062]. This pooling was not planned.
+* Reject spends 1.41x the blind arm's mean tokens at a matched per-step redraw
+  rate, because its traces have more steps.
+
+The checker selects short steps. Of 13,561 drafts it scored, 47.9% sit exactly at
+the MLP's minimum output, 0.128791. That is the output when none of the 1,024
+first-layer units is active: the sigmoid of the output layer applied to the
+rectified second-layer bias, computed from the checkpoint, is 0.1287914. The same floor holds 31.8% of the 25,676 scored
+ProcessBench steps. The q50 threshold equals the floor, so the rule rejects any
+draft that activates a first-layer unit at all. The floor share falls with draft length: 66% for
+drafts under 40 characters, 52% for 40 to 80, 41% for 80 to 160, 23% for 160 to
+400 and 2.4% above 400. Kept steps average 78 characters against plain's 106, and
+traces grow from 10 to 17 steps.
+
+The PRM, which never influences the rollout, prefers the kept redraw over the
+rejected first draft in 70.2% [67.8%, 72.5%] of 1,807 swaps over 378 problems.
+It still does in 64.4% of the 382 swaps where the kept draft is longer by more
+than 15 characters, and in 62.8% of the 527 where the two lengths are within 15.
+
+**Interpretation.** Under its control, the probe checker on the Instruct policy
+gains about +0.03 on MATH-500, a third of what step rejection bought on
+Qwen3-8B-Base (§20.17, +7 to +12 points), and one run of 500 problems cannot
+separate it from zero. The blind arm's flat result removes the "more samples
+help anyway" reading: whatever gain exists comes from which draft is kept. The
+PRM's agreement on the swaps, including length-matched ones, says the checker's
+choices are not only a length preference, but part of what the checker does is
+cut steps short, and that both lengthens the trace and raises the token cost.
+
+**Next step.** None planned for this policy. A second blind and reject replicate
+would narrow the interval to about +/-0.02, at roughly 3 node-hours; a
+length-only rejection rule (reject any draft longer than the median) would show
+how much of the gain the length preference carries.
+
+Outputs: `cot-checker-results/online_v4/control.json`,
+`cot-checker-results/online_v4/control_with_v3.json`, rollouts in
+`cot-checker-results/online_v4/runs/`.
+
 ---
 
 
@@ -5620,7 +5690,7 @@ logs in `cot-checker-results/read_token_v0/logs/`.
   SAE question of §1 is open.
 - **Effects shrink as the policy strengthens.** The verifier tie-break lift at N=2
   falls from +6.30 (Base) to +1.67 (Instruct) on MATH-500, and the Instruct
-  rejection run lacks its blind control on MATH-500 (§21.27).
+  rejection gain over its blind control on MATH-500 is +0.028 [-0.002, +0.058] (§21.36).
 - **Grading moves numbers as much as the effects.** The regrade of §21.10 turned
   215 Instruct GSM8K answers from wrong to right; lifts under study are 0.5 to 2
   points.

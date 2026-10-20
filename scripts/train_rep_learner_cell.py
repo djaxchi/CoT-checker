@@ -183,6 +183,43 @@ def collate_seq(handles, idx, t_max, device):
     return (torch.from_numpy(x).to(device), torch.from_numpy(mask).to(device), yb)
 
 
+def append_rows(store: Path, meta: list[dict]) -> np.ndarray:
+    """(N, d) float16 rows of a vector store, checked item for item against `meta`.
+
+    The appended store must hold the same items in the same order as the span
+    store it extends (scripts/read_token_store.py writes it that way); a single
+    differing uid stops the cell rather than pairing a span with another step's row.
+    """
+    view = ShardedRepSplit(store)
+    if not view.is_vector:
+        raise SystemExit(f"--append_store {store} is not a vector store")
+    key = lambda m: m.get("uid", (m.get("id"), m.get("step_idx")))  # noqa: E731
+    am = view.meta()
+    if len(am) != len(meta) or any(key(a) != key(b) for a, b in zip(am, meta)):
+        raise SystemExit(f"{store} does not list the same items in the same order "
+                         f"as the span store it is appended to")
+    out = np.empty((len(view), view.spec.dim), dtype=np.float16)
+    for k in range(len(view)):
+        rs, li = view.item_handle(k)
+        out[k] = rs.h[li]
+    return out
+
+
+def appended(collate, rows: np.ndarray):
+    """Wrap a span collate so each item's row of `rows` follows its last token."""
+    def f(idx):
+        x, mask, y = collate(idx)
+        v = torch.from_numpy(np.asarray(rows[np.asarray(idx)], dtype=np.float32)).to(x.device)
+        n = mask.sum(1).long()
+        x = torch.cat([x, x.new_zeros(x.shape[0], 1, x.shape[2])], 1)
+        mask = torch.cat([mask, mask.new_zeros(mask.shape[0], 1)], 1)
+        ar = torch.arange(x.shape[0], device=x.device)
+        x[ar, n] = v
+        mask[ar, n] = 1.0
+        return x, mask, y
+    return f
+
+
 def collate_vec(X, y, idx, device):
     xb = torch.from_numpy(np.asarray(X[idx], dtype=np.float32)).to(device)
     yb = torch.from_numpy(np.asarray(y[idx], dtype=np.float32)).to(device)
@@ -312,6 +349,12 @@ def main() -> None:
     p.add_argument("--prederived", action="store_true",
                    help="--prm_store / --pb_store hold this vector rep already derived "
                         "(scripts/derive_vector_store.py), one row per item.")
+    p.add_argument("--append_store", type=Path, default=None,
+                   help="step_tokens x sequence learner only: a vector store with the "
+                        "same items as --prm_store whose row is appended to every span "
+                        "as one more token (read_token_v1 Stage F-C)")
+    p.add_argument("--append_pb_store", type=Path, default=None,
+                   help="the same for --pb_store; required with --append_store")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--threshold_grid", default="0.01")
     args = p.parse_args()
@@ -345,6 +388,11 @@ def main() -> None:
     if seq and args.rep not in ("step_tokens", REP_SPARSE_SEQ):
         raise SystemExit(f"learner {args.learner!r} reads sequences; rep must be "
                          f"step_tokens or {REP_SPARSE_SEQ}")
+    if args.append_store is not None and (
+            not seq or args.rep != "step_tokens" or args.append_pb_store is None
+            or args.rescale != "none"):
+        raise SystemExit("--append_store needs rep step_tokens, a sequence learner, "
+                         "--append_pb_store and --rescale none (the appended row is not rescaled)")
     if not seq and args.rep == "step_tokens":
         raise SystemExit(
             f"rep 'step_tokens' is a sequence; use a sequence learner, or the "
@@ -367,6 +415,15 @@ def main() -> None:
             inputs[f"pb/{sub}"] = split_fingerprint(args.pb_store / sub)
     for k, v in sorted(inputs.items()):
         print(f"[input] {k:28s} {v}", flush=True)
+    # Kept apart from `inputs` so these cells still merge against the rows they
+    # extend, whose step-span fingerprints they share.
+    append_inputs = {}
+    if args.append_store is not None:
+        append_inputs = {f"prm/{stem}": split_fingerprint(args.append_store / stem)
+                         for stem in (args.train_stem, args.val_stem, args.test_stem)}
+        for sub in args.pb_subsets:
+            if (args.append_pb_store / sub).exists():
+                append_inputs[f"pb/{sub}"] = split_fingerprint(args.append_pb_store / sub)
 
     # ---- load the three PRM800K splits in the shape this learner needs -----
     lstats = None
@@ -395,9 +452,9 @@ def main() -> None:
         print(f"[sae-seq] {args.rep} d={d} mean tokens/step "
               f"{tr.lengths.mean():.1f}", flush=True)
     elif seq:
-        train_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.train_stem))
-        val_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.val_stem))
-        test_h, _ = build_handles(ShardedRepSplit(args.prm_store / args.test_stem))
+        train_h, train_m = build_handles(ShardedRepSplit(args.prm_store / args.train_stem))
+        val_h, val_m = build_handles(ShardedRepSplit(args.prm_store / args.val_stem))
+        test_h, test_m = build_handles(ShardedRepSplit(args.prm_store / args.test_stem))
         d = ShardedRepSplit(args.prm_store / args.val_stem).spec.dim
         y_train = np.array([h[4] for h in train_h], dtype=np.int8)
         y_val = np.array([h[4] for h in val_h], dtype=np.int8)
@@ -424,6 +481,11 @@ def main() -> None:
         test_loader = SpanLoader(test_h, args.t_max, device, preload=True, stats=seq_stats)
         train_fn, val_fn, test_fn = (train_loader.collate, val_loader.collate,
                                      test_loader.collate)
+        if args.append_store is not None:
+            train_fn = appended(train_fn, append_rows(args.append_store / args.train_stem, train_m))
+            val_fn = appended(val_fn, append_rows(args.append_store / args.val_stem, val_m))
+            test_fn = appended(test_fn, append_rows(args.append_store / args.test_stem, test_m))
+            print(f"[append] one row per item from {args.append_store}", flush=True)
         n_train_all = len(train_h)
     elif sparse:
         if args.sae_dir is None:
@@ -534,6 +596,7 @@ def main() -> None:
         return [np.arange(i, min(i + args.batch_size, n), dtype=np.int64)
                 for i in range(0, n, args.batch_size)]
 
+    t_learner = args.t_max + (1 if args.append_store is not None else 0)
     val_plan = eval_plan(len(y_val))
     test_plan = eval_plan(len(y_test))
 
@@ -561,7 +624,7 @@ def main() -> None:
         for wd in args.wd_grid:
             torch.manual_seed(args.seed)
             mk = build_sparse_learner if sparse_seq else build_learner
-            m = mk(args.learner, d, t_max=args.t_max, dropout=args.dropout).to(device)
+            m = mk(args.learner, d, t_max=t_learner, dropout=args.dropout).to(device)
             m, vloss = train_one(m, train_fn, hp_plan, n_val, val_plan, val_fn,
                                  args.epochs, lr, wd, args.patience, args.seed)
             va = auroc_numpy(y_val, score_all(m, n_val, val_fn, val_plan))
@@ -576,7 +639,7 @@ def main() -> None:
     # ---- refit the winner on the full training rows ----------------------
     torch.manual_seed(args.seed)
     mk = build_sparse_learner if sparse_seq else build_learner
-    model = mk(args.learner, d, t_max=args.t_max, dropout=args.dropout).to(device)
+    model = mk(args.learner, d, t_max=t_learner, dropout=args.dropout).to(device)
     n_params = param_count(model)
     model, _ = train_one(model, train_fn, plan_for(train_subset), n_val, val_plan,
                          val_fn, args.epochs, best_cfg["lr"],
@@ -625,8 +688,10 @@ def main() -> None:
             handles, meta = build_handles(view)
             pb_loader = SpanLoader(handles, args.t_max, device, preload=True,
                                    stats=seq_stats)
-            scores = score_all(model, len(handles), pb_loader.collate,
-                               eval_plan(len(handles)))
+            pb_fn = pb_loader.collate
+            if args.append_pb_store is not None:
+                pb_fn = appended(pb_fn, append_rows(args.append_pb_store / sub, meta))
+            scores = score_all(model, len(handles), pb_fn, eval_plan(len(handles)))
         elif sparse:
             f = args.sae_dir / sub / f"{args.rep}.npz"
             mf = args.sae_dir / sub / f"{args.rep}_meta.jsonl"
@@ -674,6 +739,7 @@ def main() -> None:
         "n_params": int(n_params),
         "seed": args.seed,
         "inputs": inputs,
+        "append_inputs": append_inputs,
         "prm_store": str(args.prm_store),
         "pb_store": str(args.pb_store),
         "n_train": int(n_train),
@@ -690,7 +756,8 @@ def main() -> None:
                      "batch_size": args.batch_size, "t_max": args.t_max,
                      "dropout": args.dropout,
                      "threshold_grid": args.threshold_grid,
-                     "prederived": bool(args.prederived)},
+                     "prederived": bool(args.prederived),
+                     "append_store": str(args.append_store) if args.append_store else None},
         "in_domain": in_domain,
         "processbench": pb,
         "wall_seconds": round(time.time() - t0, 1),

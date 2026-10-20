@@ -123,8 +123,29 @@ def soft_kernels(soft_attn: str | None):
         yield
 
 
+@contextlib.contextmanager
+def capture_hooks(model, blocks: list[int], out: dict):
+    """Record decoder block l's output at the last position into out[l], (B, d).
+
+    Entered inside deep_hooks, so these hooks run after the offsets are added and
+    record the state the next block actually reads (hidden_states[l + 1] in the
+    Hugging Face numbering, where hidden_states[0] is the embedding output)."""
+    def make(l):
+        def hook(_mod, _inp, o):
+            h = o[0] if isinstance(o, tuple) else o
+            out[l] = h[:, -1].float()
+        return hook
+
+    handles = [model.model.layers[l].register_forward_hook(make(l)) for l in blocks]
+    try:
+        yield
+    finally:
+        for hd in handles:
+            hd.remove()
+
+
 def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool,
-                    soft_attn: str | None = None):
+                    soft_attn: str | None = None, capture: dict | None = None):
     """Final-layer (post-norm) states at all m read tokens, (B, m, d), left-padded batch.
 
     soft_attn="no_cudnn" keeps SDPA for the m-token soft pass but excludes its cuDNN
@@ -132,6 +153,9 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
     some left-padded batches (read_token_v1 Stage C, job 629664). Eager attention
     avoids the NaN but drifts from SDPA by 7-8% in bf16 on that model (job 630734
     failed the cache gate), while SDPA without cuDNN stays within 2%.
+
+    capture: {block: None} to also fill in each listed block's output at the last
+    read token (pre-norm, offsets included), see capture_hooks.
     """
     B, L = len(ids_list), max(len(t) for t in ids_list)
     ids = torch.full((B, L), pad, dtype=torch.long)
@@ -149,7 +173,9 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
     soft_pos = lens[:, None] + torch.arange(m, device=dev)[None]
     att2 = torch.cat([att, torch.ones((B, m), dtype=att.dtype, device=dev)], 1)
     emb = rt.soft.to(model.dtype)[None].expand(B, -1, -1)
-    with torch.set_grad_enabled(grad), deep_hooks(model, rt), soft_kernels(soft_attn):
+    blocks = sorted(capture) if capture is not None else []
+    with torch.set_grad_enabled(grad), deep_hooks(model, rt), soft_kernels(soft_attn), \
+            capture_hooks(model, blocks, capture if capture is not None else {}):
         out2 = model.model(inputs_embeds=emb, attention_mask=att2, position_ids=soft_pos,
                            past_key_values=cache, use_cache=True)
     return out2.last_hidden_state.float()

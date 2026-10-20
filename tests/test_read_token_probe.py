@@ -151,3 +151,26 @@ def test_no_cudnn_soft_pass_matches_default():
     a = read_all_states(model, rt, SEQS, 0, DEV, grad=False)
     b = read_all_states(model, rt, SEQS, 0, DEV, grad=False, soft_attn="no_cudnn")
     assert torch.allclose(a, b, atol=1e-5)
+
+
+def test_capture_records_offset_block_outputs_and_ends_at_the_read_state():
+    from scripts.read_token_probe import capture_hooks, deep_hooks
+    model = tiny_model()
+    rt = ReadToken(2, 32, torch.randn(2, 32) * 0.02, n_layers=3)
+    with torch.no_grad():
+        rt.deep.normal_(0, 0.5)
+    cap = {0: None, 2: None}
+    H = read_all_states(model, rt, SEQS, 0, DEV, grad=False, capture=cap)
+    assert set(cap) == {0, 2} and cap[0].shape == (2, 32)
+    # the last block's output, normed, is the read state
+    assert torch.allclose(model.model.norm(cap[2]), H[:, -1], atol=1e-5)
+    # cached capture equals a full forward with the same hooks
+    for r, s in enumerate(SEQS):
+        e = model.get_input_embeddings()(torch.tensor([s]))
+        full = torch.cat([e, rt.soft.to(model.dtype)[None]], 1)
+        ref = {0: None, 2: None}
+        with torch.no_grad(), deep_hooks(model, rt), capture_hooks(model, [0, 2], ref):
+            model.model(inputs_embeds=full)
+        for l in (0, 2):
+            assert torch.allclose(cap[l][r], ref[l][0], atol=2e-4), (r, l)
+    assert all(not layer._forward_hooks for layer in model.model.layers)

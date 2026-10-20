@@ -196,6 +196,64 @@ Readings, from LDA PB calib-20 with the head alongside. Stage D's seeds span
 * All four within 0.01 of one another: once per-layer offsets exist, the start
   point does not matter.
 
+## Stage F: leaderboard learners on the deep read token (added before D2 results)
+
+So far every read-token number comes from its own jointly trained head or from
+LDA, scored on read_token's own encode of ProcessBench. Stage F puts the read
+token into the leaderboard itself: the same items, splits, trainer, hyperparameter
+protocol, seeds (42, 43, 44) and calib-20 as the Qwen3-8B Instruct rows
+(`scripts/train_rep_learner_cell.py`, RESCALE none), so its cells sit in the
+same table as `step_tokens x d512` (0.610 +- 0.007) and the PRM-state cells
+(best 0.661 +- 0.003).
+
+**Token.** One deep read token, picked on PRM800K val AUROC of its head among the
+seed-0 runs (Stage D's m4text and the four D2 starts), with read_token_select's
+rule (within 0.002, the smaller m wins). ProcessBench is not read.
+
+**Stores** (`scripts/read_token_store.py`), one entry per item of the Instruct
+step-span stores (513,810 train steps, val_5k, test_2k, four ProcessBench
+subsets), in their order and with their meta and labels; one unmatched item or
+PRM800K label disagreement stops the job:
+
+* `rt_layers`: per item, the last read token's output at blocks 3, 7, 11, 15,
+  19, 23, 27, 31, 34 (pre-norm, offsets included) followed by its final
+  post-norm state, the one the head reads. About 45 GB for train.
+* `rt_append`: the last read token's block-34 output (hidden_states[35], the
+  layer the step-span store holds), one row per item.
+
+**Cells.**
+
+| id | rep | learners | what it asks |
+|---|---|---|---|
+| F-A | final read-token state (`last_token` over rt_layers) | linear, mlp h1024, mlp h1024x2 | bridge to the head; nonlinear headroom |
+| F-B | read token through the layers (`step_tokens` over rt_layers) | attn_query, transformer d512 | do intermediate layers hold more than the final state? |
+| F-C | step tokens + the read token's row appended (`--append_store`) | transformer d512 | does the read token add to the leaderboard's best cell? |
+
+F-C reuses the lr and weight decay that the Instruct `step_tokens x d512` cell
+selected (`--hp_from`), rather than searching again: one search costs about 5 h
+on this store, and the appended token changes the input by one position. F-A and
+F-B search as every leaderboard cell does.
+
+**Readings** (3-seed mean calib-20 F1_PB, four-subset mean):
+
+* F-A linear within 0.01 of the picked token's own head (seed 0): read_token's
+  scoring and the leaderboard's agree, and Stage D's numbers carry over.
+* F-A MLP at least 0.02 above F-A linear: the deep token left nonlinear headroom
+  (the plain token did not, B6).
+* Best F-B at least 0.02 above best F-A: the read token's intermediate states
+  hold signal its final state does not pass on.
+* F-C at least 0.02 above `step_tokens x d512` (0.610), with the paired trace
+  bootstrap of §21.13 excluding 0: the read token adds to the step tokens. F-C at
+  least 0.02 above best F-A: the step tokens add to the read token.
+* Leaderboard: the best Stage F cell tops the Qwen3-8B rows if its mean beats
+  0.610 with the paired bootstrap excluding 0, and matches the PRM states if it
+  is within 0.01 of 0.661.
+
+**Jobs** (`slurm/read_token_leaderboard_tamia.sh`): `store` after D2 (one node),
+then `fab` (one node) and `fc` (two nodes, seeds 42 and 43 on one, 44 on the
+other, two 163 GB span preloads per node at most). Calib-20 for each cell
+directory with `scripts/merge_rep_grid_leaderboard.py`.
+
 ## Code needed
 
 * `scripts/read_token_probe.py`: `--freeze_soft` (embedding excluded from the

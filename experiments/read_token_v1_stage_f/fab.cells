@@ -1,0 +1,8 @@
+# read_token_v1 Stage F-A (last_token = the read token's final state) and
+# F-B (step_tokens = the read token's states at blocks 3, 7, ..., 31, 34 and the final state),
+# both over the rt_layers store written by scripts/read_token_store.py.
+last_token linear
+last_token mlp:h1024
+last_token mlp:h1024x2
+step_tokens attn_query
+step_tokens transformer:d512,l2,f2048,h8

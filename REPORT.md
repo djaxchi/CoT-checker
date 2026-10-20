@@ -5408,6 +5408,32 @@ Outputs: `results/backbone_geometry_v0/geometry_{prm_ver,parent_ver,prm_native,q
 logs in `results/backbone_geometry_v0/logs/`. Pooled vectors for `prm_ver` and
 `q3_ver` are kept on TamIA at `$SCRATCH/cot_mech/backbone_geometry_v0/vectors/`.
 
+**Addendum 2026-10-20: is the PRM's direction new, or the parent's amplified?**
+(TamIA 629562 re-encoded the parent, 629574 ran
+`scripts/analysis/cross_model_direction.py`; reading fixed in the plan's
+cross-model addendum before the run.) The PRM is fine-tuned from the parent, so
+an LDA direction fit in one model can be applied to the other's states, rows
+aligned by uid. ProcessBench calib-20 F1_PB (PRM800K test AUROC in brackets):
+
+| block | cos(LDA dirs) | PRM dir on PRM | parent dir on PRM | parent dir on parent | PRM dir on parent |
+|---|---|---|---|---|---|
+| L27 step mean | 0.816 | 0.593 (0.905) | 0.572 (0.896) | 0.498 (0.872) | 0.464 (0.835) |
+| L28 last token | 0.638 | 0.629 (0.907) | 0.616 (0.899) | 0.448 (0.844) | 0.402 (0.790) |
+| L20 last token | 0.708 | 0.589 (0.883) | 0.566 (0.874) | 0.502 (0.848) | 0.453 (0.816) |
+
+* Prespecified reading: the PRM direction on parent states falls 0.034, 0.046 and
+  0.048 below the parent's own LDA. All three are between the "amplified" bar
+  (within 0.02) and the "new" bar (more than 0.05 below), so the frozen reading
+  is unresolved.
+* The reverse transfer is the informative one. The parent's own direction, fixed
+  and applied to PRM states, recovers 0.572 of the PRM's 0.593 at L27 step mean
+  and 0.616 of 0.629 at L28 last token: 78% and 93% of the PRM-minus-parent gain
+  arrive without changing the readout direction. Process supervision mostly moved
+  the states along an axis the parent already read, and the PRM's own direction
+  is tuned to the PRM's covariance, which is why it transfers worse to the parent.
+
+Output: `results/backbone_geometry_v0/cross_model_direction.json`.
+
 ### 21.32 Patching the Readout Direction Does Not Move the Answer; the Learned Causal Subspace Is the Siblings' Content Difference (das_probe_direction_v0)
 
 *Updated: 2026-10-19. Plan: `docs/das_probe_direction_v0_plan.md`. TamIA 629301.*

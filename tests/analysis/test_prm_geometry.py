@@ -61,6 +61,12 @@ def test_lda_matches_gaussian_prediction_and_pca_misses_the_axis():
     m = metrics["methods"]["lda"]
     assert 0.0 <= m["pb_avg_F1_PB_oracle"] <= 1.0
     assert m["pb_avg_F1_PB_oracle"] >= m["pb_avg_F1_PB_calib20"] - 1e-9
+    # ProcessBench 2-D views: one row per step; after the first error is unlabeled (-1)
+    yp = arrays["y_pb_math"]
+    assert arrays["lda2_pb_math"].shape == (160, 2) and arrays["pca2_pb_math"].shape == (160, 2)
+    assert (yp == 1).sum() == 20 and (yp == -1).sum() == 20 and (yp == 0).sum() == 120
+    sep = arrays["lda2_pb_math"][:, 0]
+    assert sep[yp == 1].mean() > sep[yp == 0].mean() + 0.5
 
 
 def test_cov_only_detects_a_shape_difference():

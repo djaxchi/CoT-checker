@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-10-19. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-21. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Reading full token states instead of pooled steps raises calib-20 F1_PB from 0.388 to 0.551 at matched causal visibility, yet later steps still add nothing (+0.002 [-0.012, +0.014] step F1), and ModernBERT fine-tuned on raw step text trails the frozen states by 0.092 step F1 (§21.25). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats a blind-retry control on MATH-500 by +0.028 [-0.002, +0.058], while blind retries alone add nothing (+0.004); part of the checker's preference is for short steps (§21.27, §21.36).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Reading full token states instead of pooled steps raises calib-20 F1_PB from 0.388 to 0.551 at matched causal visibility, yet later steps still add nothing (+0.002 [-0.012, +0.014] step F1), and ModernBERT fine-tuned on raw step text trails the frozen states by 0.092 step F1 (§21.25). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats a blind-retry control on MATH-500 by +0.028 [-0.002, +0.058], while blind retries alone add nothing (+0.004); part of the checker's preference is for short steps (§21.27, §21.36). A trained read token appended to frozen Qwen3-8B, with one learned offset per layer at its position, reaches calib-20 0.642 (LDA, 3 seeds), and the leaderboard's d512 transformer over its layer path gives 0.641 at one seed, against 0.610 for the best step-token cell and 0.661 for the PRM states (§21.40).
 
 ## 1. Hypothesis
 
@@ -5871,6 +5871,146 @@ pairs, where frozen readouts sit at 0.52.
 Outputs: `results/external_reader_v1/pairs_sep.json`, logs in
 `results/external_reader_v1/logs/`.
 
+### 21.40 A Deep Read Token on Frozen Qwen3-8B Clears the Bar; Its Layer Path Gives the Best Qwen3-8B Cell, 0.641 at One Seed (read_token_v1)
+
+*Updated: 2026-10-21. Plan frozen before each stage: `docs/read_token_v1_plan.md`. TamIA 629663 (Stage B), 630747 (Stage C), 630850 (Stage D), 632356 (Stage D2), 632579 (Stage F).*
+
+**Context.** §21.35 left the best read token (m4text) at calib-20 0.605, under
+the 0.62 bar, and could not separate training the slots from the question text.
+read_token_v1 asks what a frozen Qwen3-8B needs before one appended read
+position matches the leaderboard, and how far it gets toward the PRM.
+
+**What was done.** Same encode, data and scoring as §21.35 (100,000 PRM800K
+training steps, one epoch, BCE with 1 = incorrect, LDA fit on a separate
+30,000-row train subsample), with the v0 selection carried over (C* = m4text).
+
+* Stage B: B1 keeps the m4text embeddings frozen at their initialisation
+  (head only); B2 adds seeds 1 and 2; B3 trains 400,000 steps; B6 fits trained
+  readouts on the stored states; B7 trains the head on the mean of the four read
+  tokens.
+* Stage C: m4text on the parent Qwen2.5-Math-7B-Instruct, seeds 0 to 2.
+  The cuDNN SDPA backward returned NaN gradients there (629664), so the soft pass
+  excludes the cuDNN backend.
+* Stage D: per-layer offsets. Each of the 36 decoder layers adds a trained vector
+  to the hidden state at the read positions only (36 x 4 x 4096 parameters on
+  top of the embeddings and head), with the weights still frozen. Seeds 0 to 2.
+* Stage D2: the deep token's start point. Seed 0, init texts " Is step correct?"
+  (m = 4), " correct?" (2), "?" (1), " correct" (1).
+* Stage F: the leaderboard on the deep token. ` correct` was picked on PRM800K
+  val AUROC (0.8997, within 0.002 of the best, 0.9016; the tie goes to the
+  smaller m). `scripts/read_token_store.py` wrote its states for every item of
+  the Instruct step-span stores (513,810 train steps, val_5k, test_2k, the four
+  ProcessBench subsets). `scripts/train_rep_learner_cell.py` trained the cells
+  with RESCALE none, its lr x wd search and seed 42.
+  - F-A: the final read-token state.
+  - F-B: its block 3, 7, ..., 31, 34 outputs and final state (10 rows), read by
+    the d512 transformer.
+  - F-T: the final read state of the current and every previous step, most
+    recent first (`scripts/read_token_traj.py`; 276,201 of the 2,928,144 train
+    previous-step rows needed encoding, the rest are train items).
+  - F-C: `step_tokens x d512` with the read token's layer-35 row appended
+    (`--append_store`).
+
+**Results.** PRM800K test AUROC / ProcessBench calib-20 F1_PB (four-subset
+mean); seeds as listed.
+
+| run | trained head | LDA |
+|---|---|---|
+| frozen Qwen3-8B, L35 last token (§21.31) | | 0.890 / 0.568 |
+| m4text, seeds 0 / 1 / 2 | 0.884 / 0.595, 0.881 / 0.579, 0.877 / 0.590 | 0.896 / 0.605, 0.892 / 0.586, 0.892 / 0.591 |
+| B1 frozen slot | 0.875 / 0.570 | 0.885 / 0.590 |
+| B3 400k steps | 0.905 / 0.626 | 0.903 / 0.617 |
+| B7 head on the mean of 4 | 0.884 / 0.602 | 0.894 / 0.599 |
+| parent, seeds 0 / 1 / 2 | 0.841 / 0.518, 0.850 / 0.549, 0.853 / 0.533 | 0.863 / 0.512, 0.868 / 0.542, 0.864 / 0.535 |
+| **deep, seeds 0 / 1 / 2** | 0.903 / 0.639, 0.908 / 0.647, 0.905 / 0.653 | 0.905 / 0.639, 0.907 / 0.649, 0.908 / 0.638 |
+| deep " Is step correct?" (m 4) | 0.905 / 0.658 | 0.903 / 0.640 |
+| deep " correct?" (m 2) | 0.903 / 0.645 | 0.903 / 0.639 |
+| deep " correct" (m 1) | 0.903 / 0.656 | 0.903 / 0.640 |
+| deep "?" (m 1) | 0.879 / 0.569 | 0.891 / 0.558 |
+
+B6 on m4text's stored states: linear 0.582, `mlp h1024` 0.576, `attn_query` over
+all four read tokens 0.583.
+
+Stage F, seed 42, calib-20 F1_PB per subset:
+
+| cell | GSM8K | MATH | OlympiadBench | Omni-MATH | mean | PB oracle | PRM800K test AUROC |
+|---|---|---|---|---|---|---|---|
+| F-A final state, linear | 0.708 | 0.664 | 0.570 | 0.562 | 0.626 | 0.672 | 0.909 |
+| F-A, `mlp h1024` | 0.714 | 0.683 | 0.588 | 0.560 | 0.636 | 0.677 | 0.913 |
+| F-A, `mlp h1024x2` | 0.712 | 0.673 | 0.577 | 0.576 | 0.635 | 0.674 | 0.914 |
+| **F-B layer path, d512 (DRV)** | 0.722 | **0.700** | 0.581 | 0.560 | **0.641** | **0.690** | 0.914 |
+| F-T trajectory, d512 | 0.699 | 0.689 | 0.570 | 0.535 | 0.623 | 0.670 | 0.911 |
+| F-C step tokens + read row, d512 | 0.718 | 0.641 | 0.559 | 0.520 | 0.609 | 0.656 | 0.912 |
+| Instruct `step_tokens x d512`, 3 seeds | 0.681 | 0.644 | 0.564 | 0.551 | 0.610 | 0.655 | 0.913 |
+| PRM states, best cell, 3 seeds (§21.15) | 0.765 | 0.692 | 0.618 | 0.571 | 0.661 | 0.700 | |
+
+With the threshold selected on PRM800K val instead of ProcessBench, every
+read-token cell drops to F1_PB 0.395 to 0.446; the Instruct d512 cell keeps
+0.560. The read-token cells flag too many correct traces there (Acc_correct
+0.36 to 0.42 against 0.57).
+
+Prespecified readings:
+
+* **Q1 (slot vs training).** B1 sits 0.015 below m4text seed 0 with LDA (0.590
+  against 0.605) and 0.025 with the head. Within the 0.02 bar for LDA: the
+  question text read frozen does most of the work, and training the embeddings
+  adds little.
+* **Q2 (GO for Stage E).** The m4text 3-seed mean is 0.594 (LDA) and 0.588 (head):
+  no GO, so Stage D ran. B3 minus seed 0 is +0.031 with the head and +0.012 with
+  LDA, so the head is data-limited at 100k steps and LDA much less so.
+* **Q4 (parent).** The parent's LDA mean is 0.530, R = (0.530 - 0.502) / 0.202 =
+  0.14, under the 0.15 bar: a read token on the PRM's parent recovers little of
+  what process supervision bought at the read position.
+* **Q6 (readout).** B6's MLP is within 0.01 of the linear readout (0.576 against
+  0.582), and reading all four tokens (B6 `attn_query` 0.583, B7 0.599 to 0.602)
+  is within 0.01 of the last one. Keep the last token, linear.
+* **Stage D (GO).** The deep token's 3-seed mean is 0.646 with the head and 0.642
+  with LDA, above the 0.62 bar and above the best trained Qwen3-8B cell (0.610).
+  Seeds span 0.638 to 0.649 (LDA).
+* **D2.** " Is step correct?" lands at 0.640 against the Stage D wording's 0.639
+  (sanity). " correct" alone reaches 0.640, so one deep read token is enough.
+  "?" alone falls to 0.558 and 0.879 test AUROC: the word carries the start, not
+  the question mark.
+* **Stage F.** The bars are 0.02, about three of the leaderboard's seed std (0.003
+  to 0.007) at one seed.
+  - F-A linear is 0.030 under the token's own head (0.626 against 0.656), outside
+    the planned 0.01 agreement: the jointly trained head scores higher than a
+    probe refit on the frozen state.
+  - MLP over linear: +0.011 [95% CI -0.005, +0.026] (paired trace bootstrap,
+    500 resamples): unread.
+  - F-B over the best F-A: +0.005, under the bar.
+  - F-T is 0.013 below the best F-A: previous steps' read states add nothing to
+    the current one.
+  - F-C equals the plain step-token cell (0.609 against 0.610): the appended row
+    adds nothing to the step tokens.
+
+**Interpretation.** A frozen Qwen3-8B needs more than an input embedding to
+build a useful read position: per-layer offsets lift the token from 0.594 to
+0.642 (LDA, 3 seeds), the gain that v0 could not get from more tokens or more
+steps. Once those offsets exist, one token starting from the word " correct"
+does as well as a four-token question. Read through its layer path by the
+leaderboard's d512 transformer (DRV, F-B), the token gives 0.641 calib-20 and
+0.690 oracle F1_PB at seed 42. That is the best Qwen3-8B number so far, +0.031
+over `step_tokens x d512`, still 0.020 under the PRM states (0.661) and 0.060
+under the PRM's head (0.701). The gain is in GSM8K and MATH (+0.041 and +0.056
+over the Instruct cell); OlympiadBench and Omni-MATH move by less than 0.02. On
+the parent model the same recipe recovers 14% of the PRM's gap, so the token is
+not a substitute for process supervision. The PRM800K-val threshold does not
+transfer to ProcessBench for any read-token cell, so a deployment needs
+ProcessBench-side calibration (20 traces per subset suffice, as in calib-20).
+
+**Next step.** The paired trace bootstrap of DRV against `step_tokens x d512` and
+against the PRM states runs inside TamIA 635248 (8 comparisons, 200 resamples).
+The same job compares the class separation of the Qwen3-8B last step token, the
+read token at the same layer and the PRM's last step token on test and
+ProcessBench. It stores every layer of all three, plus DRV's logit and embedding,
+under `/project/aip-azouaq/dchikhi/cot_mech/read_token_v1/mech` for a
+mechanistic study of the read token's gain and its readout. DRV needs seeds 43
+and 44 before it enters the leaderboard.
+
+Outputs: geometry and logs under `$SCRATCH/cot_mech/read_token_v1/`
+(`geometry_*`, `stage_f/cells_{fab,traj,fc}/`, `stage_f/pick-632579.json`).
+
 ---
 
 
@@ -6237,6 +6377,14 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-21 (§21.40).* The deep read token clears the 0.62 bar, and
+one token starting from " correct" is enough. DRV (d512 over the token's layer
+path) is the line carried forward; the trajectory and append variants are closed.
+Next: the bootstrap and representation study in TamIA 635248, DRV seeds 43 and
+44, then the mechanistic study on the stored layers (per-layer gain of the read
+token over the last step token, best readout), and Stage E downstream with
+ProcessBench-side calibration.
 
 *Addendum 2026-10-19 (§21.26, risk closed).* An audit of the risk null found no
 pipeline or grading cause. Added to validity, the measured risk labels raise

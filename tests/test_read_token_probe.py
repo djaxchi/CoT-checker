@@ -174,3 +174,20 @@ def test_capture_records_offset_block_outputs_and_ends_at_the_read_state():
         for l in (0, 2):
             assert torch.allclose(cap[l][r], ref[l][0], atol=2e-4), (r, l)
     assert all(not layer._forward_hooks for layer in model.model.layers)
+
+
+def test_capture_prefix_is_the_last_step_token_unchanged_by_the_read_token():
+    model = tiny_model()
+    rt = ReadToken(2, 32, torch.randn(2, 32) * 0.02, n_layers=3)
+    with torch.no_grad():
+        rt.deep.normal_(0, 0.5)
+    pre = {0: None, 1: None, 2: None, "final": None}
+    read_all_states(model, rt, SEQS, 0, DEV, grad=False, capture_prefix=pre)
+    assert all(not layer._forward_hooks for layer in model.model.layers)
+    for r, s in enumerate(SEQS):
+        with torch.no_grad():
+            hs = model.model(input_ids=torch.tensor([s]), output_hidden_states=True).hidden_states
+        for l in (0, 1):  # hidden_states[l + 1] is block l's output
+            assert torch.allclose(pre[l][r], hs[l + 1][0, -1], atol=2e-4), (r, l)
+        assert torch.allclose(pre["final"][r], hs[-1][0, -1], atol=2e-4)
+    assert torch.allclose(model.model.norm(pre[2]), pre["final"], atol=1e-5)

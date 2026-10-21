@@ -27,8 +27,9 @@ Geometry summaries:
   per-PC test AUROC for the top 256 PCs (where in the variance spectrum the
   signal sits).
 
-Outputs per (backbone, rep): metrics.json and arrays.npz (2-D views, score
-histograms, curves) for scripts/analysis/plot_prm_geometry.py.
+Outputs per (backbone, rep): metrics.json and arrays.npz (2-D views of test and
+of each ProcessBench subset, score histograms, curves) for
+scripts/analysis/plot_prm_geometry.py and plot_rep_separation.py.
 """
 
 from __future__ import annotations
@@ -150,6 +151,16 @@ def to_unit(ref: np.ndarray):
     return lambda s: np.searchsorted(srt, np.asarray(s, dtype=np.float64), side="right") / len(srt)
 
 
+def pb_step_class(meta: list[dict]) -> np.ndarray:
+    """1 = the trace's first erroneous step, 0 = a step before it (or in a correct
+    trace), -1 = after the first error, which ProcessBench leaves unlabeled."""
+    out = []
+    for r in meta:
+        fe, j = int(r["label"]), int(r["step_idx"])
+        out.append(0 if fe < 0 or j < fe else (1 if j == fe else -1))
+    return np.asarray(out, dtype=np.int8)
+
+
 def evaluate(name: str, s_va, s_te, s_pb: dict, yva, yte, pb_meta: dict) -> dict:
     from scripts.train_easy_probe_method import (THRESHOLD_GRID, evaluate_processbench,
                                                  select_threshold, step_binary_metrics)
@@ -269,6 +280,8 @@ def study(Xtr, ytr, Xva, yva, Xte, yte, pb: dict, dev, knn: bool = True,
     u_best = Ut[:, j_best] * sign
     run("pc_best", lambda X: project(X, u_best, dev, center=m["mu"]))
     arrays["pca2_test"] = Pte[:, :2].astype(np.float32)
+    for k, v in pb.items():
+        arrays[f"pca2_pb_{k}"] = project(v[0], Ut[:, :2], dev, center=m["mu"]).astype(np.float32)
     explained = (lt / lt.sum()).cpu().numpy()
     metrics["pca_explained_top"] = {str(k): float(explained[:k].sum()) for k in (1, 2, 10, 100)}
 
@@ -290,6 +303,10 @@ def study(Xtr, ytr, Xva, yva, Xte, yte, pb: dict, dev, knn: bool = True,
     e2 = v / v.norm()
     arrays["lda2_test"] = project(Xte, torch.stack([e1, e2], 1), dev, center=m["mu"]).astype(np.float32)
     arrays["y_test"] = np.asarray(yte, dtype=np.int8)
+    for k, v in pb.items():
+        arrays[f"lda2_pb_{k}"] = project(v[0], torch.stack([e1, e2], 1), dev,
+                                         center=m["mu"]).astype(np.float32)
+        arrays[f"y_pb_{k}"] = pb_step_class(v[1])
     del Ut, lt
 
     # --- second order: QDA and covariance-only

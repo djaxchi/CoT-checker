@@ -277,6 +277,25 @@ because shared scratch is near quota. Memory: F-C preloads 163 GB of step spans,
 F-B about 42 GB, F-T about 32 GB, on a 500 GB node. `fc` adds F-C seeds later. Calib-20 for each cell
 directory with `scripts/merge_rep_grid_leaderboard.py`.
 
+## Stage DF: the D2 pick on the full train split (added after Stage F)
+
+The ` correct` deep read token (m = 1, linear head, as `dq_correct`) trained on all
+513,810 PRM800K train steps for one epoch instead of 100k, seeds 0, 1, 2; every
+other setting and the scoring (own head and LDA, `backbone_geometry.py`) as in
+Stage D2. B3 is the precedent: 400k steps raised m4text's head by 0.031 and its
+LDA by 0.012. The LDA fit subsample (30k train rows) now lies wholly inside the
+token's training data; test and ProcessBench stay held out.
+
+Readings (ProcessBench calib-20, four-subset mean, own head unless stated):
+
+* Seed 0 minus `dq_correct` (0.656) at least +0.02: the deep token is data-limited
+  at 100k steps.
+* 3-seed mean at least 0.630 (0.02 above `step_tokens x d512`, 0.610), with the
+  paired trace bootstrap excluding 0: the head alone tops the Qwen3-8B rows.
+* 3-seed mean within 0.01 of 0.661: it matches the PRM states' best cell. The
+  PRM's own head (0.701) stays the ceiling.
+* DRV is rebuilt on this token only if its head does not reach DRV's 0.641.
+
 ## Code needed
 
 * `scripts/read_token_probe.py`: `--freeze_soft` (embedding excluded from the

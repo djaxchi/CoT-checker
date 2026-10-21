@@ -145,7 +145,8 @@ def capture_hooks(model, blocks: list[int], out: dict):
 
 
 def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev, grad: bool,
-                    soft_attn: str | None = None, capture: dict | None = None):
+                    soft_attn: str | None = None, capture: dict | None = None,
+                    capture_prefix: dict | None = None):
     """Final-layer (post-norm) states at all m read tokens, (B, m, d), left-padded batch.
 
     soft_attn="no_cudnn" keeps SDPA for the m-token soft pass but excludes its cuDNN
@@ -156,6 +157,8 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
 
     capture: {block: None} to also fill in each listed block's output at the last
     read token (pre-norm, offsets included), see capture_hooks.
+    capture_prefix: the same at the last token of the text (the last step token,
+    which the read token never changes), plus "final": its post-norm state.
     """
     B, L = len(ids_list), max(len(t) for t in ids_list)
     ids = torch.full((B, L), pad, dtype=torch.long)
@@ -165,8 +168,11 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
         att[r, L - len(t):] = 1
     ids, att = ids.to(dev), att.to(dev)
     pos = (att.cumsum(1) - 1).clamp(min=0)
-    with torch.no_grad():
+    pblocks = sorted(k for k in capture_prefix if k != "final") if capture_prefix is not None else []
+    with torch.no_grad(), capture_hooks(model, pblocks, capture_prefix if capture_prefix is not None else {}):
         out = model.model(input_ids=ids, attention_mask=att, position_ids=pos, use_cache=True)
+    if capture_prefix is not None and "final" in capture_prefix:
+        capture_prefix["final"] = out.last_hidden_state[:, -1].float()
     cache = out.past_key_values
     lens = att.sum(1)
     m = rt.m

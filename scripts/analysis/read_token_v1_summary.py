@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One table over read_token_v0 and read_token_v1 outputs (docs/read_token_v1_plan.md).
 
-For every geometry_<run>/geometry.json under the given roots: the trained head
-(method `prm_head` in backbone_geometry's naming), LDA, the raw class-mean axis
+For every geometry_<run>/geometry.json under the given roots: RTH, the token's own
+jointly trained head (method `prm_head` in backbone_geometry's naming), LDA, the raw class-mean axis
 and the best single PC with its index, as PRM800K test AUROC and ProcessBench
 calib-20 F1_PB. Then the B6 trained readouts, if present.
 """
@@ -18,7 +18,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("roots", nargs="+", type=Path)
     a = p.parse_args()
-    print(f"{'run':<26}{'rep':<10}{'head':>14}{'lda':>14}{'mean_axis':>14}{'best_pc':>18}")
+    print(f"{'run':<26}{'rep':<10}{'RTH head':>14}{'lda':>14}{'mean_axis':>14}{'best_pc':>18}")
     for root in a.roots:
         for g in sorted(root.glob("geometry_*/geometry.json")):
             rows = json.loads(g.read_text())

@@ -277,6 +277,19 @@ because shared scratch is near quota. Memory: F-C preloads 163 GB of step spans,
 F-B about 42 GB, F-T about 32 GB, on a 500 GB node. `fc` adds F-C seeds later. Calib-20 for each cell
 directory with `scripts/merge_rep_grid_leaderboard.py`.
 
+## Method names (added 2026-10-22)
+
+* **RTH (Read-Token Head):** the deep read token classified by its own linear
+  head, trained jointly with the token's embedding and per-layer offsets. One extra
+  token pass, one dot product. ProcessBench scores in the leaderboard format:
+  `scripts/analysis/rth_scores.py`.
+* **DRV (Depth-Read Verifier):** the same frozen token, read at blocks 3, 7, ...,
+  31, 34 and its final state by the leaderboard's d512 transformer, trained
+  afterwards (Stage F-B).
+
+Run and token directory names (`dq_correct`, `df_correct_full_seed*`) name the
+token, not the readout; RTH and DRV name the classifier.
+
 ## Stage DF: the D2 pick on the full train split (added after Stage F)
 
 The ` correct` deep read token (m = 1, linear head, as `dq_correct`) trained on all
@@ -295,6 +308,45 @@ Readings (ProcessBench calib-20, four-subset mean, own head unless stated):
 * 3-seed mean within 0.01 of 0.661: it matches the PRM states' best cell. The
   PRM's own head (0.701) stays the ceiling.
 * DRV is rebuilt on this token only if its head does not reach DRV's 0.641.
+* Seed 2 diverged at the end of warm-up with peak lr 3e-3 (job 635351, loss 1.27 at
+  step 500, 0.598 at the end); it is rerun with peak lr 1e-3 (`STAGE=DFLR`) and
+  reported as its own row, not averaged with the 3e-3 seeds.
+
+## Stage E: RTH downstream (added 2026-10-26, before any downstream run)
+
+RTH seed by PRM800K val AUROC among `dq_correct` (seed 0), `rth_correct_seed1`,
+`rth_correct_seed2` (100k steps each); ProcessBench is not read for the pick.
+Job: `slurm/rth_downstream_tamia.sh`.
+
+* **D1, selection.** RTH scores every step of the saved Instruct pools of §21.13
+  (T=1.0 primary, T=0.7 sensitivity; GSM8K test and MATH-500, ten samples), each
+  step read under the verifier template with its own trajectory's earlier steps as
+  context (`scripts/onpolicy/score_traces_with_read_token.py`), steps from
+  `split_into_steps` with the step count checked against the PRM's score files.
+  Rules as in §21.13 (`tts_rule_contrast.py`: majority, tie-break, best-of-N,
+  weighted vote, N = 2, 4, 10, worst step), question-cluster paired bootstrap.
+  Within-problem trajectory AUROC (worst step and mean step).
+* **D2, confidence-wrong pairs.** `pair_complementarity.py` with RTH as the probe on
+  the T=1.0 pool: the 985 MATH-500 pairs where mean token confidence prefers the
+  wrong answer, question-weighted, question bootstrap.
+* **E1, cost.** `scripts/analysis/rth_cost.py`: 200 MATH-500 trajectories, one at a
+  time on one H100: RTH, one Qwen3-8B pass over the trajectory (the passive probes'
+  cost), one PRM pass in its native template.
+
+Readings (T=1.0 pool; T=0.7 must agree in sign to be reported as a finding):
+
+* Tie-break at N=2 on MATH-500: RTH's lift over majority at least the best probe's
+  (+1.84, `boundary_stats x mlp h1024x2`) makes it the best probe tie-breaker;
+  within 0.2 of the PRM's +2.02, it matches the PRM there. GSM8K the same against
+  +0.57 and +1.30.
+* Overriding majority: RTH best-of-N or weighted vote at N=10 above majority with
+  the paired interval excluding 0 (only the PRM did this in §21.13, on GSM8K).
+* Within-problem AUROC on MATH-500 (worst step): above the best probe's 0.643 is a
+  better ranker; within 0.02 of the PRM's 0.709 matches it.
+* D2: at least 0.60 with the interval above 0.5 on the confidence-wrong pairs means
+  RTH escapes the policy's confidence blind spot (PRM head 0.629, frozen Qwen3-8B
+  readouts 0.44 to 0.52).
+* E1 is reported, not read against a bar.
 
 ## Code needed
 

@@ -137,7 +137,7 @@ def fig_bars(table, path):
     keys = [("pc_best", "best single PC\n(unsupervised), test AUROC"),
             ("test", "LDA, PRM800K\ntest AUROC"), ("pb", "LDA, ProcessBench\nAUROC (first error)"),
             ("calib20", "LDA, ProcessBench\ncalib-20 F1_PB")]
-    fig, ax = plt.subplots(figsize=(10, 4.2), facecolor=SURF)
+    fig, ax = plt.subplots(figsize=(10, 4.8), facecolor=SURF)
     style(ax)
     x, w = np.arange(len(keys)), 0.8 / len(table)
     for i, r in enumerate(table):
@@ -148,7 +148,7 @@ def fig_bars(table, path):
     ax.set_xticks(x, [k[1] for k in keys], fontsize=8)
     ax.set_ylim(0.4, 1.0)
     ax.set_ylabel("score (fit on PRM800K train only)", color=INK, fontsize=9)
-    ax.legend(frameon=False, fontsize=8, ncol=2, loc="upper right")
+    ax.legend(frameon=False, fontsize=8, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.16))
     fig.tight_layout()
     fig.savefig(path, dpi=150, facecolor=SURF)
     plt.close(fig)

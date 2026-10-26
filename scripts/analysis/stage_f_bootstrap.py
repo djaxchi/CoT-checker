@@ -47,13 +47,23 @@ def one(job):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--stage_f", type=Path, required=True)
-    p.add_argument("--instruct", type=Path, required=True)
-    p.add_argument("--prm", type=Path, required=True)
+    p.add_argument("--stage_f", type=Path)
+    p.add_argument("--instruct", type=Path)
+    p.add_argument("--prm", type=Path)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--n_boot", type=int, default=200)
+    p.add_argument("--pairs", nargs="+", default=None,
+                   help="name=a_dir[,a_dir...]:b_dir[,b_dir...]; replaces the default comparisons")
     a = p.parse_args()
-    jobs = [(n, x, y, a.n_boot) for n, x, y in comparisons(a.stage_f, a.instruct, a.prm)]
+    if a.pairs:
+        comps = []
+        for spec in a.pairs:
+            name, sides = spec.split("=", 1)
+            x, y = sides.split(":")
+            comps.append((name, x.split(","), y.split(",")))
+    else:
+        comps = comparisons(a.stage_f, a.instruct, a.prm)
+    jobs = [(n, x, y, a.n_boot) for n, x, y in comps]
     with ProcessPoolExecutor(len(jobs)) as ex:
         res = list(ex.map(one, jobs))
     a.out.write_text(json.dumps(res, indent=1))

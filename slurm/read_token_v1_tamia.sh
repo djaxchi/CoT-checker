@@ -13,13 +13,17 @@
 #   Cparent  GPU0-2 parent seeds 0-2 only, soft pass without cuDNN SDPA (rerun of C's parent arm)
 #   D  GPU0-2 deep read token seeds 0-2 (HEAD=linear|mlp), soft pass without cuDNN SDPA
 #   DQ GPU0-3 Stage D2, deep read token start-point ablation, seed 0, m = start text length
+#   RTH GPU0-1 RTH seeds 1, 2: dq_correct (seed 0) again at 100k steps (submit with
+#      --time=01:15:00)
+#   DFLR GPU0 DF seed 2 again with peak lr 1e-3 (the 3e-3 run diverged at the end of
+#      warm-up, job 635351); the other GPUs idle
 #   DF GPU0-2 the D2 pick (" correct", m = 1, deep, linear head) on all 513,810 train
 #      steps, seeds 0-2 (about 1.6 h of training each; submit with --time=02:45:00)
 # Every stage but DQ and DF first re-encodes PRM800K val with v0's four tokens and picks C* and
 # m_all on val AUROC (scripts/analysis/read_token_select.py). B and C stop if the
 # v0 gate sends the experiment to Stage D. Only results, tokens and logs leave the node.
 set -euo pipefail
-STAGE="${STAGE:?set STAGE=B, C, Cparent, D, DQ or DF}"
+STAGE="${STAGE:?set STAGE=B, C, Cparent, D, DQ, DF, DFLR or RTH}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 V0="${V0:-$SCRATCH/cot_mech/read_token_v0}"
 OUT="${OUT:-$SCRATCH/cot_mech/read_token_v1}"
@@ -49,7 +53,7 @@ LOGS="$OUT/logs"
 export OMP_NUM_THREADS=12 OPENBLAS_NUM_THREADS=12 MKL_NUM_THREADS=12
 
 # --- selection: v0's four tokens on PRM800K val ------------------------------------
-if [[ "$STAGE" != DQ && "$STAGE" != DF ]]; then
+if [[ "$STAGE" != DQ && "$STAGE" != DF && "$STAGE" != DFLR && "$STAGE" != RTH ]]; then
 v0=(m1 m4 m16 m4text)
 pids=()
 for i in 0 1 2 3; do
@@ -151,6 +155,17 @@ case "$STAGE" in
       run $s df_correct_full_seed$s $Q3 1 text --init_text " correct" --deep --head "$HEAD" \
         --n_train 513810 --seed $s --soft_attn no_cudnn & pids+=($!)
     done
+    ;;
+  RTH)
+    # RTH = the read token classified by its own head; dq_correct is seed 0.
+    for s in 1 2; do
+      run $((s - 1)) rth_correct_seed$s $Q3 1 text --init_text " correct" --deep --head "$HEAD" \
+        --n_train 100000 --seed $s --soft_attn no_cudnn & pids+=($!)
+    done
+    ;;
+  DFLR)
+    run 0 df_correct_full_seed2_lr1e-3 $Q3 1 text --init_text " correct" --deep --head "$HEAD" \
+      --n_train 513810 --seed 2 --lr 1e-3 --soft_attn no_cudnn & pids+=($!)
     ;;
   *) echo "unknown STAGE=$STAGE"; exit 1 ;;
 esac

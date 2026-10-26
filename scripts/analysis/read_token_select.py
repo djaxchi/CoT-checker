@@ -32,7 +32,7 @@ def select(val_auroc: dict[str, float], configs: dict[str, tuple[int, str]] = V0
     if configs[cstar][0] > 1:
         return cstar, cstar
     multi = [n for n in val_auroc if configs[n][0] in (4, 16)]
-    return cstar, max(multi, key=lambda n: val_auroc[n])
+    return cstar, (max(multi, key=lambda n: val_auroc[n]) if multi else cstar)
 
 
 def main() -> None:

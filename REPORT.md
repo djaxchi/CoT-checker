@@ -6460,6 +6460,97 @@ Key quantitative results: ROC-AUC 0.87 (P7), 85% attention-head accuracy (P6), 2
 
 7. **Next-step prediction as auxiliary signal:** our Future-SSAE experiments (§10) address a gap not covered by any existing paper -- no work has used a next-step prediction objective to make SAE latents sensitive to trajectory-level information flow between steps.
 
+
+---
+
+### 17.7 Read Tokens, Deep Prompts and Hidden-State Step Verifiers (added 2026-10-26)
+
+*Search done for §21.40 (RTH). Claims below were checked against each paper's
+abstract or HTML; the ones marked secondary come from a summary page only.*
+
+**Learned read positions on a model's own states.**
+
+| work | what is trained | base model | task | evaluation | relation to RTH |
+|---|---|---|---|---|---|
+| ScratchProbe (Seifi & Ester, arXiv 2610.27566, Oct 2026) | embedding of an appended `<CONF>` token (plus up to 8 scratch tokens) and a 2-layer MLP probe on its final-layer state | frozen (Llama-3.2-3B, Llama-3.1-8B, Phi-4-mini) | answer-level confidence | AUROC: 0.875 to 0.897 in-domain over a last-token probe on Llama-3.1-8B; 0.729 to 0.750 out of domain | closest precedent; input embedding only, no per-layer parameters, no step labels, no PRM comparison |
+| OTV (Zhuang et al., arXiv 2603.01025, 2026) | a learned `[ToT]` token plus LoRA, KV cache reused at every layer; 3-layer MLP on the token's final state | LoRA-adapted | trace correctness | early termination, best-of-N | the model's weights change; RTH keeps them frozen |
+| Deep read token / RTH (§21.40) | embedding, one additive offset per layer at the appended position only, linear head (155,649 parameters) | frozen Qwen3-8B | step correctness | ProcessBench first-error F1 (calib-20), PRM800K AUROC | |
+
+In ScratchProbe's words, "We therefore freeze the LLM parameters and optimize only
+the added token embedding(s) and the probe." Its gains over the last token are of
+the size our input-embedding-only tokens gave (§21.35: 0.568 to 0.594 LDA calib-20,
+and a frozen slot nearly as good, §21.40 Q1). The per-layer offsets are what moved
+our token to 0.642.
+
+**Parameter-efficient methods with the same ingredients.**
+
+* P-tuning v2 (Liu et al., arXiv 2110.07602): trained prompts at every layer, as
+  prefix keys and values that every position attends to, so the model's computation
+  on the text changes.
+* ReFT / LoReFT (Wu et al., NeurIPS 2024, arXiv 2404.03592): learned interventions
+  on hidden representations at chosen existing positions and layers, low-rank
+  subspace edits in LoReFT.
+* RED (Wu et al., ACL 2024): per-layer scale and bias applied at every position.
+* LoFiT (Yin, Ye & Durrett, NeurIPS 2024): offsets on a selected 3% to 10% of
+  attention heads.
+
+The deep read token's parameterization (a bias at every layer on one appended
+position) is a narrow special case of ReFT. Its use differs: it is a side-channel
+read that leaves every text state and the generation untouched, trained as a step
+verifier. No paper found uses it that way.
+
+**Hidden-state step verifiers.**
+
+* ReProbe (Ni et al., arXiv 2511.06209, v4): a transformer probe of under 10M
+  parameters on frozen Qwen3-8B, over attention-and-logit features or all-layer
+  hidden states (the v4 HTML has both; v1/v2 had only the former), labels from
+  DeepSeek-R1 or self-annotation on 32K PRM800K-problem trajectories. Step-level
+  PR-AUC 0.604 against 0.565 for Qwen2.5-Math-PRM-7B overall; best-of-10 62.8
+  against 61.5. No ProcessBench evaluation.
+* Zhang et al. (arXiv 2504.05419, 2025): a 2-layer MLP probe on reasoning models'
+  hidden states judges intermediate answers; early exit saves 24% of tokens.
+* STEP (Liang et al., arXiv 2601.09093, 2026): last-layer state of each step-end
+  token, a small scorer that prunes traces mid-generation; latency down 45% to 70%.
+* Alvarez & Baheri (arXiv 2605.13772, 2026): contrastive-PCA transport geometry and
+  a distilled BiLSTM; reported above probing baselines on ProcessBench in domain,
+  degrading under shift (numbers not checked).
+* SWIFT (arXiv 2505.12225, KDD 2026): linear token-level rewards from hidden states
+  for best-of-N, answer level.
+* Caution: Linear Probes Detect Task Format, Not Reasoning Mode (arXiv 2606.02907,
+  TrustNLP 2026) shows a probe at 100% falling to chance once format features are
+  regressed out. Our length, position and lexical controls (§15.3, §15.7) and the length
+  rule of §21.38 answer this for the passive probes, not yet for RTH.
+
+**ProcessBench reference numbers (each paper's own protocol).** Qwen2.5-Math-PRM-7B
+73.5 and -72B 78.3 average F1 (arXiv 2501.07301); ActPRM-X 76.0 (arXiv 2504.10559,
+self-reported); SCAN reports 70.1 for PRM-7B under its setup (arXiv 2509.16548);
+generative PRMs (ThinkPRM, arXiv 2504.16828; GenPRM, arXiv 2504.00891) report
+higher under their own sampling. Our calib-20 protocol gives the PRM's own head
+0.701, so §21.40's numbers compare scorers with each other, not with these tables.
+
+**What §21.40 adds that this survey did not find.**
+
+1. Per-layer offsets at one appended position are what make a frozen-policy read
+   token work (0.594 to 0.642 LDA calib-20); an input embedding alone gives
+   ScratchProbe-sized gains.
+2. Step-level first-error F1 head-to-head with a 7B PRM under one protocol: RTH
+   level with the PRM states (-0.005 [-0.025, +0.014]) and +0.046 [+0.027, +0.064]
+   over the best Qwen3-8B cell.
+3. At the same layer, the read token makes the end-of-step state as separable as
+   the PRM's last step token (LDA calib-20 0.617 against 0.621, from 0.555) and
+   lifts the correctness signal into high-variance directions (best single PC 0.834
+   against 0.729).
+4. The parent-model control: the same recipe on the PRM's parent recovers 14% of the
+   PRM's gap, so the token reads what the policy already encodes and does not stand
+   in for process supervision.
+5. The jointly trained linear head beats a transformer over the token's layer path,
+   and five times more training data improves PRM800K but not ProcessBench.
+
+Gaps a reviewer would raise: an input-embedding-only baseline framed as
+ScratchProbe, a LoReFT baseline at the same appended position, LoRA on the policy,
+three RTH seeds (TamIA 645038), one model family, downstream selection (645067),
+and RTH under the official ProcessBench evaluation.
+
 ---
 
 ## 24. Next Steps

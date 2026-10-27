@@ -348,6 +348,123 @@ Readings (T=1.0 pool; T=0.7 must agree in sign to be reported as a finding):
   readouts 0.44 to 0.52).
 * E1 is reported, not read against a bar.
 
+## Stage G: baselines and mechanistic study (added 2026-10-27, before any run)
+
+Why: RTH ties the PRM states on ProcessBench (0.659 +- 0.003, 3 seeds) but the
+claim that the per-layer offsets are the ingredient, and the reason RTH stays tied
+to the policy's confidence (0.530 on the 985 confidence-wrong MATH-500 pairs), need
+baselines and a mechanism. Everything on frozen Qwen3-8B, the verifier template, the
+same 100k PRM800K steps, 3 seeds, the same scoring as RTH: the head's ProcessBench
+calib-20 through the leaderboard code (`scripts/analysis/read_token_pb_scores.py`,
+paired trace bootstrap against RTH), PRM800K test AUROC, LDA, and the
+confidence-wrong pairs.
+
+**Baselines.**
+
+| id | trained | params | stage |
+|---|---|---|---|
+| BL1 embedding only (ScratchProbe-style) | ` correct` embedding + linear head, no offsets | ~8k | BLA |
+| BL1-SP ScratchProbe recipe | 8 scratch tokens + read token (m = 9, vocabulary init), ReLU MLP head h1024, no offsets | ~4.2M | BLA, BLB |
+| BL2 offsets only | 36 offsets + head, embedding frozen at ` correct` | ~152k | BLB |
+| BL3 LoReFT at the read position | rank-4 subspace edit per layer, read position only | ~1.2M | later (new hook) |
+| BL4 read-position LoRA (OTV-like) | rank-8 LoRA on q, v, active only for the read token | ~3.8M | later (new hook) |
+
+Readings (3-seed means, calib-20 F1_PB):
+
+* BL1 at least 0.02 below RTH: the offsets are the ingredient.
+* BL2 within 0.01 of RTH: training the embedding adds nothing once offsets exist.
+* BL3 within 0.01 of RTH: a bias per layer is enough; at least 0.02 above: a richer
+  intervention helps.
+* BL4 at least 0.02 above RTH, or any baseline at 0.60 or more on the
+  confidence-wrong pairs with the interval above 0.5: the confidence coupling is a
+  matter of capacity; otherwise it is a property of reading a frozen policy.
+
+**Mechanistic study** (the bundle under
+`/project/aip-azouaq/dchikhi/cot_mech/read_token_v1/mech`, token `dq_correct`):
+
+* M1 (`scripts/analysis/rth_layer_lda.py`, `slurm/rth_layer_lda_tamia.sh`): per-layer
+  LDA (fit on the bundle's 20k train sample, shrinkage on val) for the last step
+  token, the read token and the PRM; test AUROC, ProcessBench AUROC and calib-20 per
+  layer. Reading: the read token's advantage appearing only in the last third of the
+  layers means the offsets reshape the readout; appearing earlier means they change
+  what the token gathers.
+* M2: offsets switched off by layer window (0-8, 9-17, 18-26, 27-35), offset norm
+  relative to the residual, what the offsets write in vocabulary space. Reading: one
+  window carrying 70% or more of the gain locates the mechanism.
+* M3: per-layer attention mass from the read token (problem, prior steps, current
+  step, sink), RTH against BL1, 2k test items.
+* M4: a linear confidence readout (step token log-probs under the policy) fit on the
+  read state and projected out of RTH's direction. Reading: calib-20 down 0.02 or
+  more means the coupling is load-bearing; down less than 0.01 with the pair accuracy
+  rising means a decoupled RTH is within reach.
+* M5: the PRM's own head score regressed from the read state per layer; agreement on
+  the pairs where RTH and the PRM disagree.
+
+## Stage H: the read token inside the trace, Plan B (added 2026-10-27, before any run)
+
+**Why.** RTH reads a step under the verifier template rebuilt per step, so scoring
+re-reads the trajectory once per step: 28,821 tokens per MATH-500 trajectory, 1,642
+with prefix sharing, against 845 for the PRM (E1). Its states are not the ones the
+policy computed while writing, so nothing is reused from generation.
+
+**Layout (RTH-I).** One pass per trajectory in Qwen3-8B's chat layout (the D1/D2
+pool's `chat_prompt`, non-thinking), one read token after each step's separator:
+
+    chat_prompt(problem) s0 \n\n [v] s1 \n\n [v] ... sK \n\n [v]
+
+No text token attends to a read token (4D mask), so the text states are the
+generation states. Read token k sees the text up to the end of step k's separator
+and itself, at the position the next text token would take: the same computation
+as appending the token to the generation cache after step k and dropping it.
+`scripts/read_token_inline.py`: text pass without gradients, then all read tokens
+of a batch in one call over the cache; offsets at every read position; m = 1 only.
+
+**Same supervision as RTH.** The same 100k PRM800K items per seed (same sampler and
+seed), labels, BCE, AdamW, OneCycle at lr 3e-3 and clip 1.0. Items of one solution
+ride on its longest item (an item reads exactly the tokens it would read alone; one
+without a token boundary at its separator is read alone, and the count is logged).
+Batches are capped at RTH's items per optimizer step on the same items, so the
+number of optimizer steps stays close to RTH's. Only the layout changes.
+
+**Stages.**
+
+* H0, equivalence: tests on the tiny model (inline read equals a read token
+  appended to each standalone prefix, with non-zero offsets and gradients; passive
+  states equal the plain text states), and a gate at the start of every training
+  run on the real model (relative difference <= 0.05, as RTH's cache gate).
+* H1, layout gap: the three RTH tokens, unchanged, read inline (no training).
+* H2, RTH-I: seeds 0-2 trained inline. Each encode also stores the text states at
+  the separator token before every read token (`passive_block24`, `passive_block35`,
+  `passive_final`); LDA on them is the passive control, the free probe on the same
+  states (`scripts/analysis/inline_passive_lda.py`).
+* H3, downstream and cost (after H2): MATH-500 / GSM8K T=1.0 pools scored in one
+  pass, Stage E's D1/D2 metrics, and E1 cost on two lines: rescoring (text + K read
+  tokens) and the online margin (K read tokens over an existing cache).
+* H4, online (after H3): append, read and drop during generation; online scores
+  must equal H3's offline scores on 50 traces before online rejection.
+
+**Prespecified readings (H2, calib-20 F1_PB, four-subset mean, 3 seeds).**
+
+* GO for H3: RTH-I mean >= 0.649 (RTH 0.659 minus 0.01) and above the best
+  passive-control LDA row.
+* RTH-I below 0.649 but above the passive control: the read token still adds over
+  the free probe; fallbacks in order: m = 4 read tokens, then a read-position LoRA
+  (text untouched, if BL4 helps), else keep Option A for offline scoring.
+* RTH-I at or below the passive control: the read token's gain needs the template;
+  report it, keep RTH with Option A.
+* H1 is descriptive: its gap to RTH measures how much of RTH is tied to the template.
+
+No instruction is added to the policy prompt: it would change generation (the
+PRM800K few-shot prompt cost 6 points of MATH pass@1).
+
+**Novelty caveat.** A separator read in one pass is the PRM's own layout, and OTV
+(arXiv 2603.01025) reads a learned token over a reused cache with LoRA. The claim
+Stage H can support is narrower: a frozen policy, no weight change, one token per
+step, compared with the PRM at matched cost (H3).
+
+**Job.** `slurm/read_token_inline_tamia.sh` (H1 + H2 on one node, then the paired
+trace bootstrap of RTH-I against RTH, the PRM-state cells and H1).
+
 ## Code needed
 
 * `scripts/read_token_probe.py`: `--freeze_soft` (embedding excluded from the

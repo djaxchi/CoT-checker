@@ -41,6 +41,9 @@ source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip >/dev/null
 pip install --no-index torch transformers numpy scipy scikit-learn pyyaml 2>&1 | tail -1
 
+# E1_ONLY=1 FTOKEN=<token dir>: rerun only the cost measurement (job 645067's E1 ran
+# out of GPU memory with all of a trajectory's steps in one batch)
+if [[ -z "${E1_ONLY:-}" ]]; then
 # --- pick the RTH seed on PRM800K val AUROC ----------------------------------------
 LOCAL="$SLURM_TMPDIR/rth"
 mkdir -p "$LOCAL"
@@ -79,6 +82,11 @@ done
 fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done
 tail -n 2 "$LOGS"/score_gpu*-"$SLURM_JOB_ID".log
 (( fail == 0 )) || exit 1
+else
+  : "${FTOKEN:?set FTOKEN with E1_ONLY}"
+  CKPT="$OUT/tokens/$FTOKEN/read_token.pt"
+  fail=0
+fi
 
 # --- E1: cost on one GPU, the node otherwise idle -------------------------------------
 CUDA_VISIBLE_DEVICES=0 python scripts/analysis/rth_cost.py --model $Q3 --ckpt "$CKPT" \

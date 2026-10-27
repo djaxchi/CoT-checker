@@ -13,6 +13,19 @@
 #   Cparent  GPU0-2 parent seeds 0-2 only, soft pass without cuDNN SDPA (rerun of C's parent arm)
 #   D  GPU0-2 deep read token seeds 0-2 (HEAD=linear|mlp), soft pass without cuDNN SDPA
 #   DQ GPU0-3 Stage D2, deep read token start-point ablation, seed 0, m = start text length
+#   BLA GPU0-2 BL1 embedding only (" correct", m = 1, no offsets) seeds 0-2; GPU3 BL1-SP
+#      (ScratchProbe-style: 8 scratch tokens + the read token, m = 9 from vocabulary
+#      rows, MLP head, no offsets) seed 0
+#   BLB GPU0-1 BL1-SP seeds 1, 2; GPU2 BL2 (offsets only, embedding frozen at
+#      " correct") seeds 0 then 2; GPU3 BL2 seed 1, then the ProcessBench scores of
+#      the RTH tokens (dq_correct, rth_correct_seed1, rth_correct_seed2)
+#   Every run also writes its ProcessBench head scores in the leaderboard format to
+#   $OUT/pb_scores/<name>, in the trace order of the RTH cell, for the paired bootstrap.
+#   BLC GPU0-2 BL3 (LoReFT rank 4 at the read position, " correct" embedding, linear
+#      head, no offsets) seeds 0-2 at peak lr 1e-3; GPU3 BL3 seed 0 at 3e-3 (lr check)
+#   BLD the same for BL4 (LoRA rank 8 on q_proj, v_proj, read position only)
+#   M2  the RTH token dq_correct re-scored with its offsets switched off by layer window:
+#      0-8, 9-17, 18-26, 27-35 (GPU0-3), then all of them (GPU0)
 #   RTH GPU0-1 RTH seeds 1, 2: dq_correct (seed 0) again at 100k steps (submit with
 #      --time=01:15:00)
 #   DFLR GPU0 DF seed 2 again with peak lr 1e-3 (the 3e-3 run diverged at the end of
@@ -23,7 +36,7 @@
 # m_all on val AUROC (scripts/analysis/read_token_select.py). B and C stop if the
 # v0 gate sends the experiment to Stage D. Only results, tokens and logs leave the node.
 set -euo pipefail
-STAGE="${STAGE:?set STAGE=B, C, Cparent, D, DQ, DF, DFLR or RTH}"
+STAGE="${STAGE:?set STAGE=B, C, Cparent, D, DQ, DF, DFLR, RTH, BLA, BLB, BLC, BLD or M2}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 V0="${V0:-$SCRATCH/cot_mech/read_token_v0}"
 OUT="${OUT:-$SCRATCH/cot_mech/read_token_v1}"
@@ -49,11 +62,14 @@ TRAIN="$DATA/prm800k_probe_train_full.jsonl"
 ENC=(--prm800k "train:$TRAIN:30000" "val:$DATA/prm800k_val_5k.jsonl" "test:$DATA/prm800k_test_2k.jsonl"
      --pb "gsm8k:$PB/processbench_gsm8k.jsonl" "math:$PB/processbench_math.jsonl"
           "olympiadbench:$PB/processbench_olympiadbench.jsonl" "omnimath:$PB/processbench_omnimath.jsonl")
+PBENC=(--pb "gsm8k:$PB/processbench_gsm8k.jsonl" "math:$PB/processbench_math.jsonl"
+            "olympiadbench:$PB/processbench_olympiadbench.jsonl" "omnimath:$PB/processbench_omnimath.jsonl")
+LIKE="$OUT/stage_f/cells_rth/rth_dq_correct"
 LOGS="$OUT/logs"
 export OMP_NUM_THREADS=12 OPENBLAS_NUM_THREADS=12 MKL_NUM_THREADS=12
 
 # --- selection: v0's four tokens on PRM800K val ------------------------------------
-if [[ "$STAGE" != DQ && "$STAGE" != DF && "$STAGE" != DFLR && "$STAGE" != RTH ]]; then
+if [[ "$STAGE" != DQ && "$STAGE" != DF && "$STAGE" != DFLR && "$STAGE" != RTH && "$STAGE" != BL* && "$STAGE" != M2 ]]; then
 v0=(m1 m4 m16 m4text)
 pids=()
 for i in 0 1 2 3; do
@@ -89,6 +105,36 @@ run() {
     python scripts/analysis/backbone_geometry.py --configs "$name:$LOCAL/$name" --reps sep \
       --out "$OUT/geometry_$name"
     mkdir -p "$OUT/tokens/$name" && cp "$LOCAL/$name/read_token.pt" "$OUT/tokens/$name/"
+    python scripts/analysis/read_token_pb_scores.py --enc "$LOCAL/$name" --out "$OUT/pb_scores/$name" \
+      --like "$LIKE"
+  ) > "$LOGS/${name}-${SLURM_JOB_ID}.log" 2>&1
+}
+
+# ProcessBench scores of an existing token, in the leaderboard format
+pb_scores() {
+  local gpu=$1 name=$2
+  (
+    set -e
+    export CUDA_VISIBLE_DEVICES=$gpu
+    python scripts/read_token_probe.py encode --model $Q3 --ckpt "$OUT/tokens/$name/read_token.pt" \
+      --out "$LOCAL/pbs_$name" "${PBENC[@]}"
+    python scripts/analysis/read_token_pb_scores.py --enc "$LOCAL/pbs_$name" --out "$OUT/pb_scores/$name" \
+      --like "$LIKE"
+  ) > "$LOGS/pb_scores_${name}-${SLURM_JOB_ID}.log" 2>&1
+}
+
+# M2: an existing token re-encoded with some offsets set to zero, scored like a run
+ablate() {
+  local gpu=$1 src=$2 window=$3 name="m2_${2}_zero${3}"
+  (
+    set -e
+    export CUDA_VISIBLE_DEVICES=$gpu
+    python scripts/read_token_probe.py encode --model $Q3 --ckpt "$OUT/tokens/$src/read_token.pt" \
+      --zero_deep "$window" --out "$LOCAL/$name" "${ENC[@]}"
+    python scripts/analysis/backbone_geometry.py --configs "$name:$LOCAL/$name" --reps sep \
+      --out "$OUT/geometry_$name"
+    python scripts/analysis/read_token_pb_scores.py --enc "$LOCAL/$name" --out "$OUT/pb_scores/$name" \
+      --like "$LIKE"
   ) > "$LOGS/${name}-${SLURM_JOB_ID}.log" 2>&1
 }
 
@@ -155,6 +201,40 @@ case "$STAGE" in
       run $s df_correct_full_seed$s $Q3 1 text --init_text " correct" --deep --head "$HEAD" \
         --n_train 513810 --seed $s --soft_attn no_cudnn & pids+=($!)
     done
+    ;;
+  BLA)
+    for s in 0 1 2; do
+      run $s bl1_correct_seed$s $Q3 1 text --init_text " correct" --head linear \
+        --n_train 100000 --seed $s --soft_attn no_cudnn & pids+=($!)
+    done
+    run 3 bl1sp_seed0 $Q3 9 vocab --head mlp --n_train 100000 --seed 0 --soft_attn no_cudnn & pids+=($!)
+    ;;
+  BLB)
+    bl2=(1 text --init_text " correct" --deep --freeze_soft --head linear --n_train 100000 --soft_attn no_cudnn)
+    for s in 1 2; do
+      run $((s - 1)) bl1sp_seed$s $Q3 9 vocab --head mlp --n_train 100000 --seed $s --soft_attn no_cudnn &
+      pids+=($!)
+    done
+    ( run 2 bl2_offsets_seed0 $Q3 "${bl2[@]}" --seed 0 && run 2 bl2_offsets_seed2 $Q3 "${bl2[@]}" --seed 2 ) &
+    pids+=($!)
+    ( run 3 bl2_offsets_seed1 $Q3 "${bl2[@]}" --seed 1 &&
+      for n in dq_correct rth_correct_seed1 rth_correct_seed2; do pb_scores 3 $n; done ) & pids+=($!)
+    ;;
+  BLC|BLD)
+    if [[ "$STAGE" == BLC ]]; then iv=(--interv loreft --rank 4); tag=bl3_loreft; else
+      iv=(--interv lora --rank 8); tag=bl4_lora; fi
+    for s in 0 1 2; do
+      run $s ${tag}_seed$s $Q3 1 text --init_text " correct" --head linear "${iv[@]}" \
+        --n_train 100000 --seed $s --lr 1e-3 --soft_attn no_cudnn & pids+=($!)
+    done
+    run 3 ${tag}_seed0_lr3e-3 $Q3 1 text --init_text " correct" --head linear "${iv[@]}" \
+      --n_train 100000 --seed 0 --lr 3e-3 --soft_attn no_cudnn & pids+=($!)
+    ;;
+  M2)
+    ( ablate 0 dq_correct 0-8 && ablate 0 dq_correct 0-35 ) & pids+=($!)
+    ablate 1 dq_correct 9-17 & pids+=($!)
+    ablate 2 dq_correct 18-26 & pids+=($!)
+    ablate 3 dq_correct 27-35 & pids+=($!)
     ;;
   RTH)
     # RTH = the read token classified by its own head; dq_correct is seed 0.

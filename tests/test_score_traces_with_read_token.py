@@ -11,6 +11,8 @@ from scripts.read_token_probe import ReadToken, read_all_states, tokenize  # noq
 from tests.test_read_token_probe import tiny_model  # noqa: E402
 from tests.test_read_token_store import D, CharTok  # noqa: E402
 
+DEV = torch.device("cpu")
+
 
 def _setup(tmp_path, monkeypatch):
     model = tiny_model()
@@ -54,5 +56,66 @@ def test_segmentation_gate_refuses_a_mismatch(tmp_path, monkeypatch):
     ref.write_text(json.dumps({"traj_uid": "q1::g0", "n_steps": 2}) + "\n")
     monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs),
                                      "--out", str(tmp_path / "s.jsonl"), "--verify_against", str(ref)])
+    with pytest.raises(SystemExit):
+        sr.main()
+
+
+def test_branched_scores_match_and_compare_reports_agreement(tmp_path, monkeypatch, capsys):
+    _, _, ck, trajs, _ = _setup(tmp_path, monkeypatch)
+    full, br = tmp_path / "full.jsonl", tmp_path / "br.jsonl"
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs), "--out", str(full)])
+    sr.main()
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs), "--out", str(br),
+                                     "--branched", "--compare_to", str(full)])
+    sr.main()
+    a = {r["traj_uid"]: r["scores"] for r in map(json.loads, full.read_text().splitlines())}
+    b = {r["traj_uid"]: r["scores"] for r in map(json.loads, br.read_text().splitlines())}
+    assert a.keys() == b.keys()
+    for u in a:
+        assert np.allclose(a[u], b[u], atol=1e-4)
+    assert "max_abs_diff" in capsys.readouterr().out
+
+
+def test_fork_ids_keeps_only_the_listed_questions(tmp_path, monkeypatch):
+    _, _, ck, trajs, _ = _setup(tmp_path, monkeypatch)
+    keep = tmp_path / "keep.json"
+    keep.write_text(json.dumps(["q1", "q2"]))
+    out = tmp_path / "s.jsonl"
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs),
+                                     "--out", str(out), "--fork_ids", str(keep), "--branched"])
+    sr.main()
+    got = [json.loads(l)["problem_id"] for l in out.read_text().splitlines()]
+    assert got == ["q1", "q2"]
+
+
+def test_inline_scores_are_a_read_token_after_each_step_of_the_chat_text(tmp_path, monkeypatch):
+    from src.onpolicy.prompts import chat_prompt
+    from tests.test_read_token_inline import CliTok
+    model, rt, ck, trajs, rows = _setup(tmp_path, monkeypatch)
+    tok = CliTok()
+    monkeypatch.setattr(sr, "load_model", lambda *_a: (model, tok))
+    rows = [dict(r, prompt_style="chat") for r in rows]
+    trajs.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "s.jsonl"
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs),
+                                     "--out", str(out), "--inline", "--max_tokens", "2000"])
+    sr.main()
+    got = {r["traj_uid"]: r["scores"] for r in map(json.loads, out.read_text().splitlines())}
+    steps = ["a b", "c d", "e"]
+    for k in range(3):
+        ids = tok(chat_prompt("p1") + "\n\n".join(steps[:k + 1]) + "\n\n")["input_ids"]
+        with torch.no_grad():
+            ref = torch.sigmoid(rt.logit(read_all_states(model, rt, [ids], 0, DEV, grad=False)[:, -1]))
+        assert abs(got["q1::g0"][k] - float(ref)) < 1e-4, k
+    manifest = json.loads((tmp_path / "s_manifest.json").read_text())
+    assert manifest["template"] == "inline_chat" and manifest["tokens"] > 0
+
+
+def test_inline_refuses_a_pool_sampled_under_another_prompt(tmp_path, monkeypatch):
+    from tests.test_read_token_inline import CliTok
+    model, rt, ck, trajs, rows = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(sr, "load_model", lambda *_a: (model, CliTok()))
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs),
+                                     "--out", str(tmp_path / "s.jsonl"), "--inline"])
     with pytest.raises(SystemExit):
         sr.main()

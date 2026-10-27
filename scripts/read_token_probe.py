@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import json
 import sys
 import time
@@ -54,14 +55,56 @@ from src.onpolicy.prompts import verifier_prefix  # noqa: E402
 
 
 class ReadToken(torch.nn.Module):
+    """Soft read token(s), optional per-layer interventions at the read positions, a head.
+
+    deep:   n_layers x m x d additive offsets (Stage D, RTH).
+    interv: one more intervention per layer, also at the read positions only
+      "loreft"  LoReFT (Wu et al. 2024): h + R^T (W h + b - R h), R an orthonormal
+                rank-r basis (QR of R_raw), W initialised to R and b to 0, so the
+                intervention starts as the identity (baseline BL3).
+      "lora"    LoRA on q_proj and v_proj, rank r, scale 2, B initialised to 0, applied
+                only to the read positions' rows (baseline BL4); lora_dims = (q_out, v_out).
+    """
+
     def __init__(self, m: int, d: int, init: torch.Tensor, read: str = "last",
-                 head: str = "linear", n_layers: int = 0):
+                 head: str = "linear", n_layers: int = 0, interv: str | None = None,
+                 rank: int = 0, n_interv_layers: int = 0, lora_dims: tuple[int, int] | None = None):
         super().__init__()
         self.soft = torch.nn.Parameter(init.clone().float())  # (m, d)
         self.head = torch.nn.Linear(d, 1) if head == "linear" else MLPHead(d, hidden=1024)
         self.m, self.read, self.head_kind = m, read, head
         # (n_layers, m, d) residual offsets at the read positions; None for v0.
         self.deep = torch.nn.Parameter(torch.zeros(n_layers, m, d)) if n_layers else None
+        self.interv, self.rank, self.lora_dims = interv, rank, lora_dims
+        L = n_interv_layers
+        if interv == "loreft":
+            r0 = torch.randn(L, rank, d) / d ** 0.5
+            self.R_raw = torch.nn.Parameter(r0)
+            self.W = torch.nn.Parameter(torch.stack([self._orth(x) for x in r0]))
+            self.b = torch.nn.Parameter(torch.zeros(L, rank))
+        elif interv == "lora":
+            q_out, v_out = lora_dims
+            self.A_q = torch.nn.Parameter(torch.randn(L, rank, d) / d ** 0.5)
+            self.B_q = torch.nn.Parameter(torch.zeros(L, q_out, rank))
+            self.A_v = torch.nn.Parameter(torch.randn(L, rank, d) / d ** 0.5)
+            self.B_v = torch.nn.Parameter(torch.zeros(L, v_out, rank))
+        elif interv is not None:
+            raise ValueError(f"unknown intervention {interv!r}")
+
+    @staticmethod
+    def _orth(r: torch.Tensor) -> torch.Tensor:
+        """Orthonormal rows spanning r's rows, (rank, d)."""
+        return torch.linalg.qr(r.T.float())[0].T
+
+    def interv_params(self) -> list[torch.nn.Parameter]:
+        names = {"loreft": ("R_raw", "W", "b"), "lora": ("A_q", "B_q", "A_v", "B_v")}.get(self.interv, ())
+        return [getattr(self, n) for n in names]
+
+    def interv_state(self) -> dict | None:
+        if self.interv is None:
+            return None
+        names = {"loreft": ("R_raw", "W", "b"), "lora": ("A_q", "B_q", "A_v", "B_v")}[self.interv]
+        return {n: getattr(self, n).detach().cpu() for n in names}
 
     def logit(self, h: torch.Tensor) -> torch.Tensor:
         out = self.head(h)
@@ -69,12 +112,17 @@ class ReadToken(torch.nn.Module):
 
 
 @contextlib.contextmanager
-def deep_hooks(model, rt: ReadToken):
-    """Add rt.deep[l] to decoder layer l's output at the last m positions."""
+def deep_hooks(model, rt: ReadToken, n: int | None = None):
+    """Add rt.deep[l] to decoder layer l's output at the last n positions (default m).
+
+    n other than m (one call holding several read tokens, read_token_inline.py) needs m = 1,
+    whose offsets then apply at every one of the n positions."""
     if rt.deep is None:
         yield
         return
-    m = rt.m
+    m = rt.m if n is None else n
+    if m != rt.m and rt.m != 1:
+        raise ValueError(f"offsets of an m = {rt.m} token cannot apply at {m} positions")
 
     def make(l):
         def hook(_mod, _inp, out):
@@ -90,6 +138,68 @@ def deep_hooks(model, rt: ReadToken):
     finally:
         for hd in handles:
             hd.remove()
+
+
+@contextlib.contextmanager
+def interv_hooks(model, rt: ReadToken, n: int | None = None):
+    """rt's LoReFT or LoRA intervention, at the last n positions of every call (default m)."""
+    if rt.interv is None:
+        yield
+        return
+    m, handles = (rt.m if n is None else n), []
+    if rt.interv == "loreft":
+        def make(l):
+            def hook(_mod, _inp, out):
+                h = out[0] if isinstance(out, tuple) else out
+                x = h[:, -m:].float()
+                R = rt._orth(rt.R_raw[l])
+                delta = (x @ rt.W[l].T + rt.b[l] - x @ R.T) @ R
+                h = torch.cat([h[:, :-m], (x + delta).to(h.dtype)], 1)
+                return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+            return hook
+        handles = [layer.register_forward_hook(make(l)) for l, layer in enumerate(model.model.layers)]
+    else:
+        def make(A, B):
+            def hook(_mod, inp, out):
+                x = inp[0][:, -m:].float()
+                add = 2.0 * (x @ A.T @ B.T)
+                return torch.cat([out[:, :-m], (out[:, -m:].float() + add).to(out.dtype)], 1)
+            return hook
+        for l, layer in enumerate(model.model.layers):
+            at = layer.self_attn
+            handles.append(at.q_proj.register_forward_hook(make(rt.A_q[l], rt.B_q[l])))
+            handles.append(at.v_proj.register_forward_hook(make(rt.A_v[l], rt.B_v[l])))
+    try:
+        yield
+    finally:
+        for hd in handles:
+            hd.remove()
+
+
+@contextlib.contextmanager
+def read_hooks(model, rt: ReadToken, n: int | None = None):
+    """Every per-layer change the read token makes: offsets, then LoReFT or LoRA, at the
+    last n positions (default m)."""
+    with deep_hooks(model, rt, n), interv_hooks(model, rt, n):
+        yield
+
+
+def read_token_from_ckpt(ck: dict, model, dev) -> ReadToken:
+    """Rebuild a saved ReadToken for `model`."""
+    d, L = model.config.hidden_size, model.config.num_hidden_layers
+    deep = ck.get("deep")
+    interv = ck.get("interv")
+    lora_dims = tuple(ck["lora_dims"]) if ck.get("lora_dims") else None
+    rt = ReadToken(ck["m"], d, ck["soft"], read=ck.get("read", "last"), head=ck.get("head_kind", "linear"),
+                   n_layers=0 if deep is None else deep.shape[0], interv=interv, rank=ck.get("rank", 0),
+                   n_interv_layers=L if interv else 0, lora_dims=lora_dims).to(dev)
+    rt.head.load_state_dict(ck["head"])
+    with torch.no_grad():
+        if deep is not None:
+            rt.deep.copy_(deep.to(dev))
+        for n, v in (ck.get("interv_state") or {}).items():
+            getattr(rt, n).copy_(v.to(dev))
+    return rt.eval()
 
 
 def tokenize(tok, it: dict) -> list[int]:
@@ -180,11 +290,71 @@ def read_all_states(model, rt: ReadToken, ids_list: list[list[int]], pad: int, d
     att2 = torch.cat([att, torch.ones((B, m), dtype=att.dtype, device=dev)], 1)
     emb = rt.soft.to(model.dtype)[None].expand(B, -1, -1)
     blocks = sorted(capture) if capture is not None else []
-    with torch.set_grad_enabled(grad), deep_hooks(model, rt), soft_kernels(soft_attn), \
+    with torch.set_grad_enabled(grad), read_hooks(model, rt), soft_kernels(soft_attn), \
             capture_hooks(model, blocks, capture if capture is not None else {}):
         out2 = model.model(inputs_embeds=emb, attention_mask=att2, position_ids=soft_pos,
                            past_key_values=cache, use_cache=True)
     return out2.last_hidden_state.float()
+
+
+def common_prefix(a: list[int], b: list[int]) -> int:
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
+def read_branched(model, rt: ReadToken, ids_list: list[list[int]], pad: int, dev,
+                  soft_attn: str | None = None, max_rows: int = 16) -> torch.Tensor:
+    """read_all_states for items that share long token prefixes (the steps of one
+    trajectory), without recomputing what they share, (n, m, d), no gradients.
+
+    The longest item is the trunk and runs once. Every item keeps the trunk's cache
+    up to their longest common token prefix (computed on token ids, so tokenization
+    at the junction needs no assumption); only its remaining tokens and the read
+    token are computed, in rows that each mask the trunk positions past their own
+    prefix. The same tokens at the same positions under a causal mask give the same
+    states, so this equals one read per item (up to batch numerics); tests check it.
+    """
+    trunk = max(ids_list, key=len)
+    T, m = len(trunk), rt.m
+    keep = [common_prefix(t, trunk) for t in ids_list]
+    with torch.no_grad():
+        cache = model.model(input_ids=torch.tensor([trunk], device=dev), use_cache=True).past_key_values
+    out = []
+    for lo in range(0, len(ids_list), max_rows):
+        rows = range(lo, min(lo + max_rows, len(ids_list)))
+        B = len(rows)
+        c = copy.deepcopy(cache)
+        c.batch_repeat_interleave(B)
+        tails = [ids_list[k][keep[k]:] for k in rows]
+        Tt = max(len(t) for t in tails)
+        att = torch.zeros((B, T + Tt), dtype=torch.long)
+        ids = torch.full((B, max(Tt, 1)), pad, dtype=torch.long)
+        pos = torch.zeros((B, max(Tt, 1)), dtype=torch.long)
+        for r, (k, t) in enumerate(zip(rows, tails)):
+            att[r, :keep[k]] = 1
+            if t:
+                att[r, T + Tt - len(t):] = 1
+                ids[r, Tt - len(t):] = torch.tensor(t)
+                pos[r, Tt - len(t):] = keep[k] + torch.arange(len(t))
+            pos[r, :Tt - len(t)] = keep[k]
+        att = att.to(dev)
+        with torch.no_grad():
+            if Tt:
+                model.model(input_ids=ids.to(dev), attention_mask=att, position_ids=pos.to(dev),
+                            past_key_values=c, use_cache=True)
+            lens = torch.tensor([keep[k] + len(t) for k, t in zip(rows, tails)], device=dev)
+            soft_pos = lens[:, None] + torch.arange(m, device=dev)[None]
+            att2 = torch.cat([att, torch.ones((B, m), dtype=att.dtype, device=dev)], 1)
+            emb = rt.soft.to(model.dtype)[None].expand(B, -1, -1)
+            with read_hooks(model, rt), soft_kernels(soft_attn):
+                h = model.model(inputs_embeds=emb, attention_mask=att2, position_ids=soft_pos,
+                                past_key_values=c, use_cache=True).last_hidden_state
+        out.append(h.float())
+        del c
+    return torch.cat(out)
 
 
 def reduce_states(rt: ReadToken, H: torch.Tensor) -> torch.Tensor:
@@ -201,7 +371,7 @@ def full_forward_states(model, rt: ReadToken, ids: list[int], dev) -> torch.Tens
     """Reference for the cache gate: one plain forward over prefix + soft tokens, (m, d)."""
     e = model.get_input_embeddings()(torch.tensor([ids], device=dev))
     full = torch.cat([e, rt.soft.to(model.dtype)[None]], 1)
-    with deep_hooks(model, rt):
+    with read_hooks(model, rt):
         return model.model(inputs_embeds=full).last_hidden_state[0, -rt.m:].float()
 
 
@@ -211,6 +381,8 @@ def make_optimizer(rt: ReadToken, lr: float, freeze_soft: bool):
         groups.insert(0, {"params": [rt.soft], "lr": lr})
     if rt.deep is not None:
         groups.append({"params": [rt.deep], "lr": lr})
+    if rt.interv is not None:
+        groups.append({"params": rt.interv_params(), "lr": lr})
     rt.soft.requires_grad_(not freeze_soft)
     return torch.optim.AdamW(groups, weight_decay=0.0)
 
@@ -226,6 +398,11 @@ def main() -> None:
     p.add_argument("--read", choices=["last", "mean"], default="last")
     p.add_argument("--head", choices=["linear", "mlp"], default="linear")
     p.add_argument("--deep", action="store_true")
+    p.add_argument("--interv", choices=["loreft", "lora"], default=None,
+                   help="a LoReFT or read-position LoRA intervention per layer (baselines BL3, BL4)")
+    p.add_argument("--rank", type=int, default=0)
+    p.add_argument("--zero_deep", default=None,
+                   help="encode: a-b, the offsets of layers a..b set to zero (mechanistic study M2)")
     p.add_argument("--soft_attn", choices=["no_cudnn"], default=None,
                    help="soft-token pass only: SDPA without the cuDNN backend (default: any SDPA backend)")
     p.add_argument("--keep_all", action="store_true", help="encode: also store all m states")
@@ -265,10 +442,15 @@ def main() -> None:
             g = torch.Generator().manual_seed(a.seed)
             idx = torch.randint(0, emb.shape[0], (a.m,), generator=g)
             init = emb[idx.to(emb.device)].detach().float()
+        at0 = model.model.layers[0].self_attn
         rt = ReadToken(a.m, d, init.cpu(), read=a.read, head=a.head,
-                       n_layers=n_layers if a.deep else 0).to(dev)
+                       n_layers=n_layers if a.deep else 0, interv=a.interv, rank=a.rank,
+                       n_interv_layers=n_layers if a.interv else 0,
+                       lora_dims=(at0.q_proj.out_features, at0.v_proj.out_features)
+                       if a.interv == "lora" else None).to(dev)
         print(f"[config] model={a.model} m={a.m} init={a.init} read={a.read} head={a.head} "
-              f"deep={a.deep} freeze_soft={a.freeze_soft} n_train={a.n_train} seed={a.seed}", flush=True)
+              f"deep={a.deep} interv={a.interv} rank={a.rank} freeze_soft={a.freeze_soft} "
+              f"n_train={a.n_train} seed={a.seed} lr={a.lr}", flush=True)
         items = prm800k_items(a.train, a.n_train, a.seed)
         if a.smoke:
             items = items[:a.smoke]
@@ -289,7 +471,7 @@ def main() -> None:
         params = [q for q in rt.parameters() if q.requires_grad]
         # With frozen embeddings and no deep offsets the read state does not depend
         # on anything trained, so the backbone runs without gradients.
-        state_grad = not a.freeze_soft or rt.deep is not None
+        state_grad = not a.freeze_soft or rt.deep is not None or rt.interv is not None
         bl = batches([len(t) for t in toks], a.max_tokens, a.seed)
         steps = a.epochs * len(bl)
         sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=steps, pct_start=0.05)
@@ -313,18 +495,19 @@ def main() -> None:
                     "model": a.model, "init": a.init, "read": a.read, "head_kind": a.head,
                     "freeze_soft": a.freeze_soft, "seed": a.seed, "n_train": a.n_train,
                     "soft_attn": a.soft_attn,
-                    "deep": None if rt.deep is None else rt.deep.detach().cpu()},
+                    "deep": None if rt.deep is None else rt.deep.detach().cpu(),
+                    "interv": rt.interv, "rank": rt.rank, "lora_dims": rt.lora_dims,
+                    "interv_state": rt.interv_state(), "lr": a.lr},
                    a.out / "read_token.pt")
         return
 
     ck = torch.load(a.ckpt or a.out / "read_token.pt", weights_only=False)
-    deep = ck.get("deep")
-    rt = ReadToken(ck["m"], d, ck["soft"], read=ck.get("read", "last"), head=ck.get("head_kind", "linear"),
-                   n_layers=0 if deep is None else deep.shape[0]).to(dev)
-    rt.head.load_state_dict(ck["head"])
-    if deep is not None:
-        rt.deep.data.copy_(deep.to(dev))
-    rt.eval()
+    rt = read_token_from_ckpt(ck, model, dev)
+    if a.zero_deep:
+        lo, hi = map(int, a.zero_deep.split("-"))
+        with torch.no_grad():
+            rt.deep[lo:hi + 1] = 0
+        print(f"[encode] offsets of layers {lo}-{hi} set to zero", flush=True)
     soft_attn = a.soft_attn or ck.get("soft_attn")
     splits = []
     for spec in a.prm800k:

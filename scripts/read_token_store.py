@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.encode_pooled_multilayer import pb_items, prm800k_items  # noqa: E402
 from scripts.read_token_probe import (  # noqa: E402
-    ReadToken, batches, read_all_states, reduce_states, tokenize)
+    ReadToken, batches, read_all_states, read_token_from_ckpt, reduce_states, tokenize)
 from src.repstore.store import TOKEN_SEQ, VECTOR, RepSpec, RepSplit  # noqa: E402
 
 BLOCKS = (3, 7, 11, 15, 19, 23, 27, 31, 34)
@@ -116,8 +116,13 @@ def load_model(name: str, dev):
     return model, tok
 
 
-def load_read_token(ckpt: Path, d: int, dev) -> tuple[ReadToken, dict]:
+def load_read_token(ckpt: Path, d: int, dev, model=None) -> tuple[ReadToken, dict]:
+    """The saved read token; `model` is needed for tokens with a LoReFT or LoRA intervention."""
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
+    if ck.get("interv") and model is None:
+        raise SystemExit(f"{ckpt} has a {ck['interv']} intervention; pass the model to load it")
+    if model is not None:
+        return read_token_from_ckpt(ck, model, dev), ck
     deep = ck.get("deep")
     rt = ReadToken(ck["m"], d, ck["soft"], read=ck.get("read", "last"),
                    head=ck.get("head_kind", "linear"),
@@ -186,7 +191,7 @@ def main() -> None:
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tok = load_model(a.model, dev)
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    rt, ck = load_read_token(a.ckpt, model.config.hidden_size, dev)
+    rt, ck = load_read_token(a.ckpt, model.config.hidden_size, dev, model)
     soft_attn = a.soft_attn or ck.get("soft_attn")
     blocks = [int(x) for x in a.blocks.split(",")]
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT,

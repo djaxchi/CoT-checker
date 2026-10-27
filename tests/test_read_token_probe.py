@@ -191,3 +191,78 @@ def test_capture_prefix_is_the_last_step_token_unchanged_by_the_read_token():
             assert torch.allclose(pre[l][r], hs[l + 1][0, -1], atol=2e-4), (r, l)
         assert torch.allclose(pre["final"][r], hs[-1][0, -1], atol=2e-4)
     assert torch.allclose(model.model.norm(pre[2]), pre["final"], atol=1e-5)
+
+
+def test_branched_reads_equal_one_read_per_item():
+    from scripts.read_token_probe import read_branched
+    model = tiny_model()
+    rt = ReadToken(2, 32, torch.randn(2, 32) * 0.02, n_layers=3)
+    with torch.no_grad():
+        rt.deep.normal_(0, 0.5)
+    trunk = [3, 9, 4, 7, 7, 1, 5, 2, 8, 6, 11, 12]
+    # shared prefixes of different lengths, a different tail, the trunk itself, a disjoint item
+    items = [trunk[:4] + [20, 21], trunk[:7] + [22], trunk, trunk[:10] + [23, 24, 25], [30, 31, 32]]
+    for max_rows in (2, 16):
+        H = read_branched(model, rt, items, 0, DEV, max_rows=max_rows)
+        for r, ids in enumerate(items):
+            ref = read_all_states(model, rt, [ids], 0, DEV, grad=False)[0]
+            assert torch.allclose(H[r], ref, atol=1e-4), (max_rows, r, (H[r] - ref).abs().max())
+
+
+def _interv_token(kind, randomize):
+    model = tiny_model()
+    at = model.model.layers[0].self_attn
+    rt = ReadToken(2, 32, torch.randn(2, 32) * 0.02, n_layers=3, interv=kind, rank=4, n_interv_layers=3,
+                   lora_dims=(at.q_proj.out_features, at.v_proj.out_features) if kind == "lora" else None)
+    with torch.no_grad():
+        rt.deep.normal_(0, 0.3)
+        if randomize:
+            for q in rt.interv_params():
+                q.normal_(0, 0.2)
+    return model, rt
+
+
+@pytest.mark.parametrize("kind", ["loreft", "lora"])
+def test_interventions_start_as_the_identity(kind):
+    from scripts.read_token_probe import ReadToken as RT
+    model, rt = _interv_token(kind, randomize=False)
+    plain = RT(2, 32, rt.soft.detach(), n_layers=3)
+    with torch.no_grad():
+        plain.deep.copy_(rt.deep)
+    a = read_all_states(model, rt, SEQS, 0, DEV, grad=False)
+    b = read_all_states(model, plain, SEQS, 0, DEV, grad=False)
+    assert torch.allclose(a, b, atol=1e-5)
+
+
+@pytest.mark.parametrize("kind", ["loreft", "lora"])
+def test_interventions_cached_branched_and_full_forward_agree(kind, tmp_path):
+    from scripts.read_token_probe import read_branched, read_token_from_ckpt
+    model, rt = _interv_token(kind, randomize=True)
+    H = read_all_states(model, rt, SEQS, 0, DEV, grad=False)
+    plain = ReadToken(2, 32, rt.soft.detach(), n_layers=3)
+    with torch.no_grad():
+        plain.deep.copy_(rt.deep)
+    assert not torch.allclose(H, read_all_states(model, plain, SEQS, 0, DEV, grad=False), atol=1e-3)
+    for r, s in enumerate(SEQS):
+        assert torch.allclose(H[r], full_forward_states(model, rt, s, DEV), atol=2e-4)
+    items = [[3, 9, 4, 7, 7, 1], [3, 9, 4, 20], [3, 9, 4, 7, 7, 1, 5, 2]]
+    B = read_branched(model, rt, items, 0, DEV)
+    for r, ids in enumerate(items):
+        assert torch.allclose(B[r], read_all_states(model, rt, [ids], 0, DEV, grad=False)[0], atol=1e-4)
+    ck = {"soft": rt.soft.detach(), "head": rt.head.state_dict(), "m": 2, "deep": rt.deep.detach(),
+          "interv": kind, "rank": 4, "lora_dims": rt.lora_dims, "interv_state": rt.interv_state()}
+    rt2 = read_token_from_ckpt(ck, model, DEV)
+    assert torch.allclose(read_all_states(model, rt2, SEQS, 0, DEV, grad=False), H, atol=1e-6)
+    assert all(not layer._forward_hooks for layer in model.model.layers)
+    assert all(not layer.self_attn.q_proj._forward_hooks for layer in model.model.layers)
+
+
+@pytest.mark.parametrize("kind", ["loreft", "lora"])
+def test_one_training_step_moves_the_intervention(kind):
+    model, rt = _interv_token(kind, randomize=False)
+    opt = make_optimizer(rt, 1e-2, freeze_soft=False)
+    before = [q.detach().clone() for q in rt.interv_params()]
+    h = read_states(model, rt, SEQS, 0, DEV, grad=True)
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(rt.logit(h), torch.tensor([1.0, 0.0]))
+    opt.zero_grad(); loss.backward(); opt.step()
+    assert any(not torch.equal(b, q) for b, q in zip(before, rt.interv_params()))

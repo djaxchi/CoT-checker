@@ -122,7 +122,7 @@ def main() -> None:
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tok = load_model(a.model, dev)
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    rt, ck = load_read_token(a.ckpt, model.config.hidden_size, dev)
+    rt, ck = load_read_token(a.ckpt, model.config.hidden_size, dev, model)
     soft_attn = a.soft_attn or ck.get("soft_attn")
     nb = len(model.model.layers)
     toks = [tokenize(tok, it) for it in items]

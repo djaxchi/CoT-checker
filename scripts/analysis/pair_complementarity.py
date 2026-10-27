@@ -45,10 +45,11 @@ def main() -> None:
     p.add_argument("--root", type=Path, default=Path("cot-checker-results/tts_regraded_v2/instruct_t10"))
     p.add_argument("--probe", default="boundary_stats__mlp_h1024x2__seed42__gen")
     p.add_argument("--n_boot", type=int, default=2000)
+    p.add_argument("--datasets", nargs="+", default=["math500", "gsm8k"])
     p.add_argument("--out", type=Path, default=Path("results/pair_complementarity_v0/summary.json"))
     a = p.parse_args()
     out = {}
-    for ds in ("math500", "gsm8k"):
+    for ds in a.datasets:
         trajs = {r["traj_uid"]: r for f in glob.glob(str(a.root / f"tts_{ds}.shard*_trajectories.jsonl"))
                  for r in map(json.loads, open(f))}
         conf = {r["traj_uid"]: r["rules"] for f in glob.glob(str(a.root / f"tts_{ds}.shard*_conf.jsonl"))
@@ -94,7 +95,7 @@ def main() -> None:
         Q = {k: per_q(v) for k, v in P.items()}
         rng = np.random.default_rng(0)
         boot = rng.integers(0, len(qs), (a.n_boot, len(qs)))
-        res = {"n_pairs": len(pairs), "n_questions": len(qs), "best_conf": best_conf,
+        res = {"n_pairs": len(pairs), "n_questions": len(qs), "pair_questions": qs, "best_conf": best_conf,
                "acc_question_weighted": {k: float(v.mean()) for k, v in Q.items()}}
         part = "probe" if Q["probe"].mean() >= Q[best_conf].mean() else best_conf
         d = (Q["probe+conf"] - Q[part])[boot].mean(1)
@@ -118,7 +119,7 @@ def main() -> None:
         res["go"] = bool(ds == "math500" and res["probe+conf_minus_best_part"][0] >= 0.02
                          and res["probe+conf_minus_best_part"][1] > 0)
         out[ds] = res
-        print(ds, json.dumps(res, indent=1))
+        print(ds, json.dumps({k: v for k, v in res.items() if k != "pair_questions"}, indent=1))
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(out, indent=1))
 

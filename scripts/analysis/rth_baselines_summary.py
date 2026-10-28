@@ -84,6 +84,7 @@ def main() -> None:
     p.add_argument("--val", type=Path, nargs="+", required=True, help="val_auroc json(s) of the pairs job")
     p.add_argument("--pairs_dir", type=Path, required=True)
     p.add_argument("--group", nargs="*", default=[], help="name=run,run,run; overrides a default group")
+    p.add_argument("--notes", type=Path, default=None, help="markdown appended as a Notes section")
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
     groups = dict(GROUPS)
@@ -101,7 +102,7 @@ def main() -> None:
                "val_auroc": {r: val.get(r) for r in runs}}
         b = boot.get(f"{g} - RTH")
         if b is not None:
-            rec["bootstrap"] = {"delta": b["delta"], "ci95": b["ci95_normal"]}
+            rec["bootstrap"] = {"delta": b["delta"], "ci95": b["ci95_normal"], "frac_boot_le0": b.get("frac_boot_le0")}
             delta[g] = b["delta"]
         if g != "RTH":
             seen = {r: json.loads((a.pairs_dir / f"pairs_{r}.json").read_text())["math500"]
@@ -114,8 +115,8 @@ def main() -> None:
                 rec["pairs_pick"] = pick
                 pairs[g] = tuple(seen[pick])
         res[g] = rec
-        bcell = (f"{b['delta']:+.3f} [{b['ci95_normal'][0]:+.3f}, {b['ci95_normal'][1]:+.3f}]"
-                 if b is not None else "-")
+        bcell = (f"{b['delta']:+.3f} [{b['ci95_normal'][0]:+.3f}, {b['ci95_normal'][1]:+.3f}], "
+                 f"P(<=0) {b.get('frac_boot_le0', float('nan')):.2f}" if b is not None else "-")
         pcell = "0.530 [0.472, 0.583] (seed1)" if g == "RTH" else (
             f"{pairs[g][0]:.3f} [{pairs[g][1]:.3f}, {pairs[g][2]:.3f}] ({rec['pairs_pick']})" if g in pairs else "-")
         rows.append(f"| {g} | {rec['params']:,} | {ms([x['head_test'] for x in geo])} | "
@@ -124,7 +125,8 @@ def main() -> None:
     lines = ["# read_token_v1 Stage G baselines", "",
              "Frozen Qwen3-8B, verifier template, 100k PRM800K steps, 3 seeds. calib-20 = ProcessBench "
              "calib-20 F1_PB, four-subset mean (mean +- sd over seeds). Bootstrap: paired trace bootstrap "
-             "of the 3-seed means against RTH's 3 seeds, 200 resamples. Pairs: accuracy on the 985 "
+             "of the 3-seed means against RTH's 3 seeds, 200 resamples, normal 95% CI around the point "
+             "estimate and the fraction of resampled deltas <= 0. Pairs: accuracy on the 985 "
              "MATH-500 confidence-wrong pairs, question-weighted, 95% CI, seed picked on PRM800K val AUROC.",
              "",
              "| run | trained params | head test AUROC | head calib-20 | LDA calib-20 | calib-20 - RTH [95% CI] | confidence-wrong pairs |",
@@ -141,6 +143,8 @@ def main() -> None:
                           f"LDA test {x['lda_test']:.4f}, LDA calib-20 {x['lda_c20']:.3f}")
             if pr:
                 lines[-1] += f", pairs {pr[0]:.3f} [{pr[1]:.3f}, {pr[2]:.3f}]"
+    if a.notes is not None:
+        lines += ["", "## Notes", "", a.notes.read_text().strip()]
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text("\n".join(lines) + "\n")
     a.out.with_suffix(".json").write_text(json.dumps(

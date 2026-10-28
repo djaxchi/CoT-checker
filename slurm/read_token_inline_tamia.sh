@@ -15,7 +15,17 @@
 #   GPU3    H1: the RTH tokens (dq_correct = seed 0, rth_correct_seed1, rth_correct_seed2),
 #           unchanged, read inline (the layout gap before any retraining)
 # then the paired trace bootstrap of RTH-I against RTH, the PRM-state cells and H1.
+# MODE=marker (Stage H-S, after H2 missed its bar): a start marker per step, seen only by
+# that step's read token, standing in for the template's "Current step:" header
+#   GPU0-2  RTH-IS seeds 0-2: the marker is one trained embedding (" step" at the start)
+#   GPU3    RTH-ISD seeds 0, 1, 2 in turn: the marker also has its own per-layer offsets
+# then the bootstrap of each against RTH-I and RTH. Submit with --time=02:00:00.
+# MODE=chain (Stage H-C): a read token after every step, each seeing the earlier ones
+#   GPU0-2  RTH-IC seeds 0-2: chained read tokens, no marker
+#   GPU3    RTH-ICS seeds 0, 1, 2 in turn: chained, plus the start marker with its own offsets
+# then the bootstrap against RTH-I, RTH-ISD and RTH. Submit with --time=02:00:00.
 set -euo pipefail
+MODE="${MODE:-plain}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 OUT="${OUT:-$SCRATCH/cot_mech/read_token_v1}"
 DATA="${DATA:-$SCRATCH/cot_mech/dense_full_7b_v1/data}"
@@ -54,13 +64,14 @@ score() {
     --like "$LIKE"
 }
 
+# train <gpu> <seed> <name> <extra train args...>
 train() {
-  local s=$1 name=rthi_seed$1
+  local g=$1 s=$2 name=$3; shift 3
   (
     set -e
-    export CUDA_VISIBLE_DEVICES=$s
+    export CUDA_VISIBLE_DEVICES=$g
     python scripts/read_token_inline.py train --model $Q3 --init_text " correct" --deep --head linear \
-      --train "$TRAIN" --n_train 100000 --seed "$s" --lr 3e-3 --soft_attn no_cudnn --out "$LOCAL/$name"
+      --train "$TRAIN" --n_train 100000 --seed "$s" --lr 3e-3 --soft_attn no_cudnn --out "$LOCAL/$name" "$@"
     mkdir -p "$OUT/tokens/$name" && cp "$LOCAL/$name/read_token.pt" "$OUT/tokens/$name/"
     python scripts/read_token_inline.py encode --model $Q3 --out "$LOCAL/$name" "${ENC[@]}"
     score "$name"
@@ -79,11 +90,19 @@ transfer() {
 }
 
 pids=()
-for s in 0 1 2; do train $s & pids+=($!); done
-( for t in dq_correct rth_correct_seed1 rth_correct_seed2; do transfer $t || true; done ) & pids+=($!)
+if [[ "$MODE" == chain ]]; then
+  for s in 0 1 2; do train $s $s rthic_seed$s --chain & pids+=($!); done
+  ( for s in 0 1 2; do train 3 $s rthics_seed$s --chain --start_marker --start_deep || true; done ) & pids+=($!)
+elif [[ "$MODE" == marker ]]; then
+  for s in 0 1 2; do train $s $s rthis_seed$s --start_marker & pids+=($!); done
+  ( for s in 0 1 2; do train 3 $s rthisd_seed$s --start_marker --start_deep || true; done ) & pids+=($!)
+else
+  for s in 0 1 2; do train $s $s rthi_seed$s & pids+=($!); done
+  ( for t in dq_correct rth_correct_seed1 rth_correct_seed2; do transfer $t || true; done ) & pids+=($!)
+fi
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
-tail -n 3 "$LOGS"/rthi_seed*-"$SLURM_JOB_ID".log "$LOGS"/h1_*-"$SLURM_JOB_ID".log
+tail -n 3 "$LOGS"/rthi*_seed*-"$SLURM_JOB_ID".log "$LOGS"/h1_*-"$SLURM_JOB_ID".log 2>/dev/null || true
 
 # --- paired trace bootstrap (calib-20 F1_PB), only over score dirs that exist --------------
 S="$OUT/pb_scores"
@@ -95,12 +114,36 @@ H1=$(dirs "$S/h1_dq_correct" "$S/h1_rth_correct_seed1" "$S/h1_rth_correct_seed2"
 PRMC=$(dirs "$PRM_CELLS"/boundary_stats__mlp_h1024x2__seed4{2,3,4})
 echo "bootstrap sides: RTH-I [$RTHI] RTH [$RTH] H1 [$H1] PRM [$PRMC]"
 pairs=()
-[[ -n "$RTHI" && -n "$RTH" ]] && pairs+=("RTH-I - RTH=$RTHI:$RTH")
-[[ -n "$RTHI" && -n "$PRMC" ]] && pairs+=("RTH-I - PRM boundary_stats mlp h1024x2=$RTHI:$PRMC")
+if [[ "$MODE" == marker ]]; then
+  RTHIS=$(dirs "$S/rthis_seed0" "$S/rthis_seed1" "$S/rthis_seed2")
+  RTHISD=$(dirs "$S/rthisd_seed0" "$S/rthisd_seed1" "$S/rthisd_seed2")
+  echo "marker sides: RTH-IS [$RTHIS] RTH-ISD [$RTHISD]"
+  [[ -n "$RTHIS" && -n "$RTHI" ]] && pairs+=("RTH-IS - RTH-I=$RTHIS:$RTHI")
+  [[ -n "$RTHIS" && -n "$RTH" ]] && pairs+=("RTH-IS - RTH=$RTHIS:$RTH")
+  [[ -n "$RTHISD" && -n "$RTHI" ]] && pairs+=("RTH-ISD - RTH-I=$RTHISD:$RTHI")
+  [[ -n "$RTHISD" && -n "$RTH" ]] && pairs+=("RTH-ISD - RTH=$RTHISD:$RTH")
+  [[ -n "$RTHISD" && -n "$RTHIS" ]] && pairs+=("RTH-ISD - RTH-IS=$RTHISD:$RTHIS")
+  H1=""; RTHI_PAIRS=0
+elif [[ "$MODE" == chain ]]; then
+  RTHIC=$(dirs "$S/rthic_seed0" "$S/rthic_seed1" "$S/rthic_seed2")
+  RTHICS=$(dirs "$S/rthics_seed0" "$S/rthics_seed1" "$S/rthics_seed2")
+  RTHISD=$(dirs "$S/rthisd_seed0" "$S/rthisd_seed1" "$S/rthisd_seed2")
+  echo "chain sides: RTH-IC [$RTHIC] RTH-ICS [$RTHICS] RTH-ISD [$RTHISD]"
+  [[ -n "$RTHIC" && -n "$RTHI" ]] && pairs+=("RTH-IC - RTH-I=$RTHIC:$RTHI")
+  [[ -n "$RTHIC" && -n "$RTHISD" ]] && pairs+=("RTH-IC - RTH-ISD=$RTHIC:$RTHISD")
+  [[ -n "$RTHIC" && -n "$RTH" ]] && pairs+=("RTH-IC - RTH=$RTHIC:$RTH")
+  [[ -n "$RTHICS" && -n "$RTHIC" ]] && pairs+=("RTH-ICS - RTH-IC=$RTHICS:$RTHIC")
+  [[ -n "$RTHICS" && -n "$RTH" ]] && pairs+=("RTH-ICS - RTH=$RTHICS:$RTH")
+  H1=""; RTHI_PAIRS=0
+else
+  RTHI_PAIRS=1
+fi
+(( RTHI_PAIRS )) && [[ -n "$RTHI" && -n "$RTH" ]] && pairs+=("RTH-I - RTH=$RTHI:$RTH")
+(( RTHI_PAIRS )) && [[ -n "$RTHI" && -n "$PRMC" ]] && pairs+=("RTH-I - PRM boundary_stats mlp h1024x2=$RTHI:$PRMC")
 [[ -n "$H1" && -n "$RTH" ]] && pairs+=("H1 (RTH read inline) - RTH=$H1:$RTH")
-[[ -n "$RTHI" && -n "$H1" ]] && pairs+=("RTH-I - H1=$RTHI:$H1")
+(( RTHI_PAIRS )) && [[ -n "$RTHI" && -n "$H1" ]] && pairs+=("RTH-I - H1=$RTHI:$H1")
 if (( ${#pairs[@]} )); then
-  python scripts/analysis/stage_f_bootstrap.py --pairs "${pairs[@]}" --out "$H/bootstrap.json" \
+  python scripts/analysis/stage_f_bootstrap.py --pairs "${pairs[@]}" --out "$H/bootstrap_${MODE}.json" \
     > "$LOGS/inline_bootstrap-$SLURM_JOB_ID.log" 2>&1 || fail=1
   tail -n 12 "$LOGS/inline_bootstrap-$SLURM_JOB_ID.log"
 fi

@@ -9,7 +9,8 @@
 #SBATCH --output=%x-%j.out
 # read_token_v1 Stage H3 (docs/read_token_v1_plan.md, "Stage H"): RTH-I downstream and cost,
 # as Stage E did for RTH (slurm/rth_downstream_tamia.sh), with the inline read:
-#   pick   the RTH-I seed with the best PRM800K val AUROC (rthi_seed0-2), val read inline
+#   pick   the seed with the best PRM800K val AUROC among CANDS (default rthi_seed0-2;
+#          CANDS="rthics_seed0 rthics_seed1 rthics_seed2" for an H-S or H-C arm), val read inline
 #   D1/D2  every step of the §21.13 Instruct TTS pools (T=1.0, T=0.7; GSM8K, MATH-500) scored
 #          with each trajectory read once in its own chat layout, segmentation checked
 #          against the PRM's score files
@@ -20,7 +21,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 OUT="${OUT:-$SCRATCH/cot_mech/read_token_v1}"
 DS="${DS:-$OUT/downstream}"
 DATA="${DATA:-$SCRATCH/cot_mech/dense_full_7b_v1/data}"
-CANDS=(rthi_seed0 rthi_seed1 rthi_seed2)
+read -r -a CANDS <<< "${CANDS:-rthi_seed0 rthi_seed1 rthi_seed2}"
 POOLS=(instruct_t10 instruct_t07)
 STEMS=(tts_gsm8k tts_math500)
 Q3=Qwen/Qwen3-8B

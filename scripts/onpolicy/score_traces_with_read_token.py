@@ -87,24 +87,26 @@ def score_branched(model, tok, rt, items: list[dict], pad, dev, soft_attn) -> tu
 
 
 def score_inline(model, tok, rt, rows: list[dict], pad, dev, max_tokens: int,
-                 soft_attn) -> tuple[list[np.ndarray], int]:
+                 soft_attn, mk=None, chain: bool = False) -> tuple[list[np.ndarray], int]:
     """P(step incorrect) per trajectory, each read once in the chat layout with a read
-    token after every step, and the tokens computed (text + read tokens)."""
-    from scripts.read_token_inline import build_sequences, inline_read, seq_batches
+    token after every step (and a start marker before it, if the token has one), and
+    the tokens computed (text + read tokens + markers)."""
+    from scripts.read_token_inline import build_sequences, inline_read, member_index, row, seq_batches
     seqs, owner = [], []
     for t, r in enumerate(rows):
         if context_from_row(r) != chat_prompt(r["problem"]):
             raise SystemExit(f"{r['traj_uid']} was sampled under {r.get('prompt_style')!r}, "
                              f"not the chat layout an inline token reads")
-        for q in build_sequences(tok, step_items(r), "chat")[0]:
+        for q in build_sequences(tok, step_items(r), "chat", chain=chain)[0]:
             seqs.append(q)
             owner.append(t)
     out = [np.zeros(len(step_items(r)), np.float64) for r in rows]
     for b in seq_batches([len(q["ids"]) for q in seqs], [len(q["pos"]) for q in seqs],
                          max_tokens, None, None):
         with torch.no_grad():
-            logit = rt.logit(inline_read(model, rt, [(seqs[i]["ids"], seqs[i]["pos"]) for i in b],
-                                         pad, dev, grad=False, soft_attn=soft_attn)).double()
+            h = inline_read(model, rt, [row(seqs[i], mk) for i in b], pad, dev, grad=False,
+                            soft_attn=soft_attn, mk=mk, chain=chain)
+            logit = rt.logit(h[member_index([seqs[i] for i in b], dev)]).double()
         if not torch.isfinite(logit).all():
             raise SystemExit("non-finite RTH-I logit")
         s = torch.sigmoid(logit).cpu().numpy()
@@ -113,7 +115,7 @@ def score_inline(model, tok, rt, rows: list[dict], pad, dev, max_tokens: int,
             for member in seqs[i]["members"]:
                 out[owner[i]][member] = s[k]
                 k += 1
-    return out, sum(len(q["ids"]) + len(q["pos"]) for q in seqs)
+    return out, sum(len(q["ids"]) + len(q["pos"]) * (1 if mk is None else 2) for q in seqs)
 
 
 def compare(out: list[dict], paths: list[Path]) -> dict:
@@ -176,11 +178,16 @@ def main() -> None:
 
     if a.inline and a.branched:
         raise SystemExit("--inline and --branched are two different reads; pick one")
+    mk = None
+    if a.inline:
+        from scripts.read_token_inline import marker_from_ckpt
+        mk = marker_from_ckpt(ck, dev)
     out, t0, n_steps, n_tok = [], time.perf_counter(), 0, 0
     if a.inline:
         for c in range(0, len(mine), a.chunk):
             part = mine[c:c + a.chunk]
-            sc, nt = score_inline(model, tok, rt, part, pad, dev, a.max_tokens, soft_attn)
+            sc, nt = score_inline(model, tok, rt, part, pad, dev, a.max_tokens, soft_attn, mk,
+                                  bool(ck.get("chain")))
             for r, s in zip(part, sc):
                 out.append({"traj_uid": r["traj_uid"], "problem_id": r.get("fork_id"),
                             "dataset": r.get("dataset"), "split": r.get("split"),

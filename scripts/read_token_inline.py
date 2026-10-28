@@ -20,6 +20,13 @@ anything trained), then every read token of every row in one call over that
 cache, with a 4D mask giving each read token its own prefix. The per-layer
 offsets apply at every read position. Only m = 1 tokens (RTH) are supported.
 
+--start_marker (Stage H-S) adds a soft token at the start of every step that only
+that step's read token attends to, in place of the template's "Current step:"
+header; --start_deep gives it per-layer offsets of its own. --chain (Stage H-C) puts a read
+token after every step and lets each see the earlier ones (kept in a side cache
+online, still invisible to the text), so the previous read token marks where the
+step begins.
+
 Items are grouped into sequences: an item rides on a longer item of the same
 problem when its text (earlier steps + step) is that item's text up to a
 separator, so it reads the same tokens it would read alone. If the tokenizer has
@@ -42,8 +49,10 @@ passive control that reads the same text without a read token.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
+import re
 import sys
 import time
 from collections import defaultdict
@@ -90,6 +99,55 @@ def group_items(items: list[dict]) -> list[dict]:
     return out
 
 
+class StartMarker(torch.nn.Module):
+    """A soft token at the start of every step, seen only by that step's read token (H-S).
+
+    It sits at the step's first position and attends to the text before the step;
+    no text token attends to it, so the text states stay the generation states. It
+    stands in for the verifier template's "Current step:" header, which tells RTH
+    where the step it judges begins. deep: optional per-layer offsets of its own.
+    """
+
+    def __init__(self, d: int, init: torch.Tensor, n_layers: int = 0):
+        super().__init__()
+        self.soft = torch.nn.Parameter(init.clone().float())  # (1, d)
+        self.deep = torch.nn.Parameter(torch.zeros(n_layers, 1, d)) if n_layers else None
+
+
+def marker_from_ckpt(ck: dict, dev) -> StartMarker | None:
+    if ck.get("start_soft") is None:
+        return None
+    deep = ck.get("start_deep")
+    mk = StartMarker(ck["start_soft"].shape[1], ck["start_soft"], 0 if deep is None else deep.shape[0])
+    if deep is not None:
+        with torch.no_grad():
+            mk.deep.copy_(deep)
+    return mk.to(dev).eval()
+
+
+@contextlib.contextmanager
+def marker_hooks(model, mk: StartMarker | None, lo: int, hi: int):
+    """Add mk.deep[l] to decoder layer l's output at positions lo:hi of every call."""
+    if mk is None or mk.deep is None:
+        yield
+        return
+
+    def make(l):
+        def hook(_mod, _inp, out):
+            h = out[0] if isinstance(out, tuple) else out
+            a, b, _ = slice(lo, hi).indices(h.shape[1])
+            h = torch.cat([h[:, :a], h[:, a:b] + mk.deep[l].to(h.dtype)[None], h[:, b:]], 1)
+            return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+        return hook
+
+    handles = [layer.register_forward_hook(make(l)) for l, layer in enumerate(model.model.layers)]
+    try:
+        yield
+    finally:
+        for hd in handles:
+            hd.remove()
+
+
 def encode_text(tok, text: str) -> tuple[list[int], dict[int, int]]:
     """Token ids and {character end: number of tokens up to the last token ending there}."""
     enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
@@ -99,30 +157,75 @@ def encode_text(tok, text: str) -> tuple[list[int], dict[int, int]]:
     return list(enc["input_ids"]), ends
 
 
-def build_sequences(tok, items: list[dict], layout: str = "chat") -> tuple[list[dict], int]:
-    """Tokenised sequences {"ids", "pos", "members"} (pos[k]: text tokens member k reads),
-    and how many items had to be read on their own (no token boundary at their separator)."""
+def boundary_at_or_before(ends: dict[int, int], c: int) -> int:
+    """Tokens up to the last token boundary at or before character c."""
+    if c in ends:
+        return ends[c]
+    before = [e for e in ends if e <= c]
+    return ends[max(before)] if before else 0
+
+
+def chain_slots(prompt: str, text: str, ends: dict[int, int], member_pos: list[int]) -> tuple[list[int], list[int]]:
+    """A read slot at every step separator of `text` that ends on a token boundary, and at
+    every member position: (slot positions, slot step starts), ascending. A slot's step
+    starts where the previous slot sits (the first at the end of the prompt)."""
+    seps = {ends[len(prompt) + m.end()] for m in re.finditer(re.escape(SEP), text + SEP)
+            if len(prompt) + m.end() in ends}
+    slots = sorted(seps | set(member_pos))
+    first = boundary_at_or_before(ends, len(prompt))
+    return slots, [first] + slots[:-1]
+
+
+def build_sequences(tok, items: list[dict], layout: str = "chat", chain: bool = False) -> tuple[list[dict], int]:
+    """Tokenised sequences {"ids", "pos", "spos", "members", "slot"}: read slot k sees pos[k]
+    text tokens and its step starts at token spos[k] (the last token boundary at or before
+    the step's first character); member m is read at slot[m]. Without chain every member
+    has its own slot. With chain (Stage H-C) there is a slot after every step of the
+    sequence, labelled or not, since a read token there also sees the earlier read tokens.
+    Also returns how many items had to be read on their own (no token boundary at their
+    separator)."""
     prompt_of = LAYOUTS[layout]
     out, alone = [], 0
+
+    def finish(prompt, text, ids, ends, pos, spos, members):
+        order = np.argsort(pos, kind="stable")
+        pos, spos, members = [pos[o] for o in order], [spos[o] for o in order], [members[o] for o in order]
+        if not chain:
+            return {"ids": ids, "pos": pos, "spos": spos, "members": members, "slot": list(range(len(pos)))}
+        slots, starts = chain_slots(prompt, text, ends, pos)
+        return {"ids": ids, "pos": slots, "spos": starts, "members": members,
+                "slot": [slots.index(q) for q in pos]}
+
     for g in group_items(items):
         prompt = prompt_of(g["problem"])
         ids, ends = encode_text(tok, prompt + g["text"] + SEP)
-        seq = {"ids": ids, "pos": [], "members": []}
+        pos, spos, members = [], [], []
         for i in g["members"]:
-            p = ends.get(len(prompt) + len(item_text(items[i])) + len(SEP))
-            if p is None:
+            it = items[i]
+            start = len(prompt) + (len(it["prefix"]) + len(SEP) if it["prefix"] else 0)
+            q = ends.get(len(prompt) + len(item_text(it)) + len(SEP))
+            if q is None:
                 alone += 1
-                own, _ = encode_text(tok, prompt + item_text(items[i]) + SEP)
-                out.append({"ids": own, "pos": [len(own)], "members": [i]})
+                own, own_ends = encode_text(tok, prompt + item_text(it) + SEP)
+                out.append(finish(prompt, item_text(it), own, own_ends, [len(own)],
+                                  [boundary_at_or_before(own_ends, start)], [i]))
                 continue
-            seq["pos"].append(p)
-            seq["members"].append(i)
-        if seq["members"]:
-            order = np.argsort(seq["pos"], kind="stable")
-            seq["pos"] = [seq["pos"][k] for k in order]
-            seq["members"] = [seq["members"][k] for k in order]
-            out.append(seq)
+            pos.append(q)
+            spos.append(boundary_at_or_before(ends, start))
+            members.append(i)
+        if members:
+            out.append(finish(prompt, g["text"], ids, ends, pos, spos, members))
     return out, alone
+
+
+def member_index(seqs: list[dict], dev=None) -> torch.Tensor:
+    """For a batch of built sequences, the row of each member in inline_read's output
+    (one row per slot, row by row), in member order."""
+    idx, off = [], 0
+    for q in seqs:
+        idx += [off + k for k in q["slot"]]
+        off += len(q["pos"])
+    return torch.tensor(idx, dtype=torch.long, device=dev)
 
 
 def gather_hooks(model, blocks: list[int], rows: torch.Tensor, cols: torch.Tensor, out: dict):
@@ -137,35 +240,52 @@ def gather_hooks(model, blocks: list[int], rows: torch.Tensor, cols: torch.Tenso
     return handles
 
 
-def text_pass(model, seqs: list[tuple[list[int], list[int]]], pad: int, dev,
-              passive: dict | None = None) -> tuple[object, dict]:
+def text_pass(model, seqs: list[tuple], pad: int, dev, passive: dict | None = None,
+              marker: bool = False, chain: bool = False) -> tuple[object, dict]:
     """The text of every row, once, without gradients: (its cache, the read layout).
 
-    seqs: (text ids, pos) per row, pos[k] the number of text tokens read token k sees.
+    seqs: (text ids, pos) or (text ids, pos, spos) per row; read token k sees pos[k]
+    text tokens. With marker, the read call holds K start markers then K read tokens:
+    marker k at position spos[k] sees the text before it, read token k sees its text,
+    its own marker and itself. With chain, read token k also sees read tokens 0..k-1 of
+    its row (they stay in a side cache instead of being dropped).
     passive: {block: None, "final": None} to also fill in the text states at token
     pos[k] - 1 (the separator the read token follows), block outputs and post-norm.
     """
     B = len(seqs)
-    T = max(len(ids) for ids, _ in seqs)
-    K = max(len(p) for _, p in seqs)
+    T = max(len(r[0]) for r in seqs)
+    K = max(len(r[1]) for r in seqs)
+    S = 2 * K if marker else K
     ids = torch.full((B, T), pad, dtype=torch.long)
     att = torch.zeros((B, T), dtype=torch.long)
-    mask = torch.zeros((B, 1, K, T + K), dtype=torch.bool)
-    pos2 = torch.zeros((B, K), dtype=torch.long)
-    rows, cols = [], []
-    for b, (t, p) in enumerate(seqs):
+    mask = torch.zeros((B, 1, S, T + S), dtype=torch.bool)
+    pos2 = torch.zeros((B, S), dtype=torch.long)
+    rows, cols, tpos = [], [], []
+    for b, r in enumerate(seqs):
+        t, p = r[0], r[1]
         if not p or max(p) > len(t) or min(p) < 1:
             raise ValueError(f"row {b}: read positions {p} outside 1..{len(t)}")
+        if marker and (len(r) < 3 or any(not 0 <= sp < pk for sp, pk in zip(r[2], p))):
+            raise ValueError(f"row {b}: start markers need 0 <= spos < pos")
         ids[b, :len(t)] = torch.tensor(t)
         att[b, :len(t)] = 1
+        off = K if marker else 0
         for k, pk in enumerate(p):
-            mask[b, 0, k, :pk] = True
-            pos2[b, k] = pk
+            mask[b, 0, off + k, :pk] = True
+            pos2[b, off + k] = pk
+            if chain:
+                mask[b, 0, off + k, T + off:T + off + k] = True  # the earlier read tokens
+            if marker:
+                sp = r[2][k]
+                mask[b, 0, k, :sp] = True
+                pos2[b, k] = sp
+                mask[b, 0, off + k, T + k] = True  # the read token sees its step's marker
             rows.append(b)
-            cols.append(k)
-        mask[b, 0, torch.arange(K), T + torch.arange(K)] = True  # every slot sees itself
+            cols.append(off + k)
+            tpos.append(pk - 1)
+        mask[b, 0, torch.arange(S), T + torch.arange(S)] = True  # every slot sees itself
     rows, cols = torch.tensor(rows, device=dev), torch.tensor(cols, device=dev)
-    tcols = pos2.to(dev)[rows, cols] - 1
+    tcols = torch.tensor(tpos, device=dev)
     blocks = sorted(k for k in passive if k != "final") if passive is not None else []
     handles = gather_hooks(model, blocks, rows, tcols, passive) if blocks else []
     try:
@@ -176,29 +296,78 @@ def text_pass(model, seqs: list[tuple[list[int], list[int]]], pad: int, dev,
             hd.remove()
     if passive is not None and "final" in passive:
         passive["final"] = out.last_hidden_state[rows, tcols].float()
-    return out.past_key_values, {"mask": mask.to(dev), "pos": pos2.to(dev), "rows": rows, "cols": cols}
+    return out.past_key_values, {"mask": mask.to(dev), "pos": pos2.to(dev), "rows": rows, "cols": cols,
+                                 "K": K, "marker": marker, "chain": chain}
 
 
-def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str | None = None) -> torch.Tensor:
-    """Every read token over a text_pass cache in one call, (sum of K, d). Appends to the cache."""
+def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str | None = None,
+              mk: StartMarker | None = None) -> torch.Tensor:
+    """Every read token (and start marker) over a text_pass cache in one call, (sum of K, d).
+    Appends to the cache."""
     if rt.m != 1:
         raise ValueError("inline reads need an m = 1 read token")
-    B, K = lay["pos"].shape
+    if lay["marker"] != (mk is not None):
+        raise ValueError("the layout and the start marker disagree")
+    B, K = lay["pos"].shape[0], lay["K"]
     emb = rt.soft.to(model.dtype)[None].expand(B, K, -1)
-    with torch.set_grad_enabled(grad), read_hooks(model, rt, n=K), soft_kernels(soft_attn):
+    if mk is not None:
+        emb = torch.cat([mk.soft.to(model.dtype)[None].expand(B, K, -1), emb], 1)
+    with torch.set_grad_enabled(grad), read_hooks(model, rt, n=K), marker_hooks(model, mk, 0, K), \
+            soft_kernels(soft_attn):
         h = model.model(inputs_embeds=emb, attention_mask=lay["mask"], position_ids=lay["pos"],
                         past_key_values=cache, use_cache=True).last_hidden_state
     return h.float()[lay["rows"], lay["cols"]]
 
 
-def inline_read(model, rt: ReadToken, seqs: list[tuple[list[int], list[int]]], pad: int, dev,
-                grad: bool, soft_attn: str | None = None, passive: dict | None = None) -> torch.Tensor:
+def inline_read(model, rt: ReadToken, seqs: list[tuple], pad: int, dev, grad: bool,
+                soft_attn: str | None = None, passive: dict | None = None,
+                mk: StartMarker | None = None, chain: bool = False) -> torch.Tensor:
     """Final-layer (post-norm) states of every read token, (sum of K, d), row by row
     (text_pass, then read_pass)."""
     if rt.m != 1:
         raise ValueError("inline reads need an m = 1 read token")
-    cache, lay = text_pass(model, seqs, pad, dev, passive)
-    return read_pass(model, rt, cache, lay, grad, soft_attn)
+    cache, lay = text_pass(model, seqs, pad, dev, passive, marker=mk is not None, chain=chain)
+    return read_pass(model, rt, cache, lay, grad, soft_attn, mk)
+
+
+def uncached_reference(model, rt: ReadToken, ids: list[int], pos: list[int], dev,
+                       spos: list[int] | None = None, mk: StartMarker | None = None,
+                       chain: bool = False) -> torch.Tensor:
+    """One plain forward, no cache, over the text up to the last read position followed by
+    the markers (if mk) and the read tokens, under an explicit mask with the inline read's
+    visibility and positions: the reference the cached batched read must equal, (K, d)."""
+    T, K = max(pos), len(pos)
+    M = K if mk is not None else 0
+    e = model.get_input_embeddings()(torch.tensor([ids[:T]], device=dev))
+    parts = [e] + ([mk.soft.to(model.dtype)[None].expand(1, K, -1)] if mk is not None else [])
+    x = torch.cat(parts + [rt.soft.to(model.dtype)[None].expand(1, K, -1)], 1)
+    n = T + M + K
+    mask = torch.zeros(n, n, dtype=torch.bool, device=dev)
+    mask[:T, :T] = torch.tril(torch.ones(T, T, dtype=torch.bool, device=dev))
+    position = list(range(T))
+    if mk is not None:
+        for k in range(K):
+            mask[T + k, :spos[k]] = True
+            mask[T + k, T + k] = True
+        position += list(spos)
+    for k in range(K):
+        r = T + M + k
+        mask[r, :pos[k]] = True
+        mask[r, r] = True
+        if mk is not None:
+            mask[r, T + k] = True
+        if chain:
+            mask[r, T + M:r] = True
+    position += list(pos)
+    with read_hooks(model, rt, n=K), marker_hooks(model, mk, T, T + M):
+        h = model.model(inputs_embeds=x, attention_mask=mask[None, None],
+                        position_ids=torch.tensor([position], device=dev)).last_hidden_state
+    return h[0, -K:].float()
+
+
+def marker_reference(model, rt: ReadToken, mk: StartMarker, ids: list[int], pos: int, spos: int, dev):
+    """uncached_reference for one read token and its marker, (d,)."""
+    return uncached_reference(model, rt, ids, [pos], dev, [spos], mk)[0]
 
 
 def seq_batches(lengths: list[int], n_items: list[int], max_tokens: int, max_items: int | None,
@@ -221,6 +390,11 @@ def seq_batches(lengths: list[int], n_items: list[int], max_tokens: int, max_ite
     return out
 
 
+def row(seq: dict, mk: StartMarker | None) -> tuple:
+    """The (ids, pos[, spos]) row text_pass takes for one built sequence."""
+    return (seq["ids"], seq["pos"]) if mk is None else (seq["ids"], seq["pos"], seq["spos"])
+
+
 def rth_items_per_step(tok, items: list[dict], max_tokens: int, max_seq_len: int) -> tuple[float, int]:
     """Items per optimizer step of RTH on the same items (verifier template), and its steps."""
     lens = [len(tokenize(tok, it)) for it in items]
@@ -237,6 +411,11 @@ def main() -> None:
     p.add_argument("--init_text", default=" correct")
     p.add_argument("--head", choices=["linear", "mlp"], default="linear")
     p.add_argument("--deep", action="store_true")
+    p.add_argument("--start_marker", action="store_true", help="train: a start marker per step (H-S)")
+    p.add_argument("--start_init_text", default=" step", help="train: the marker's starting embedding")
+    p.add_argument("--start_deep", action="store_true", help="train: the marker gets its own offsets")
+    p.add_argument("--chain", action="store_true",
+                   help="train: a read token after every step, each seeing the earlier ones (H-C)")
     p.add_argument("--soft_attn", choices=["no_cudnn"], default=None)
     p.add_argument("--train", type=Path)
     p.add_argument("--n_train", type=int, default=100000)
@@ -268,33 +447,46 @@ def main() -> None:
             raise SystemExit(f"--init_text {a.init_text!r} is {len(tids)} tokens; inline reads use m = 1")
         init = emb[torch.tensor(tids, device=emb.device)].detach().float()
         rt = ReadToken(1, d, init.cpu(), head=a.head, n_layers=n_layers if a.deep else 0).to(dev)
+        mk = None
+        if a.start_marker:
+            sids = tok(a.start_init_text, add_special_tokens=False)["input_ids"]
+            if len(sids) != 1:
+                raise SystemExit(f"--start_init_text {a.start_init_text!r} is {len(sids)} tokens, not 1")
+            sinit = emb[torch.tensor(sids, device=emb.device)].detach().float().cpu()
+            mk = StartMarker(d, sinit, n_layers if a.start_deep else 0).to(dev)
         items = prm800k_items(a.train, a.n_train, a.seed)
         if a.smoke:
             items = items[:a.smoke]
         per_step, rth_steps = rth_items_per_step(tok, items, a.max_tokens, a.max_seq_len)
         cap = math.ceil(per_step)
-        seqs, alone = build_sequences(tok, items, a.layout)
+        chain = a.chain
+        seqs, alone = build_sequences(tok, items, a.layout, chain=chain)
         n_long = sum(len(s["ids"]) > a.max_seq_len for s in seqs)
         seqs = [s for s in seqs if len(s["ids"]) <= a.max_seq_len]
-        n_read = sum(len(s["members"]) for s in seqs)
+        n_read = sum(len(s["pos"]) for s in seqs)
         bl = seq_batches([len(s["ids"]) for s in seqs], [len(s["members"]) for s in seqs],
                          a.max_tokens, cap, a.seed)
         print(f"[config] model={a.model} layout={a.layout} init={a.init_text!r} deep={a.deep} "
-              f"head={a.head} n_train={a.n_train} seed={a.seed} lr={a.lr}", flush=True)
-        print(f"[data] {len(items)} items -> {len(seqs)} sequences, {n_read} read tokens "
+              f"head={a.head} n_train={a.n_train} seed={a.seed} lr={a.lr} start_marker="
+              f"{repr(a.start_init_text) if mk is not None else None} start_deep={a.start_deep} chain={chain}", flush=True)
+        print(f"[data] {len(items)} items -> {len(seqs)} sequences, {n_read} read slots "
               f"({alone} read alone, {n_long} sequences over {a.max_seq_len} tokens dropped); "
               f"{len(bl)} optimizer steps at <= {cap} items (RTH: {rth_steps} steps, "
               f"{per_step:.1f} items each)", flush=True)
-        # Gate: one inline call must equal a read token appended to each standalone prefix.
+        # Gate: one inline call must equal a read token appended to each standalone prefix
+        # (with a marker or a chain: one uncached forward under the explicit mask).
+        # Sequences with distinct read positions, so the gate covers several of them.
         with torch.no_grad():
-            g = sorted(seqs[:200], key=lambda s: -len(s["pos"]))[:2]
-            got = inline_read(model, rt, [(s["ids"], s["pos"]) for s in g], pad, dev, grad=False,
-                              soft_attn=a.soft_attn)
+            g = sorted(seqs[:500], key=lambda s: -len(set(s["pos"])))[:2]
+            got = inline_read(model, rt, [row(s, mk) for s in g], pad, dev, grad=False,
+                              soft_attn=a.soft_attn, mk=mk, chain=chain)
             k = 0
             for s in g:
-                for pk in s["pos"]:
-                    ref = read_all_states(model, rt, [s["ids"][:pk]], pad, dev, grad=False,
-                                          soft_attn=a.soft_attn)[0, -1]
+                refs = (uncached_reference(model, rt, s["ids"], s["pos"], dev, s["spos"], mk, chain)
+                        if mk is not None or chain else None)
+                for j, pk in enumerate(s["pos"]):
+                    ref = (read_all_states(model, rt, [s["ids"][:pk]], pad, dev, grad=False,
+                                           soft_attn=a.soft_attn)[0, -1] if refs is None else refs[j])
                     rel = float((got[k] - ref).norm() / ref.norm())
                     print(f"[gate] read at {pk}: relative difference {rel:.4f}", flush=True)
                     if not rel <= 0.05:  # also catches NaN
@@ -303,7 +495,9 @@ def main() -> None:
         y = torch.tensor([float(items[i]["label"]) for s in seqs for i in s["members"]])
         offs = np.cumsum([0] + [len(s["members"]) for s in seqs])
         opt = make_optimizer(rt, a.lr, freeze_soft=False)
-        params = [q for q in rt.parameters() if q.requires_grad]
+        if mk is not None:
+            opt.add_param_group({"params": list(mk.parameters()), "lr": a.lr, "weight_decay": 0.0})
+        params = [q for q in rt.parameters() if q.requires_grad] + (list(mk.parameters()) if mk else [])
         steps = a.epochs * len(bl)
         sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=steps, pct_start=0.05)
         t0, step, run = time.perf_counter(), 0, 0.0
@@ -312,8 +506,9 @@ def main() -> None:
                                                  [len(s["members"]) for s in seqs], a.max_tokens, cap,
                                                  a.seed + ep)
             for b in ebl:
-                h = inline_read(model, rt, [(seqs[i]["ids"], seqs[i]["pos"]) for i in b], pad, dev,
-                                grad=True, soft_attn=a.soft_attn)
+                h = inline_read(model, rt, [row(seqs[i], mk) for i in b], pad, dev,
+                                grad=True, soft_attn=a.soft_attn, mk=mk, chain=chain)
+                h = h[member_index([seqs[i] for i in b], dev)]
                 yb = torch.cat([y[offs[i]:offs[i + 1]] for i in b]).to(dev)
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(rt.logit(h), yb)
                 if not torch.isfinite(loss):
@@ -330,17 +525,22 @@ def main() -> None:
                     "head_kind": a.head, "freeze_soft": False, "seed": a.seed, "n_train": a.n_train,
                     "soft_attn": a.soft_attn, "deep": None if rt.deep is None else rt.deep.detach().cpu(),
                     "interv": None, "rank": 0, "lora_dims": None, "interv_state": None, "lr": a.lr,
-                    "layout": a.layout, "inline": True, "items_per_step": cap},
+                    "layout": a.layout, "inline": True, "items_per_step": cap,
+                    "start_soft": None if mk is None else mk.soft.detach().cpu(),
+                    "start_deep": None if mk is None or mk.deep is None else mk.deep.detach().cpu(),
+                    "start_init_text": a.start_init_text if mk is not None else None, "chain": chain},
                    a.out / "read_token.pt")
         return
 
     ck = torch.load(a.ckpt or a.out / "read_token.pt", map_location="cpu", weights_only=False)
     rt = read_token_from_ckpt(ck, model, dev)
+    mk = marker_from_ckpt(ck, dev)
+    chain = bool(ck.get("chain"))
     soft_attn = a.soft_attn or ck.get("soft_attn")
     pblocks = [int(x) for x in a.passive_blocks.split(",") if x]
     print(f"[encode] token {a.ckpt or a.out / 'read_token.pt'} (trained "
           f"{'inline, ' + ck['layout'] if ck.get('inline') else 'under the verifier template'}), "
-          f"read inline in the {a.layout} layout", flush=True)
+          f"read inline in the {a.layout} layout, start marker: {mk is not None}, chain: {chain}", flush=True)
     splits = []
     for spec in a.prm800k:
         name, path, *lim = spec.split(":")
@@ -352,7 +552,7 @@ def main() -> None:
         if a.smoke:
             items = items[:a.smoke]
         t0 = time.perf_counter()
-        seqs, alone = build_sequences(tok, items, a.layout)
+        seqs, alone = build_sequences(tok, items, a.layout, chain=chain)
         H = np.zeros((len(items), 1, d), np.float16)
         P = np.zeros((len(items), len(pblocks) + 1, d), np.float16)
         S = np.full(len(items), np.nan, np.float32)
@@ -362,8 +562,11 @@ def main() -> None:
             cap = {l: None for l in pblocks}
             cap["final"] = None
             with torch.no_grad():
-                h = inline_read(model, rt, [(seqs[i]["ids"], seqs[i]["pos"]) for i in b], pad, dev,
-                                grad=False, soft_attn=soft_attn, passive=cap)
+                h = inline_read(model, rt, [row(seqs[i], mk) for i in b], pad, dev,
+                                grad=False, soft_attn=soft_attn, passive=cap, mk=mk, chain=chain)
+                mi = member_index([seqs[i] for i in b], dev)
+                h = h[mi]
+                cap = {k: v[mi] for k, v in cap.items()}
                 s = torch.sigmoid(rt.logit(h)).cpu().numpy()
             if not torch.isfinite(h).all():
                 raise SystemExit(f"non-finite read state in {name}")
@@ -382,7 +585,7 @@ def main() -> None:
             for it in items:
                 f.write(json.dumps({k: it[k] for k in ("uid", "id", "step_idx", "first_error", "label")
                                     if k in it}) + "\n")
-        n_tok = sum(len(s["ids"]) + len(s["pos"]) for s in seqs)
+        n_tok = sum(len(s["ids"]) + len(s["pos"]) * (2 if mk is not None else 1) for s in seqs)
         print(f"[encode] {name}: {int(kept.sum())}/{len(items)} items, {len(seqs)} sequences "
               f"({alone} read alone), {n_tok} tokens, in {time.perf_counter()-t0:.0f}s", flush=True)
 

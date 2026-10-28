@@ -119,3 +119,57 @@ def test_inline_refuses_a_pool_sampled_under_another_prompt(tmp_path, monkeypatc
                                      "--out", str(tmp_path / "s.jsonl"), "--inline"])
     with pytest.raises(SystemExit):
         sr.main()
+
+
+def test_inline_scores_with_a_start_marker_match_the_masked_forward(tmp_path, monkeypatch):
+    from scripts.read_token_inline import StartMarker, marker_reference
+    from src.onpolicy.prompts import chat_prompt
+    from tests.test_read_token_inline import CliTok
+    model, rt, ck, trajs, rows = _setup(tmp_path, monkeypatch)
+    mk = StartMarker(D, torch.randn(1, D) * 0.02, n_layers=3)
+    with torch.no_grad():
+        mk.deep.normal_(0, 0.3)
+    c = torch.load(ck, weights_only=False)
+    c.update(start_soft=mk.soft.detach(), start_deep=mk.deep.detach())
+    torch.save(c, ck)
+    tok = CliTok()
+    monkeypatch.setattr(sr, "load_model", lambda *_a: (model, tok))
+    trajs.write_text("".join(json.dumps(dict(r, prompt_style="chat")) + "\n" for r in rows))
+    out = tmp_path / "s.jsonl"
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs),
+                                     "--out", str(out), "--inline"])
+    sr.main()
+    got = {r["traj_uid"]: r["scores"] for r in map(json.loads, out.read_text().splitlines())}
+    steps, pre = ["a b", "c d", "e"], chat_prompt("p1")
+    ids = tok(pre + "\n\n".join(steps) + "\n\n")["input_ids"]
+    for k in range(3):
+        sp = len(pre + "".join(s + "\n\n" for s in steps[:k]))
+        p = len(pre + "".join(s + "\n\n" for s in steps[:k + 1]))
+        with torch.no_grad():
+            ref = torch.sigmoid(rt.logit(marker_reference(model, rt, mk, ids, p, sp, DEV)[None]))
+        assert abs(got["q1::g0"][k] - float(ref)) < 1e-4, k
+
+
+
+def test_inline_chained_scores_match_the_masked_forward(tmp_path, monkeypatch):
+    from scripts.read_token_inline import uncached_reference
+    from src.onpolicy.prompts import chat_prompt
+    from tests.test_read_token_inline import CliTok
+    model, rt, ck, trajs, rows = _setup(tmp_path, monkeypatch)
+    c = torch.load(ck, weights_only=False)
+    c["chain"] = True
+    torch.save(c, ck)
+    tok = CliTok()
+    monkeypatch.setattr(sr, "load_model", lambda *_a: (model, tok))
+    trajs.write_text("".join(json.dumps(dict(r, prompt_style="chat")) + "\n" for r in rows))
+    out = tmp_path / "s.jsonl"
+    monkeypatch.setattr("sys.argv", ["x", "--ckpt", str(ck), "--trajectories", str(trajs),
+                                     "--out", str(out), "--inline"])
+    sr.main()
+    got = {r["traj_uid"]: r["scores"] for r in map(json.loads, out.read_text().splitlines())}
+    steps, pre = ["a b", "c d", "e"], chat_prompt("p1")
+    ids = tok(pre + "\n\n".join(steps) + "\n\n")["input_ids"]
+    pos = [len(pre + "".join(s + "\n\n" for s in steps[:k + 1])) for k in range(3)]
+    with torch.no_grad():
+        ref = torch.sigmoid(rt.logit(uncached_reference(model, rt, ids, pos, DEV, chain=True)))
+    assert np.allclose(got["q1::g0"], ref.numpy(), atol=1e-4)

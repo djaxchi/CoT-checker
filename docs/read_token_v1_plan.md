@@ -465,6 +465,160 @@ step, compared with the PRM at matched cost (H3).
 **Job.** `slurm/read_token_inline_tamia.sh` (H1 + H2 on one node, then the paired
 trace bootstrap of RTH-I against RTH, the PRM-state cells and H1).
 
+**H2 result (job 647825, 2026-10-27).** RTH-I head calib-20 0.629 / 0.647 / 0.636
+(mean 0.637), below the 0.649 bar and above the passive control (best LDA row 0.542):
+the middle reading. RTH-I - RTH -0.022 [-0.036, -0.008]; H1 (RTH tokens read inline)
+0.608, RTH-I - H1 +0.030 [+0.017, +0.042]. GSM8K is level with RTH; the gap sits on
+OlympiadBench and Omni-MATH. The prespecified fallbacks look weak on the template
+results (D2: one token is enough; BL4 read-position LoRA 0.649 is not above RTH), so
+the user chose a different next step, H-S.
+
+### Stage H-S: a start marker per step (added 2026-10-27, before any run)
+
+**Hypothesis.** Part of what the verifier template gives RTH is the "Current step:"
+header, which marks where the judged step begins; inline, the read token must find
+the step's start alone.
+
+**Design.** One more soft token per step, at the step's first position, attending to
+the text before the step; no text token attends to it, and only that step's read
+token does (read token k: text up to its separator, its marker, itself). Text states
+stay the generation states; the cost is two tokens per step. Everything else is
+RTH-I's recipe, seeds and items.
+
+* RTH-IS: the marker is one trained embedding, initialised at " step" (closest to a
+  text header), seeds 0-2.
+* RTH-ISD: the marker also gets its own 36 per-layer offsets, seeds 0-2.
+
+**Gate.** At the start of every run: the cached batched read equals one uncached
+forward over text + marker + read token under the explicit mask (relative
+difference <= 0.05); the tiny-model tests check the same with non-zero offsets.
+
+**Prespecified readings (calib-20 F1_PB, 3 seeds, paired bootstrap).**
+
+* Header supported: RTH-IS or RTH-ISD minus RTH-I > 0 with the 95% CI above 0.
+* GO for H3 with the marker: that arm's mean >= 0.649 (H2's bar, unchanged).
+* Marker helps but stays below 0.649: report the size of the header effect; H3 runs
+  with the better inline arm, marked as below the bar.
+* No gain (CI includes 0): the header is not the missing piece; the template's gain
+  comes from elsewhere (its problem / previous-reasoning framing); H3 with RTH-I or
+  stop, the user's call.
+
+**Job.** `MODE=marker slurm/read_token_inline_tamia.sh`.
+
+**H-S result (job 647978, 2026-10-28).** Head calib-20: RTH-IS 0.637 / 0.641 / 0.653
+(mean 0.644), RTH-ISD 0.649 / 0.652 / 0.641 (mean 0.647). RTH-IS - RTH-I +0.006
+[-0.003, +0.015]; RTH-ISD - RTH-I +0.010 [-0.000, +0.020]; RTH-ISD - RTH -0.012
+[-0.026, +0.001]. By the readings above: no gain (both CIs reach 0), below the bar.
+The gain is on MATH (0.659 to 0.673); OlympiadBench and Omni-MATH stay 0.02-0.04
+below RTH.
+
+### Stage H-C: chained read tokens (added 2026-10-28, before any run)
+
+**Idea (the user's).** Up to H-S every read token sees only text. If read token k also
+sees read tokens 0..k-1, the previous read token sits exactly where step k begins, so
+the chain marks the step boundary without a separate marker, and it carries the
+earlier steps' read states.
+
+**Design.** A read slot after every step of a sequence (on PRM800K, also the steps
+that are not labelled items; the loss stays on the same 100k items). Read token k
+sees the text up to its separator, read tokens 0..k-1 of its row and itself; the
+text sees no read token. Online, the read tokens stay in a side cache instead of
+being dropped. Same recipe, seeds and items as RTH-I.
+
+* RTH-IC: chained read tokens, no marker, seeds 0-2.
+* RTH-ICS: chained, plus RTH-ISD's start marker with its own offsets, seeds 0-2.
+
+**Gate.** At the start of every run the cached batched read equals one uncached
+forward under the explicit mask (relative difference <= 0.05); tiny-model tests check
+the same with offsets, with and without the marker.
+
+**Prespecified readings (calib-20 F1_PB, 3 seeds, paired bootstrap).**
+
+* The chain helps: RTH-IC - RTH-I > 0 with the 95% CI above 0.
+* The chain replaces the marker: RTH-IC - RTH-ISD CI reaching or above 0, and
+  RTH-ICS - RTH-IC CI including 0 (the marker adds nothing once the reads are chained).
+* GO for H3: the best inline arm's mean >= 0.649 (H2's bar, unchanged).
+* Otherwise: report, and H3 with the best inline arm or stop, the user's call.
+
+**Job.** `MODE=chain slurm/read_token_inline_tamia.sh`.
+
+**Result (TamIA 650438, 1h36, snapshot 20261028-123349-7ced097-bc5e904a).** Gates
+passed (relative difference 0.006 to 0.011). Head calib-20 F1_PB by seed:
+
+| arm | seeds | mean | GSM8K | MATH | OlympiadBench | Omni-MATH |
+|---|---|---|---|---|---|---|
+| RTH-I | 0.629 / 0.647 / 0.636 | 0.637 | 0.722 | 0.659 | 0.595 | 0.574 |
+| RTH-ISD | 0.649 / 0.652 / 0.641 | 0.647 | 0.740 | 0.673 | 0.599 | 0.577 |
+| RTH-IC | 0.647 / 0.647 / 0.650 | 0.648 | 0.731 | 0.688 | 0.592 | 0.581 |
+| RTH-ICS | 0.655 / 0.653 / 0.646 | 0.651 | 0.730 | 0.677 | 0.609 | 0.589 |
+| RTH | 0.656 / 0.660 / 0.662 | 0.660 | 0.728 | 0.679 | 0.614 | 0.618 |
+
+LDA refit on the read states: RTH-IC 0.649 / 0.633 / 0.653, RTH-ICS 0.654 / 0.645 / 0.630;
+passive control unchanged (0.542 / 0.531 / 0.541). Paired bootstrap (200 resamples,
+normal 95% CI; the last column is the share of resamples with delta <= 0, which can
+disagree with the CI because calib-20 is not linear in the traces):
+
+| comparison | delta | 95% CI | share <= 0 |
+|---|---|---|---|
+| RTH-IC - RTH-I | +0.010 | [-0.001, +0.022] | 0.010 |
+| RTH-IC - RTH-ISD | +0.001 | [-0.010, +0.011] | 0.245 |
+| RTH-IC - RTH | -0.012 | [-0.025, +0.002] | 0.950 |
+| RTH-ICS - RTH-IC | +0.003 | [-0.005, +0.012] | 0.625 |
+| RTH-ICS - RTH | -0.008 | [-0.022, +0.005] | 0.965 |
+
+Readings: "the chain helps" is not met strictly (the CI reaches -0.001), though 99% of
+resamples favour RTH-IC. "The chain replaces the marker" is met: RTH-IC is level with
+RTH-ISD and adding the marker to the chain gives nothing clear. GO for H3 is met by
+RTH-ICS (mean 0.651 >= 0.649); RTH-IC misses by 0.001. The remaining gap to RTH sits on
+Omni-MATH (0.589 vs 0.618).
+
+**H3 result (TamIA 650721 RTH-ICS, 650722 RTH-IC, 8.5 min each).** Seeds picked on
+PRM800K val AUROC: RTH-ICS seed 1 (0.897), RTH-IC seed 0 (0.892). Step counts matched
+the PRM's score files on every trajectory of both pools. Selection (tie-break, best-of-N,
+weighted vote at N = 2, 4, 10, both pools, GSM8K and MATH-500): inline minus RTH ranges
+from -0.49 to +1.01 accuracy points over the 72 same-rule pairs, none with a paired
+interval excluding 0 (`results/read_token_v1/downstream/summary_inline.md`). The PRM
+stays ahead on GSM8K. Cost on 200 MATH-500 trajectories, one H100, seconds per
+trajectory: RTH per-step template 1.38, RTH prefix-shared 0.43, inline whole pass 0.095
+(RTH-IC) / 0.098 (RTH-ICS), inline read over an existing text cache 0.026 / 0.028, PRM
+0.059, passive pass 0.058.
+
+### Stage H4: the fastest inline read (added 2026-10-28)
+
+**Code.** `scripts/inline_fast.py`: FastReader (the read call as a plain layer loop over
+the text cache, grouped-query attention folded into the query length, offsets added by
+slot kind, cache only read), FusedReader (q/k/v and gate/up each one matmul via weight
+views, no copy; the pointwise work between matmuls compiled with torch.compile; one SDPA
+per layer) and GraphedReader (CUDA graphs per row count, text bucket of 256 and slot
+bucket, shared key/value buffers, slot keys written in place). Tests: tiny Qwen2 and
+Qwen3, plain / marker / chain, equal read_pass to 1e-5 in float32.
+`scripts/analysis/inline_speed.py` times every method on each trajectory in turn;
+`slurm/inline_speed_tamia.sh`.
+
+**Timing fix.** With the default SDPA backend the first call at a new sequence length
+pays a one-off setup (order check on 30 unseen trajectories, PRM: 61.3 ms at first
+sight, 27.1 ms on repeat; without cuDNN attention 21.3 and 20.7 ms). Every trajectory
+has a new length, so H3's E1 billed the PRM (0.059 s) and the text pass for that setup.
+H4 runs every forward without cuDNN attention.
+
+**Result (TamIA 651008, one H100, RTH-ICS seed 1, 200 MATH-500 trajectories of the T=1.0
+pool, median ms per trajectory; RTH-IC and a repeat run within 3%).**
+
+| call | batch 1 | batch 10 (one problem's candidates) |
+|---|---|---|
+| PRM forward | 21.8 | 17.3 |
+| policy forward over the trace (text pass) | 26.4 | 22.4 |
+| read call, Hugging Face (H3) | 28.2 | 3.9 |
+| read call, layer loop + CUDA graphs | 13.7 | 3.0 |
+| read call, fused + compiled + CUDA graphs | **8.8** | **2.1** (RTH-IC 1.4) |
+| one decode step (fused, graphed) | 8.4 | |
+| the same decode step with the read riding along | 8.65 (+0.27 per step) | |
+| offline: text pass + fused read | 35.3 | 24.5 |
+
+Fused reads against the Hugging Face read over 7,078 reads: P(incorrect) difference mean
+0.0018, max 0.017; the Hugging Face read against its own uncached reference: mean 0.0020,
+max 0.063, so the fast path sits inside bf16 kernel noise.
+
 ## Code needed
 
 * `scripts/read_token_probe.py`: `--freeze_soft` (embedding excluded from the

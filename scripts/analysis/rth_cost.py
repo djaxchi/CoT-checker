@@ -95,8 +95,9 @@ def main() -> None:
     if set(methods) - set(METHODS):
         raise SystemExit(f"unknown methods {set(methods) - set(METHODS)}")
     if a.inline_ckpt is not None:
-        from scripts.read_token_inline import build_sequences, read_pass, text_pass
+        from scripts.read_token_inline import build_sequences, marker_from_ckpt, read_pass, row, text_pass
         irt, ick = load_read_token(a.inline_ckpt, model.config.hidden_size, dev, model)
+        imk = marker_from_ckpt(ick, dev)
     elif {"rth_inline", "inline_margin"} & set(methods):
         raise SystemExit("the inline rows need --inline_ckpt")
     for name in [m for m in methods if m != "prm"]:
@@ -104,17 +105,19 @@ def main() -> None:
         for i, r in enumerate(rows):
             items = step_items(r)
             if name in ("rth_inline", "inline_margin"):
-                seqs = [(q["ids"], q["pos"]) for q in build_sequences(tok, items, "chat")[0]]
-                sa = ick.get("soft_attn")
+                ich = bool(ick.get("chain"))
+                seqs = [row(q, imk) for q in build_sequences(tok, items, "chat", chain=ich)[0]]
+                sa, per = ick.get("soft_attn"), 1 if imk is None else 2
+                mark = imk is not None
                 if name == "rth_inline":
-                    t = timed(dev, lambda: read_pass(model, irt, *text_pass(model, seqs, pad, dev),
-                                                     grad=False, soft_attn=sa))
-                    n_tok = sum(len(x) + len(q) for x, q in seqs)
+                    t = timed(dev, lambda: read_pass(model, irt, *text_pass(model, seqs, pad, dev, marker=mark, chain=ich),
+                                                     grad=False, soft_attn=sa, mk=imk))
+                    n_tok = sum(len(q[0]) + per * len(q[1]) for q in seqs)
                 else:
                     with torch.no_grad():
-                        cache, lay = text_pass(model, seqs, pad, dev)
-                    t = timed(dev, lambda: read_pass(model, irt, cache, lay, grad=False, soft_attn=sa))
-                    n_tok = sum(len(q) for _, q in seqs)
+                        cache, lay = text_pass(model, seqs, pad, dev, marker=mark, chain=ich)
+                    t = timed(dev, lambda: read_pass(model, irt, cache, lay, grad=False, soft_attn=sa, mk=imk))
+                    n_tok = sum(per * len(q[1]) for q in seqs)
             elif name == "rth":
                 ids = [tokenize(tok, it) for it in items]
                 t = timed(dev, lambda: [read_all_states(model, rt, [ids[j] for j in b], pad, dev,

@@ -4,7 +4,8 @@ import torch
 transformers = pytest.importorskip("transformers")
 
 from scripts.read_token_inline import (  # noqa: E402
-    build_sequences, group_items, inline_read, seq_batches)
+    StartMarker, build_sequences, group_items, inline_read, marker_reference, member_index, seq_batches,
+    text_pass, uncached_reference)
 from scripts.read_token_probe import ReadToken, read_all_states  # noqa: E402
 
 
@@ -114,6 +115,7 @@ def test_build_sequences_reads_each_item_after_its_separator(monkeypatch):
     assert len(s["ids"]) == len(text)
     assert s["members"] == [0, 1, 2]
     assert s["pos"] == [len("<p>ab\n\n"), len("<p>ab\n\ncd\n\n"), len(text)]
+    assert s["spos"] == [len("<p>"), len("<p>ab\n\n"), len("<p>ab\n\ncd\n\n")]
 
 
 def test_build_sequences_reads_an_item_alone_without_a_token_boundary(monkeypatch):
@@ -175,3 +177,135 @@ def test_train_then_encode_end_to_end(tmp_path, monkeypatch):
     split, meta = load_split(out, "val")   # every array but `layers` is per item
     assert len(split["sep"]) == len(meta) == 18
     assert np.isfinite(z["head_p_correct"]).all()
+
+
+# (text ids, read positions, step starts)
+MSEQS = [([1, 5, 9, 3, 7, 2, 11, 4, 6], [3, 6, 9], [1, 3, 6]), ([4, 8, 13, 2], [4], [2])]
+
+
+def marker(scale=0.5):
+    mk = StartMarker(32, torch.randn(1, 32) * 0.02, n_layers=3)
+    with torch.no_grad():
+        mk.deep.normal_(0, scale)
+    return mk
+
+
+def test_marker_read_equals_the_uncached_masked_forward():
+    model, rt, mk = tiny_model(), deep_token(), marker()
+    got = inline_read(model, rt, MSEQS, 0, DEV, grad=True, mk=mk)
+    assert got.shape == (4, 32)
+    k = 0
+    for ids, pos, spos in MSEQS:
+        for p, sp in zip(pos, spos):
+            ref = marker_reference(model, rt, mk, ids, p, sp, DEV)
+            assert torch.allclose(got[k].detach(), ref.detach(), atol=2e-4), (ids, p, sp)
+            k += 1
+    got.sum().backward()
+    assert mk.soft.grad.abs().sum() > 0 and mk.deep.grad.abs().sum() > 0 and rt.deep.grad.abs().sum() > 0
+    plain = inline_read(model, rt, [(i, p) for i, p, _ in MSEQS], 0, DEV, grad=False)
+    assert not torch.allclose(got.detach(), plain, atol=1e-3)   # the marker reaches the read
+
+
+def test_marker_layout_masks():
+    model = tiny_model()
+    _, lay = text_pass(model, MSEQS, 0, DEV, marker=True)
+    m, T, K = lay["mask"][0, 0], 9, 3
+    for k, (p, sp) in enumerate(zip(MSEQS[0][1], MSEQS[0][2])):
+        assert m[k, :T].nonzero().flatten().tolist() == list(range(sp))        # marker: text before the step
+        assert m[k, T:].nonzero().flatten().tolist() == [k]                    # and itself only
+        assert m[K + k, :T].nonzero().flatten().tolist() == list(range(p))     # read: its text
+        assert m[K + k, T:].nonzero().flatten().tolist() == [k, K + k]         # its own marker and itself
+    assert lay["pos"][0].tolist() == MSEQS[0][2] + MSEQS[0][1]
+    with pytest.raises(ValueError):
+        text_pass(model, [([1, 2, 3], [2], [2])], 0, DEV, marker=True)        # marker must precede the read
+
+
+def test_train_with_a_start_marker_then_encode(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    import numpy as np
+
+    import scripts.read_token_inline as ri
+    import scripts.read_token_store as rs
+    monkeypatch.setattr(rs, "load_model", lambda name, dev: (tiny_model(), CliTok()))
+    rows = [{"uid": f"u{p}{k}", "problem": f"q{p}", "prefix": "\n\n".join(f"s{p}{j}" for j in range(k)),
+             "candidate_step": f"s{p}{k}", "label": (p + k) % 2} for p in range(4) for k in range(3)]
+    data = tmp_path / "items.jsonl"
+    data.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "tok"
+    monkeypatch.setattr(sys, "argv", ["x", "train", "--init_text", "x", "--deep", "--start_marker",
+                                      "--start_init_text", "y", "--start_deep", "--train", str(data),
+                                      "--n_train", "0", "--max_tokens", "400", "--out", str(out)])
+    ri.main()
+    ck = torch.load(out / "read_token.pt", weights_only=False)
+    assert ck["start_soft"].shape == (1, 32) and ck["start_deep"].abs().sum() > 0
+    monkeypatch.setattr(sys, "argv", ["x", "encode", "--out", str(out), "--passive_blocks", "1",
+                                      "--prm800k", f"val:{data}"])
+    ri.main()
+    z = np.load(out / "val.shard0.npz")
+    assert z["kept"].all() and np.isfinite(z["head_p_correct"]).all()
+
+
+
+@pytest.mark.parametrize("with_marker", [False, True])
+def test_chained_reads_equal_the_uncached_masked_forward(with_marker):
+    model, rt = tiny_model(), deep_token()
+    mk = marker() if with_marker else None
+    rows = MSEQS if with_marker else [(i, p) for i, p, _ in MSEQS]
+    got = inline_read(model, rt, rows, 0, DEV, grad=True, mk=mk, chain=True)
+    k = 0
+    for ids, pos, spos in MSEQS:
+        ref = uncached_reference(model, rt, ids, pos, DEV, spos, mk, chain=True)
+        assert torch.allclose(got[k:k + len(pos)].detach(), ref.detach(), atol=2e-4)
+        k += len(pos)
+    got.sum().backward()
+    assert rt.deep.grad.abs().sum() > 0
+    flat = inline_read(model, rt, rows, 0, DEV, grad=False, mk=mk)
+    assert torch.allclose(got[0].detach(), flat[0], atol=2e-4)          # nothing earlier to see
+    assert not torch.allclose(got[1:3].detach(), flat[1:3], atol=1e-3)  # later reads see earlier ones
+
+
+def test_chain_mask_lets_a_read_see_only_earlier_reads_of_its_row():
+    _, lay = text_pass(tiny_model(), [(i, p) for i, p, _ in MSEQS], 0, DEV, chain=True)
+    m, T = lay["mask"][0, 0], 9
+    for k in range(3):
+        assert m[k, T:].nonzero().flatten().tolist() == list(range(k + 1))
+    assert lay["mask"][1, 0, 0, T:].nonzero().flatten().tolist() == [0]   # row 1: one read, itself
+
+
+def test_chain_sequences_have_a_slot_after_every_step(monkeypatch):
+    import scripts.read_token_inline as ri
+    monkeypatch.setitem(ri.LAYOUTS, "chat", lambda problem: f"<{problem}>")
+    items = [item("p", "ab\n\ncd", "e"), item("p", "", "ab")]      # step 1 is not an item
+    seqs, _ = build_sequences(CharTok(), items, chain=True)
+    s = seqs[0]
+    assert s["pos"] == [len("<p>ab\n\n"), len("<p>ab\n\ncd\n\n"), len("<p>ab\n\ncd\n\ne\n\n")]
+    assert s["spos"] == [len("<p>")] + s["pos"][:2]
+    assert sorted(zip(s["members"], s["slot"])) == [(0, 2), (1, 0)]
+    assert member_index([s, s]).tolist() == [s["slot"][0], s["slot"][1], 3 + s["slot"][0], 3 + s["slot"][1]]
+
+
+def test_train_chained_then_encode(tmp_path, monkeypatch):
+    import json
+    import sys
+
+    import numpy as np
+
+    import scripts.read_token_inline as ri
+    import scripts.read_token_store as rs
+    monkeypatch.setattr(rs, "load_model", lambda name, dev: (tiny_model(), CliTok()))
+    rows = [{"uid": f"u{p}{k}", "problem": f"q{p}", "prefix": "\n\n".join(f"s{p}{j}" for j in range(k)),
+             "candidate_step": f"s{p}{k}", "label": (p + k) % 2} for p in range(4) for k in (0, 2)]
+    data = tmp_path / "items.jsonl"
+    data.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = tmp_path / "tok"
+    monkeypatch.setattr(sys, "argv", ["x", "train", "--init_text", "x", "--deep", "--chain", "--train", str(data),
+                                      "--n_train", "0", "--max_tokens", "400", "--out", str(out)])
+    ri.main()
+    assert torch.load(out / "read_token.pt", weights_only=False)["chain"] is True
+    monkeypatch.setattr(sys, "argv", ["x", "encode", "--out", str(out), "--passive_blocks", "1",
+                                      "--prm800k", f"val:{data}"])
+    ri.main()
+    z = np.load(out / "val.shard0.npz")
+    assert z["kept"].all() and z["sep"].shape == (8, 1, 32) and np.isfinite(z["head_p_correct"]).all()

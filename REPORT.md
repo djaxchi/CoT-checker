@@ -1,11 +1,11 @@
 # CoT-Checker: Research Report
-*Last updated: 2026-10-26. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
+*Last updated: 2026-10-30. Sections are appended in the order the work ran. The primary policy is Qwen3-8B (Instruct) from §21.10 on; §20 and §21 up to §21.9 ran on Qwen3-8B-Base and are superseded where §21.10 has an Instruct counterpart. §22 (Limitations) describes the Stage-1 SSAE work; §21.11 consolidates the current evidence and literature corrections; §24 holds the current plan.*
 
 ---
 
 ## Abstract
 
-We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Reading full token states instead of pooled steps raises calib-20 F1_PB from 0.388 to 0.551 at matched causal visibility, yet later steps still add nothing (+0.002 [-0.012, +0.014] step F1), and ModernBERT fine-tuned on raw step text trails the frozen states by 0.092 step F1 (§21.25). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats a blind-retry control on MATH-500 by +0.028 [-0.002, +0.058], while blind retries alone add nothing (+0.004); part of the checker's preference is for short steps (§21.27, §21.36). A trained read token appended to frozen Qwen3-8B, with one learned offset per layer at its position, makes the end-of-step state as separable as the PRM's last step token (LDA calib-20 0.617 against 0.621, from 0.555), and its own linear head (RTH) reaches calib-20 0.656, +0.046 [+0.027, +0.064] over the best Qwen3-8B leaderboard cell and level with the PRM states (-0.005 [-0.025, +0.014]) (§21.40).
+We study which internal representations support step-level reasoning verification and when their scores improve answer selection. The matched Qwen3-8B Instruct verifier reaches mean PRM800K AUROC 0.9128 and source-validation-selected ProcessBench F1_PB 0.560, while the saved Instruct TTS pool shows smaller selection gains than the historical Base pool. Exact pair analysis separates reduced correct/incorrect candidate diversity from lower conditional selection accuracy; answer-equivalence defects, scorer provenance and measured deployment costs remain the main evaluation gaps (§21.11). Read from Qwen2.5-Math-PRM-7B's residual stream, the same probes gain 0.07 calib-20 F1_PB over Instruct, closed-form LDA matches the best of them (0.667), and all still trail the PRM's own head (0.701) (§21.15). A trained token-attention probe on frozen Instruct states does worse with access to later steps: full-trace attention loses 0.026 PRM800K step F1 and 0.022 mean ProcessBench F1_PB to a matched causal probe (§21.16). Relabeling every step, including steps after the first error, did not change that: on Qwen3-8B's own trajectories with DeepSeek-R1 labels the full probe still loses 0.019 step F1 and 0.138 F1_PB (§21.17). Reducing what the backbone itself sees also hurts. Re-encoding each step with only the problem as context costs 0.15 in-domain F1 and 0.34 mean ProcessBench F1_PB on PRM800K human labels, against full prior context (§21.18). On Qwen3-8B's own trajectories, a step's downstream risk is only partly predicted by its validity (Spearman 0.37 over 501 forks): 13% of incorrect steps are bypassed with no cost to the answer, and some correct steps raise failure above the model's own alternatives (§21.19). The validity probe does not rank risk within incorrect steps (AUROC 0.53 for harmful ones), and a linear risk readout of the same states does not yet improve on it at 531 forks (§21.20). A step-level encoder with masked-step pretraining over frozen Base states also gains nothing from later steps: bidirectional minus causal step F1 is -0.005 [-0.022, +0.012] and ProcessBench calib-20 F1_PB is -0.011 (§21.22). Reading full token states instead of pooled steps raises calib-20 F1_PB from 0.388 to 0.551 at matched causal visibility, yet later steps still add nothing (+0.002 [-0.012, +0.014] step F1), and ModernBERT fine-tuned on raw step text trails the frozen states by 0.092 step F1 (§21.25). Shared cut-point rollouts label downstream risk for 32,316 steps of Qwen3-8B's own traces, 1,399 of them harmful (§21.23). A linear risk readout trained on them adds +0.022 AUROC [0.014, 0.030] to the validity score for harmful-step detection under problem cross-validation, and a same-sized but unresolved +0.020 [-0.012, 0.054] on the 531 held-out forks (§21.24). A transformer risk head does worse than that linear readout (out-of-fold AUROC 0.641 against 0.709) and adds nothing to ProcessBench localization. The null is built into the target: added to validity, even the measured risk labels raise first-error F1 by at most +0.014, because most first errors do not raise failure and some valid steps do (§21.26). On the Instruct policy, step rejection beats a blind-retry control on MATH-500 by +0.028 [-0.002, +0.058], while blind retries alone add nothing (+0.004); part of the checker's preference is for short steps (§21.27, §21.36). A trained read token appended to frozen Qwen3-8B, with one learned offset per layer at its position, makes the end-of-step state as separable as the PRM's last step token (LDA calib-20 0.617 against 0.621, from 0.555), and its own linear head (RTH) reaches calib-20 0.656, +0.046 [+0.027, +0.064] over the best Qwen3-8B leaderboard cell and level with the PRM states (-0.005 [-0.025, +0.014]) (§21.40). Placed inside the policy's own trace with each read token also seeing the previous one, the token keeps most of that (calib-20 0.651, -0.008 [-0.022, +0.005] to RTH), selects answers as well as RTH, and reads a trajectory from the generation cache in 8.8 ms against the PRM's 21.8 ms (2.1 against 17.3 ms per candidate for 10 candidates at once) (§21.41). On ReProbe's own benchmark (eight Qwen3-8B test sets, same training traces and labels), the causal read token beats ReProbe's full-trace transformer with 26x fewer trainable parameters: +0.055 [+0.039, +0.074] overall PR-AUC with DeepSeek-R1 labels, and +0.049 [+0.030, +0.067] over the best published ReProbe probe with self labels (0.652 against 0.603); trained on ReProbe's data it also reaches 0.654 calib-20 on ProcessBench against ReProbe's 0.539, while on ReProbe's best-of-N pools no verifier, the read token included, beats majority vote (§21.42).
 
 ## 1. Hypothesis
 
@@ -6097,6 +6097,515 @@ Outputs: geometry and logs under `$SCRATCH/cot_mech/read_token_v1/`
 `cot-checker-results/read_token_v1/geometry/`; figures and table in
 `results/read_token_v1/rep_separation/`.
 
+### 21.41 The Read Token Inside the Trace: Chained Reads Reach 0.651 calib-20, Select Answers as Well as RTH, and Read 2.5x to 8x Faster Than the PRM (read_token_v1 Stage H)
+
+*Updated: 2026-10-28. Plan frozen before each stage: `docs/read_token_v1_plan.md`, Stage H, H-S, H-C, H4. TamIA 647825 (H1, H2), 647978 (H-S), 650438 (H-C), 650721 and 650722 (H3), 651008 (H4).*
+
+**Context.** RTH (§21.40) reads each step under a verifier template rebuilt per
+step, so scoring one MATH-500 trajectory re-reads 28,821 tokens (1,642 with prefix
+sharing) and reuses nothing from generation. Stage H asks whether the read token
+keeps RTH's accuracy when it sits inside the policy's own trace, read in one pass,
+and how its cost then compares with the PRM's.
+
+**What was done.** `scripts/read_token_inline.py` lays each trajectory out in
+Qwen3-8B's non-thinking chat layout (the §21.13 pools' `chat_prompt`) and places one
+read token after every step's `\n\n` separator. A 4D mask keeps every text token
+blind to the read tokens, so the text states are the states the policy computed
+while writing; read token k sees the text up to its separator and sits at the
+position the next text token takes. That is the computation of appending the token
+to the generation cache after step k and dropping it. A text pass without gradients
+builds the cache, then one call reads every read token of the batch. Supervision is
+RTH's: the same 100k PRM800K items per seed, BCE, AdamW, OneCycle at peak lr 3e-3,
+clip 1.0, the ` correct` initialisation, 36 per-layer offsets and a linear head.
+Items of one solution ride on its longest item, and batches are capped at RTH's
+items per optimizer step (1,874 steps against RTH's 1,795). Every run opens with a
+gate: the cached batched read must match one uncached forward under the explicit
+mask (relative difference <= 0.05; observed 0.006 to 0.013).
+
+* H1: the three RTH tokens read inline, untrained.
+* H2, RTH-I: seeds 0 to 2 trained inline. Each encode also stores the text states
+  at the separator before every read token (blocks 24 and 35, final norm); LDA on
+  them is the passive control, a free probe on the generation states
+  (`scripts/analysis/inline_passive_lda.py`).
+* H-S: a start marker, one more soft token at each step's first position (init
+  " step"), seen only by that step's read token. RTH-IS trains its embedding;
+  RTH-ISD adds 36 offsets of its own.
+* H-C: chained read tokens. A read slot follows every step, also the unlabelled
+  ones, and read token k also sees read tokens 0 to k-1 of its trajectory, so the
+  previous read token marks where step k begins. RTH-IC has the chain alone;
+  RTH-ICS adds RTH-ISD's marker. Online, the read tokens stay in a side cache.
+* H3: Stage E's downstream run (`slurm/rthi_downstream_tamia.sh`, now with a `CANDS`
+  seed list) for RTH-ICS and RTH-IC: seed picked on PRM800K val AUROC, every step of
+  both Instruct pools (T = 1.0, T = 0.7; GSM8K, MATH-500) scored inline, selection
+  against majority vote and paired against RTH (`tts_rule_contrast.py`).
+* H4: a fast read call (`scripts/inline_fast.py`). FastReader runs the read as a
+  plain loop over the decoder layers on the text cache's key/value tensors, folds
+  the grouped query heads into the query length, and adds the offsets by slot kind.
+  FusedReader makes q/k/v and gate/up one matmul each through weight views (no
+  copy) and compiles the pointwise work between matmuls with `torch.compile`.
+  GraphedReader captures either as CUDA graphs per text bucket of 256 tokens and
+  slot bucket. `scripts/analysis/inline_speed.py` times every method on each of 200
+  T = 1.0 MATH-500 trajectories in turn, on one H100, one trajectory per call and
+  then the 10 candidates of a problem per call.
+
+**Results: accuracy.** ProcessBench calib-20 F1_PB of the trained head, four-subset
+mean, three seeds:
+
+| arm | seeds | mean | GSM8K | MATH | OlympiadBench | Omni-MATH |
+|---|---|---|---|---|---|---|
+| H1, RTH tokens read inline | 0.606 / 0.608 / 0.610 | 0.608 | | | | |
+| RTH-I | 0.629 / 0.647 / 0.636 | 0.637 | 0.722 | 0.659 | 0.595 | 0.574 |
+| RTH-IS (marker) | 0.637 / 0.641 / 0.653 | 0.644 | | | | |
+| RTH-ISD (marker + offsets) | 0.649 / 0.652 / 0.641 | 0.647 | 0.740 | 0.673 | 0.599 | 0.577 |
+| RTH-IC (chain) | 0.647 / 0.647 / 0.650 | 0.648 | 0.731 | 0.688 | 0.592 | 0.581 |
+| **RTH-ICS (chain + marker)** | 0.655 / 0.653 / 0.646 | **0.651** | 0.730 | 0.677 | 0.609 | 0.589 |
+| RTH (§21.40) | 0.656 / 0.660 / 0.662 | 0.660 | 0.728 | 0.679 | 0.614 | 0.618 |
+
+The passive control stays at 0.542 (block 24), 0.531 (block 35) and 0.541 (final
+norm). LDA refit on the read states gives 0.628 / 0.624 / 0.631 for RTH-I, 0.649 /
+0.633 / 0.653 for RTH-IC and 0.654 / 0.645 / 0.630 for RTH-ICS.
+
+Paired trace bootstrap of the three-seed means (200 resamples, normal 95% CI; the
+share of resampled deltas <= 0 can disagree with the CI because calib-20 is not
+linear in the traces):
+
+| comparison | delta | 95% CI | share <= 0 |
+|---|---|---|---|
+| RTH-I - RTH | -0.022 | [-0.036, -0.008] | |
+| RTH-I - PRM states, best cell | -0.024 | [-0.041, -0.006] | |
+| RTH-I - H1 | +0.030 | [+0.017, +0.042] | |
+| RTH-ISD - RTH-I | +0.010 | [-0.000, +0.020] | |
+| RTH-IC - RTH-I | +0.010 | [-0.001, +0.022] | 0.010 |
+| RTH-IC - RTH-ISD | +0.001 | [-0.010, +0.011] | 0.245 |
+| RTH-ICS - RTH-IC | +0.003 | [-0.005, +0.012] | 0.625 |
+| RTH-ICS - RTH | -0.008 | [-0.022, +0.005] | 0.965 |
+
+Prespecified readings: RTH-I missed the 0.649 bar and beat the passive control (the
+middle reading). The marker's gain over RTH-I has a CI reaching 0 (no strict gain).
+The chain's gain has a CI reaching -0.001 while 99% of resamples favour it. The chain
+replaces the marker: RTH-IC is level with RTH-ISD, and the marker adds nothing clear
+on top of the chain. RTH-ICS clears the H3 bar (0.651 >= 0.649); RTH-IC misses it by
+0.001.
+
+**Results: answer selection (H3).** Seeds picked on val AUROC: RTH-ICS seed 1
+(0.897), RTH-IC seed 0 (0.892). Step counts matched the PRM's score files on every
+trajectory of both pools. Over the 72 same-rule comparisons with RTH (tie-break,
+best-of-N, weighted vote; N = 2, 4, 10; two pools, two datasets, two arms), inline
+minus RTH runs from -0.49 to +1.01 accuracy points and no paired interval excludes 0.
+Lift over majority vote, best-of-N at N = 10, T = 1.0 pool, in points: MATH-500 RTH
+-2.67, RTH-ICS -1.79, RTH-IC -2.17, PRM -1.82; GSM8K RTH -0.11, RTH-ICS -0.04, RTH-IC
+-0.04, PRM +1.11. Within-problem AUROC of the worst step on that pool: MATH-500 0.696
+/ 0.695 / 0.682 / 0.709 and GSM8K 0.709 / 0.717 / 0.717 / 0.819 (RTH / RTH-ICS /
+RTH-IC / PRM). Summary: `results/read_token_v1/downstream/summary_inline.md`.
+
+**Results: cost (H4).** With the default SDPA backend, the first forward at a new
+sequence length pays a one-off cuDNN setup. On 30 unseen trajectories the PRM took
+61.3 ms at first sight and 27.1 ms on a repeat; without cuDNN attention, 21.3 and
+20.7 ms. Every trajectory has a new length, so the H3 cost run (PRM 0.059 s per
+trajectory) billed that setup to every call. H4 runs all forwards without cuDNN
+attention. Median ms per trajectory, RTH-ICS seed 1 (RTH-IC and a repeat run within
+3%):
+
+| call | one trajectory per call | 10 candidates per call |
+|---|---|---|
+| PRM forward (Qwen2.5-Math-PRM-7B, 845 tokens) | 21.8 | 17.3 |
+| policy forward over the trace (821 tokens) | 26.4 | 22.4 |
+| read call through the Hugging Face forward | 28.2 | 3.9 |
+| read call, layer loop + CUDA graphs | 13.7 | 3.0 |
+| **read call, fused + compiled + CUDA graphs (70 slots)** | **8.8** | **2.1** (RTH-IC 1.4) |
+| one policy decode step, same fused graphed loop | 8.4 | |
+| that decode step with a read slot riding along | 8.65 | |
+| offline: policy forward + fused read | 35.3 | 24.5 |
+
+The fused read differs from the Hugging Face read by 0.0018 in P(incorrect) on
+average (max 0.017) over 7,078 reads; the Hugging Face read differs from its own
+uncached reference by 0.0020 (max 0.063).
+
+**Interpretation.** Most of what the verifier template gave RTH survives inside the
+policy's own trace, once the read token knows where each step starts. Read untrained,
+RTH's tokens lose 0.052 inline. Training them inline wins back 0.030, and showing each
+read token the previous one wins back 0.010 more, as much as a dedicated start marker.
+The remaining 0.008 to RTH is not resolved (CI [-0.022, +0.005]), and it sits on
+Omni-MATH (0.589 against 0.618). The passive control at 0.54 shows that the read
+token, not the generation states it attends to, carries the gain: the free probe on
+the separator states is 0.11 below.
+
+On answer selection the inline token is RTH's equal, and it inherits RTH's limits:
+the PRM keeps a clear lead on GSM8K (+1.1 points at N = 10, within-problem AUROC
+0.819 against about 0.72).
+
+The cost case holds online and fails offline. During generation the policy has
+already built the text cache, so a verifier's cost is the read call alone. That call
+takes 8.8 ms for a whole trajectory, 2.5x under the PRM's 21.8 ms. Riding along a
+decode step it adds 0.27 ms per step. For a best-of-N problem of 10 candidates it takes
+2.1 ms per candidate against the PRM's 17.3 (8x; 12x for RTH-IC). It loads no second
+7.6B model. Scoring a finished trace from scratch costs a full policy forward plus the
+read (35.3 ms), more than the PRM. At one trajectory the read already costs about one
+decode step, which reading the weights bounds, so further gains there need custom
+kernels or quantization; quantization would speed up the PRM as well. Both verifiers
+stay small next to generation: an 821-token trajectory takes about 7 s to decode at
+8.4 ms per step.
+
+**Next step.** Run the read online: append, read and drop during generation on 50
+traces, check that online scores equal the offline H3 scores, then use them for step
+rejection (§21.27) at the H4 cost.
+
+Outputs: per-run logs, geometry and `bootstrap_{plain,marker,chain}.json` under
+`$SCRATCH/cot_mech/read_token_v1/inline/`; pool scores under
+`$SCRATCH/cot_mech/read_token_v1/downstream/scores/`; selection contrasts and
+summary in `results/read_token_v1/downstream/`; timing JSON and logs in
+`results/read_token_v1/speed/`.
+
+### 21.42 On ReProbe's Own Benchmark, the Read Token Beats ReProbe With the Same Data: +0.055 Overall PR-AUC With DeepSeek-R1 Labels, +0.070 With Self Labels (reprobe_comparison_v1)
+
+*Updated: 2026-10-30. Plans frozen before any run: `docs/reprobe_comparison_v1_plan.md`,
+`docs/reprobe_comparison_v2_plan.md`. TamIA 655473 (S1), 655474 and 655475 (S2), 655985
+(best-of-N scoring).*
+
+**Context.** ReProbe (Ni et al., arXiv 2511.06209 v5) is the published state of the art
+for step verification from a frozen policy's hidden states, and we had no number in
+common with it. This section puts the read token and ReProbe on the same backbone
+(Qwen3-8B, non-thinking), the same training traces and labels, the same prompt and the
+same eight test sets, so that the readout is the only difference.
+
+**What was done.**
+
+* Test sets. ReProbe's LM-Polygraph managers (`ue_manager.pth`) carry the prompt, the
+  sampled reply, DeepSeek-R1 step labels (1 = incorrect) and ReProbe's stored
+  Attn+Logit scores. `src/data/reprobe_steps.py` ports ReProbe's `StepsExtractor`
+  (one step per line, the `<Answer>:` line included); it gives exactly as many steps as
+  labels on all eight sets.
+
+  | set | traces | labeled steps | % incorrect |
+  |---|---|---|---|
+  | MATH | 728 | 6,164 | 16.1 |
+  | GSM8K | 200 | 1,106 | 8.6 |
+  | ProofNet | 186 | 1,640 | 10.3 |
+  | Trips | 320 | 5,492 | 53.1 |
+  | Meetings | 200 | 2,569 | 59.1 |
+  | Calendar | 200 | 1,616 | 47.5 |
+  | StrategyQA | 500 | 2,865 | 18.9 |
+  | ScienceQA | 500 | 2,621 | 11.3 |
+
+  ID = MATH, GSM8K, ProofNet; OOD = the other five; overall = the mean of the eight.
+* ReProbe head. `src/probes/reprobe_head.py` reimplements the released head (Linear
+  4096 -> 1024 -> 512 with LN and GELU, a step-marking entity embedding, one
+  TransformerEncoder layer with 16 heads over every prompt and reply token state of the
+  last layer, mean pool over the step, 2-layer classifier; 8,140,801 parameters). The
+  released checkpoints load with every key matched. ReProbe's config sets
+  `mask_future_tokens: true`, but the code computes `src_key_pd &= cumulative_mask`, which
+  leaves every token after the step attended; on a toy mask (claim at positions 2 and
+  3, padding at 0) the ignored set is [1, 0, 0, 0, 0, 0, 0]. Released ReProbe therefore
+  scores each step with the whole trace in view, final answer included. The read token
+  is causal.
+* Training split. ReProbe's 32,484 training rows (Qwen3-8B replies to 10.8K PRM800K
+  problems), DeepSeek-R1 labels (`rediska0123/train_prm800k_Qwen3-8B_finished`) and
+  self labels (`JingweiNi/train_prm800k_Qwen3-8B_finished_self_annotate`) joined on
+  (question, reply). Problems follow the frozen bidirectional_token_probe_v2 manifest,
+  which excludes the 752 ProcessBench-overlap problems (2,256 rows dropped): 9,578
+  training and 497 validation problems, 28,737 and 1,491 traces. Self labels are
+  dropped on 782 traces whose self-label step split differs from the DeepSeek one.
+  Read-token items: DS 167,355 training (7.34% incorrect) and 8,894 validation (6.89%);
+  self 162,537 (7.27%) and 8,637 (6.63%). No test question is in the training split;
+  430 of the 728 MATH test traces are PRM800K human-label problems (RT-zs's training
+  source), none in the other seven sets.
+* Arms (`scripts/reprobe_cmp/`):
+
+  | arm | what | context | seeds |
+  |---|---|---|---|
+  | RP-AL | ReProbe Attn+Logit DS scores stored in the managers | full trace | released |
+  | RP-rel-ds, RP-rel-self | released hidden-state checkpoints through our code | full trace | released |
+  | RP-ds, RP-self | our reimplementation, ReProbe's recipe, retrained on our split | full trace, as released | 3 |
+  | RPc-ds, RPc-self | the same, future tokens masked | causal | 3 |
+  | RT-ds, RT-self | read token, RTH-ICS recipe (§21.41), ReProbe layout | causal | 2 (DS: seeds 0 and 2), 3 (self) |
+  | RT-zs | the existing RTH-ICS tokens (PRM800K human labels, chat layout) read in ReProbe layout, no retraining | causal | 3 |
+
+  RP and RPc keep ReProbe's recipe: BCE with pos_weight 3, lr 5e-4, 128 traces per
+  batch, 5 epochs (1,125 steps), linear schedule with 5% warmup, weight decay 0.1, clip
+  1.0, best epoch on validation AP; the four heads of a seed share one backbone pass
+  (3,899 s per seed). RT keeps the §21.41 recipe: one epoch over every labeled step
+  (1,966 steps, 715 s per run), lr 3e-3, the " correct" initialisation, chained reads,
+  start marker with its own offsets, linear head; about 0.31M trainable parameters,
+  26x fewer than ReProbe. The ReProbe layout is `reprobe_prompt(question)` followed by
+  the reply's lines joined by "\n", with a read token after each line's "\n". Neither
+  method was tuned on the test sets.
+* Metrics. Primary, as published: PR-AUC (average precision) of "incorrect" per set.
+  Secondary: AUROC; F1 at the threshold that maximises F1 on the validation split
+  (each arm's own label set); oracle F1; the always-positive F1. Uncertainty: paired
+  bootstrap over traces within each set (1,000 resamples) on the seed-mean scores; for
+  the ID, OOD and overall means each set is resampled independently. ProcessBench:
+  calib-20 F1_PB with the leaderboard code, steps rewritten in ReProbe layout, paired
+  trace bootstrap (200 resamples, normal 95% CI).
+
+**Results: gates.** Gate T passes: the stored Attn+Logit scores reproduce Table 1 on all
+eight sets (.465 / .616 / .243 / .740 / .802 / .786 / .395 / .361; ID .442, OOD .617,
+overall .551). Gate G0 passes: through our code the released checkpoints give, per set,
+
+| | MATH | GSM8K | ProofNet | Trips | Meetings | Calendar | StrategyQA | ScienceQA | overall |
+|---|---|---|---|---|---|---|---|---|---|
+| RP-rel-ds, ours | .533 | .648 | .282 | .793 | .816 | .789 | .343 | .450 | .582 |
+| Table 1, DS | .534 | .650 | .281 | .793 | .817 | .789 | .344 | .450 | .582 |
+| RP-rel-self, ours | .556 | .671 | .264 | .798 | .817 | .784 | .380 | .554 | .603 |
+| Table 1, self | .558 | .673 | .264 | .799 | .819 | .785 | .381 | .553 | .604 |
+
+no set further than 0.002 from the table. Gate G1 passes: the retrained RP-ds reaches
+.590 overall (bar .552), 0.008 above the released checkpoint.
+
+**Results: step detection.** PR-AUC per set, seed means:
+
+| arm | MATH | GSM8K | ProofNet | Trips | Meetings | Calendar | StrategyQA | ScienceQA | ID | OOD | overall |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| RP-AL | 0.465 | 0.616 | 0.243 | 0.740 | 0.802 | 0.786 | 0.395 | 0.361 | 0.442 | 0.617 | 0.551 |
+| RP-rel-ds | 0.533 | 0.648 | 0.282 | 0.793 | 0.816 | 0.789 | 0.343 | 0.450 | 0.487 | 0.638 | 0.582 |
+| RP-rel-self | 0.556 | 0.671 | 0.264 | 0.798 | 0.817 | 0.784 | 0.380 | 0.554 | 0.497 | 0.667 | 0.603 |
+| RP-ds | 0.568 | 0.626 | 0.266 | 0.800 | 0.831 | 0.809 | 0.340 | 0.481 | 0.487 | 0.652 | 0.590 |
+| RPc-ds | 0.574 | 0.611 | 0.273 | 0.814 | 0.817 | 0.816 | 0.328 | 0.445 | 0.486 | 0.644 | 0.585 |
+| RP-self | 0.536 | 0.591 | 0.259 | 0.801 | 0.822 | 0.790 | 0.331 | 0.531 | 0.462 | 0.655 | 0.583 |
+| RPc-self | 0.535 | 0.565 | 0.255 | 0.806 | 0.809 | 0.797 | 0.337 | 0.498 | 0.452 | 0.649 | 0.575 |
+| RT-zs | 0.576 | 0.578 | 0.363 | 0.807 | 0.813 | 0.803 | 0.447 | 0.483 | 0.506 | 0.671 | 0.609 |
+| RT-ds | 0.612 | 0.716 | 0.387 | 0.823 | 0.843 | 0.812 | 0.467 | 0.500 | 0.572 | 0.689 | **0.645** |
+| RT-self | 0.611 | 0.735 | 0.405 | 0.822 | 0.855 | 0.795 | 0.467 | 0.526 | 0.584 | 0.693 | **0.652** |
+
+Overall PR-AUC per seed, and validation AP on the arm's own labels:
+
+| arm | overall per seed | validation AP per seed |
+|---|---|---|
+| RP-ds | .595 / .582 / .594 | .564 / .560 / .580 |
+| RPc-ds | .590 / .578 / .586 | .575 / .566 / .567 |
+| RP-self | .579 / .579 / .590 | .545 / .550 / .545 |
+| RPc-self | .565 / .579 / .582 | .542 / .548 / .548 |
+| RT-zs | .608 / .616 / .603 | .527 / .524 / .528 (DS) |
+| RT-ds | .645 / .645 | .612 / .608 |
+| RT-self | .653 / .654 / .650 | .585 / .579 / .566 |
+
+Paired trace bootstrap, delta of overall PR-AUC [95% CI]:
+
+| comparison | ID | OOD | overall |
+|---|---|---|---|
+| **RT-ds - RP-ds** (headline) | +0.085 [+0.049, +0.127] | +0.037 [+0.024, +0.052] | **+0.055 [+0.039, +0.074]** |
+| RT-ds - RPc-ds (both causal) | +0.086 [+0.050, +0.129] | +0.045 [+0.031, +0.060] | +0.060 [+0.044, +0.079] |
+| RT-ds - RP-rel-ds | +0.084 [+0.045, +0.128] | +0.051 [+0.036, +0.066] | +0.063 [+0.046, +0.083] |
+| RPc-ds - RP-ds (what future access buys ReProbe) | -0.001 [-0.024, +0.019] | -0.008 [-0.014, -0.002] | -0.005 [-0.015, +0.003] |
+| RT-self - RP-self | +0.122 [+0.077, +0.156] | +0.038 [+0.023, +0.052] | +0.070 [+0.051, +0.086] |
+| RT-self - RPc-self | +0.132 [+0.086, +0.170] | +0.044 [+0.028, +0.058] | +0.077 [+0.057, +0.093] |
+| RT-self - RP-rel-self (best published probe) | +0.086 [+0.043, +0.131] | +0.027 [+0.012, +0.042] | +0.049 [+0.030, +0.067] |
+| RT-self - RT-ds | +0.012 [-0.004, +0.027] | +0.004 [-0.003, +0.011] | +0.007 [-0.001, +0.014] |
+| RT-zs - RP-rel-ds | +0.018 [-0.037, +0.087] | +0.032 [+0.016, +0.048] | +0.027 [+0.005, +0.054] |
+| RT-ds - RT-zs | +0.066 [+0.025, +0.099] | +0.019 [+0.010, +0.027] | +0.036 [+0.019, +0.050] |
+
+The released DS checkpoint run with the future masked at inference (RP-rel-ds-masked:
+.524 / .612 / .283 / .793 / .813 / .790 / .346 / .440, overall .575) scores 0.007
+[0.001, 0.012] below the unmasked release overall (ID +0.015 [+0.002, +0.028], OOD
++0.002 [-0.000, +0.004]).
+
+Secondary metrics, eight-set means: AUROC RP-rel-ds 0.804, RP-rel-self 0.814, RP-ds
+0.808, RPc-ds 0.804, RP-self 0.808, RPc-self 0.801, RT-zs 0.812, RT-ds 0.848, RT-self
+0.850. F1 at the validation threshold: RP-ds 0.554, RPc-ds 0.554, RP-self 0.532,
+RPc-self 0.532, RT-zs 0.586, RT-ds 0.620, RT-self 0.603 (RP-rel-ds 0.558 and
+RP-rel-self 0.572, but the released checkpoints trained on our validation problems).
+Oracle F1: 0.591, 0.605, 0.594, 0.586, 0.594, 0.582, 0.607, 0.640, 0.640 in the same
+order as AUROC. Always-positive F1: 0.403. Per set:
+
+| set (always-positive F1) | metric | RP-rel-ds | RP-rel-self | RP-ds | RPc-ds | RP-self | RPc-self | RT-zs | RT-ds | RT-self |
+|---|---|---|---|---|---|---|---|---|---|---|
+| MATH (0.277) | AUROC | 0.867 | 0.865 | 0.871 | 0.871 | 0.868 | 0.862 | 0.845 | 0.888 | 0.891 |
+| | val F1 | 0.556 | 0.555 | 0.561 | 0.553 | 0.566 | 0.531 | 0.557 | 0.602 | 0.602 |
+| | oracle F1 | 0.560 | 0.575 | 0.568 | 0.568 | 0.578 | 0.565 | 0.567 | 0.610 | 0.615 |
+| GSM8K (0.158) | AUROC | 0.907 | 0.944 | 0.909 | 0.891 | 0.917 | 0.908 | 0.865 | 0.936 | 0.950 |
+| | val F1 | 0.564 | 0.652 | 0.523 | 0.515 | 0.445 | 0.463 | 0.543 | 0.649 | 0.639 |
+| | oracle F1 | 0.624 | 0.660 | 0.633 | 0.600 | 0.593 | 0.565 | 0.557 | 0.663 | 0.663 |
+| ProofNet (0.187) | AUROC | 0.745 | 0.718 | 0.723 | 0.733 | 0.716 | 0.713 | 0.802 | 0.817 | 0.811 |
+| | val F1 | 0.333 | 0.305 | 0.304 | 0.304 | 0.296 | 0.289 | 0.409 | 0.379 | 0.386 |
+| | oracle F1 | 0.362 | 0.316 | 0.323 | 0.335 | 0.327 | 0.316 | 0.450 | 0.441 | 0.446 |
+| Trips (0.693) | AUROC | 0.798 | 0.803 | 0.801 | 0.811 | 0.801 | 0.803 | 0.788 | 0.817 | 0.820 |
+| | val F1 | 0.762 | 0.723 | 0.761 | 0.756 | 0.747 | 0.746 | 0.747 | 0.768 | 0.770 |
+| | oracle F1 | 0.770 | 0.771 | 0.771 | 0.778 | 0.768 | 0.774 | 0.750 | 0.778 | 0.781 |
+| Meetings (0.743) | AUROC | 0.760 | 0.764 | 0.781 | 0.760 | 0.772 | 0.749 | 0.736 | 0.795 | 0.808 |
+| | val F1 | 0.759 | 0.746 | 0.763 | 0.754 | 0.754 | 0.749 | 0.718 | 0.789 | 0.792 |
+| | oracle F1 | 0.774 | 0.783 | 0.784 | 0.778 | 0.781 | 0.770 | 0.750 | 0.790 | 0.795 |
+| Calendar (0.644) | AUROC | 0.816 | 0.807 | 0.833 | 0.839 | 0.815 | 0.817 | 0.824 | 0.836 | 0.817 |
+| | val F1 | 0.739 | 0.729 | 0.757 | 0.752 | 0.746 | 0.731 | 0.750 | 0.749 | 0.740 |
+| | oracle F1 | 0.746 | 0.734 | 0.762 | 0.763 | 0.749 | 0.739 | 0.756 | 0.757 | 0.744 |
+| StrategyQA (0.318) | AUROC | 0.711 | 0.738 | 0.707 | 0.706 | 0.712 | 0.706 | 0.771 | 0.810 | 0.813 |
+| | val F1 | 0.346 | 0.407 | 0.357 | 0.398 | 0.313 | 0.356 | 0.436 | 0.486 | 0.404 |
+| | oracle F1 | 0.430 | 0.440 | 0.422 | 0.422 | 0.427 | 0.419 | 0.483 | 0.521 | 0.511 |
+| ScienceQA (0.204) | AUROC | 0.830 | 0.875 | 0.843 | 0.818 | 0.861 | 0.849 | 0.866 | 0.883 | 0.893 |
+| | val F1 | 0.403 | 0.458 | 0.408 | 0.403 | 0.392 | 0.389 | 0.530 | 0.541 | 0.495 |
+| | oracle F1 | 0.462 | 0.564 | 0.484 | 0.447 | 0.526 | 0.510 | 0.541 | 0.558 | 0.564 |
+
+**Results: MATH without PRM800K problems.** Dropping the 430 MATH test traces whose
+problem is in PRM800K's human-labeled set changes the MATH column to RP-AL 0.505,
+RP-rel-ds 0.548, RP-rel-self 0.592, RP-ds 0.593, RPc-ds 0.597, RP-self 0.562, RPc-self
+0.543, RT-zs 0.610, RT-ds 0.649, RT-self 0.650, and the overall to 0.556, 0.584, 0.608,
+0.593, 0.588, 0.586, 0.576, 0.613, 0.650, 0.657. Paired deltas, ID / OOD / overall:
+
+| comparison | ID | OOD | overall |
+|---|---|---|---|
+| RT-ds - RP-ds | +0.089 [+0.047, +0.131] | +0.037 [+0.024, +0.052] | +0.056 [+0.039, +0.075] |
+| RT-zs - RP-rel-ds | +0.024 [-0.025, +0.094] | +0.032 [+0.016, +0.048] | +0.029 [+0.008, +0.057] |
+| RT-zs - RP-rel-self | +0.008 [-0.053, +0.074] | +0.004 [-0.010, +0.019] | +0.005 [-0.018, +0.031] |
+| RT-ds - RT-zs | +0.067 [+0.023, +0.106] | +0.019 [+0.010, +0.028] | +0.037 [+0.019, +0.052] |
+
+**Results: ProcessBench.** calib-20 F1_PB, steps in ReProbe layout:
+
+| arm | per seed | mean | GSM8K | MATH | OlympiadBench | Omni-MATH |
+|---|---|---|---|---|---|---|
+| RP-ds | 0.535 / 0.539 / 0.543 | 0.539 | 0.612 | 0.570 | 0.500 | 0.474 |
+| RPc-ds | 0.565 / 0.553 / 0.536 | 0.551 | 0.615 | 0.590 | 0.505 | 0.495 |
+| RP-self | 0.551 / 0.547 / 0.565 | 0.554 | 0.615 | 0.570 | 0.523 | 0.509 |
+| RPc-self | 0.553 / 0.576 / 0.579 | 0.569 | 0.650 | 0.611 | 0.508 | 0.508 |
+| RP-rel-ds | 0.570 | 0.570 | 0.650 | 0.571 | 0.534 | 0.525 |
+| RP-rel-self | 0.541 | 0.541 | 0.616 | 0.544 | 0.495 | 0.510 |
+| RT-zs | 0.655 / 0.653 / 0.650 | 0.652 | 0.711 | 0.681 | 0.611 | 0.607 |
+| **RT-ds** | 0.656 / 0.652 | **0.654** | 0.718 | 0.684 | 0.614 | 0.600 |
+| RT-self | 0.641 / 0.627 / 0.623 | 0.630 | 0.667 | 0.659 | 0.599 | 0.597 |
+
+The released checkpoints trained on the 752 ProcessBench-overlap problems; the
+retrained arms did not. The released DS checkpoint with the future masked at inference
+scores 0.575 (-0.005 [-0.016, +0.006] against unmasked).
+
+| comparison | delta | 95% CI | share <= 0 |
+|---|---|---|---|
+| RT-ds - RP-ds | +0.115 | [+0.095, +0.135] | 0.000 |
+| RT-ds - RPc-ds | +0.103 | [+0.083, +0.122] | 0.000 |
+| RPc-ds - RP-ds | +0.013 | [+0.001, +0.024] | 0.010 |
+| RT-self - RP-self | +0.076 | [+0.057, +0.096] | 0.000 |
+| RT-self - RPc-self | +0.061 | [+0.042, +0.081] | 0.000 |
+| RPc-self - RP-self | +0.015 | [+0.004, +0.027] | 0.040 |
+| RT-ds - RT-zs | +0.002 | [-0.012, +0.015] | 0.405 |
+| RT-ds - RT-self | +0.024 | [+0.012, +0.035] | 0.000 |
+| RT-zs - RP-rel-ds | +0.082 | [+0.061, +0.104] | 0.000 |
+| RT-self - RP-rel-self | +0.089 | [+0.068, +0.111] | 0.000 |
+
+**Results: best-of-N on ReProbe's released pools (reprobe_comparison_v2, B1).** Every
+candidate of five released Qwen3-8B pools scored by every arm; trace score = the
+largest step P(incorrect) (ReProbe's minimum-step rule); the first N candidates per
+question, N = 10 (5 for Calendar); questions MATH 728, GSM8K 1,019, StrategyQA 500,
+ScienceQA 500, Calendar 200. Grading is ours (`src/eval/reprobe_bon_grade.py`): GSM8K
+numeric match, MATH with `src/eval/math_grade.py`, StrategyQA yes/no, ScienceQA option
+match, Calendar from the gold solution; no answer on 2.6%, 0.1%, 2.8%, 2.0% and 2.5%
+of candidates. Gate D0 fails as anticipated: our pass@1 is MATH 68.6 against Table 3's
+92.4, GSM8K 92.0 against 95.6, StrategyQA 71.8 against 86.8, ScienceQA 88.2 against
+92.7, Calendar 26.7 against 23.5 (the paper grades with an LLM judge). Best-of-N is
+therefore compared within our harness only. Accuracy (%):
+
+| arm | MATH | GSM8K | StrategyQA | ScienceQA | Calendar | mean |
+|---|---|---|---|---|---|---|
+| pass@1 | 68.6 | 92.0 | 71.8 | 88.2 | 26.7 | 69.5 |
+| pass@N | 85.9 | 97.2 | 89.2 | 96.8 | 55.5 | 84.9 |
+| majority | 76.1 | 94.1 | 74.4 | 89.8 | 30.5 | 73.0 |
+| RT-self | 76.4 | 95.0 | 72.1 | 91.3 | 27.3 | 72.4 |
+| RT-ds | 76.9 | 95.2 | 71.3 | 90.2 | 27.5 | 72.2 |
+| RT-zs | 76.1 | 95.2 | 71.3 | 91.1 | 27.0 | 72.1 |
+| RP-rel-self | 76.1 | 95.2 | 72.2 | 91.4 | 29.5 | 72.9 |
+| RP-rel-ds | 76.5 | 94.9 | 71.4 | 90.6 | 27.5 | 72.2 |
+| RP-self | 75.1 | 95.0 | 73.1 | 90.7 | 28.5 | 72.5 |
+| RP-ds | 74.8 | 94.9 | 73.6 | 90.3 | 30.0 | 72.7 |
+| RP-AL (stored) | 74.2 | 94.0 | 71.6 | 86.4 | 31.0 | 71.4 |
+| Qwen2.5-Math-PRM-7B | 79.1 | 95.9 | 72.0 | 90.4 | 28.5 | 73.2 |
+| Qwen2.5-Math-7B-PRM800K | 76.5 | 95.2 | 71.2 | 89.6 | 26.0 | 71.7 |
+| Universal-PRM | 77.9 | 95.7 | 71.8 | 89.2 | 25.5 | 72.0 |
+| Math-Shepherd | 73.4 | 94.4 | 74.2 | 89.8 | 27.0 | 71.8 |
+| RLHFlow-DeepSeek | 69.1 | 92.7 | 73.2 | 89.8 | 31.5 | 71.3 |
+| RLHFlow-Mistral | 70.1 | 94.1 | 72.6 | 89.6 | 29.0 | 71.1 |
+
+Within-question AUROC (a correct candidate scores below an incorrect one):
+
+| arm | MATH | GSM8K | StrategyQA | ScienceQA | Calendar | mean |
+|---|---|---|---|---|---|---|
+| RT-self | 0.742 | 0.805 | 0.545 | 0.711 | 0.521 | 0.665 |
+| RT-ds | 0.747 | 0.811 | 0.508 | 0.699 | 0.513 | 0.656 |
+| RT-zs | 0.743 | 0.787 | 0.492 | 0.686 | 0.501 | 0.642 |
+| RP-rel-self | 0.738 | 0.815 | 0.527 | 0.689 | 0.524 | 0.659 |
+| RP-rel-ds | 0.743 | 0.769 | 0.513 | 0.666 | 0.513 | 0.641 |
+| RP-self | 0.720 | 0.811 | 0.544 | 0.682 | 0.530 | 0.658 |
+| RP-ds | 0.731 | 0.800 | 0.539 | 0.688 | 0.536 | 0.659 |
+| RP-AL (stored) | 0.616 | 0.677 | 0.471 | 0.481 | 0.559 | 0.561 |
+| Qwen2.5-Math-PRM-7B | 0.797 | 0.879 | 0.479 | 0.600 | 0.513 | 0.654 |
+| Qwen2.5-Math-7B-PRM800K | 0.762 | 0.821 | 0.484 | 0.641 | 0.485 | 0.639 |
+| Universal-PRM | 0.755 | 0.834 | 0.485 | 0.610 | 0.435 | 0.624 |
+| Math-Shepherd | 0.650 | 0.747 | 0.616 | 0.676 | 0.544 | 0.647 |
+| RLHFlow-DeepSeek | 0.551 | 0.612 | 0.523 | 0.587 | 0.588 | 0.572 |
+| RLHFlow-Mistral | 0.581 | 0.730 | 0.518 | 0.681 | 0.600 | 0.622 |
+
+Paired bootstrap over questions (2,000 resamples), accuracy points:
+
+| comparison | MATH | GSM8K | StrategyQA | ScienceQA | Calendar | mean |
+|---|---|---|---|---|---|---|
+| RT-self - RP-rel-self | +0.3 [-1.2, +1.8] | -0.2 [-0.8, +0.4] | -0.1 [-2.2, +2.1] | -0.1 [-1.7, +1.6] | -2.2 [-5.5, +1.0] | -0.5 [-1.4, +0.4] |
+| RT-self - RP-self | +1.3 [+0.1, +2.6] | -0.0 [-0.7, +0.7] | -0.9 [-2.9, +1.1] | +0.6 [-0.7, +2.1] | -1.2 [-4.5, +1.8] | -0.1 [-0.9, +0.8] |
+| RT-ds - RP-ds | +2.1 [+0.7, +3.5] | +0.3 [-0.3, +1.0] | -2.3 [-4.4, -0.4] | -0.1 [-1.5, +1.3] | -2.5 [-5.5, +0.3] | -0.5 [-1.4, +0.3] |
+| RT-ds - RP-rel-ds | +0.3 [-1.2, +2.1] | +0.3 [-0.4, +1.1] | -0.1 [-2.4, +2.3] | -0.4 [-1.9, +1.2] | +0.0 [-3.8, +3.8] | +0.0 [-1.0, +1.1] |
+| RT-self - PRM-7B | -2.7 [-4.8, -0.8] | -0.9 [-1.6, -0.1] | +0.1 [-2.3, +2.6] | +0.9 [-0.7, +2.5] | -1.2 [-5.8, +3.5] | -0.8 [-2.0, +0.4] |
+| RT-self - majority | +0.3 [-1.9, +2.3] | +0.9 [-0.1, +1.9] | -2.3 [-4.6, +0.1] | +1.5 [-0.1, +3.2] | -3.2 [-8.3, +2.5] | -0.6 [-1.9, +0.7] |
+| RP-rel-self - majority | +0.0 [-2.2, +2.2] | +1.1 [+0.3, +2.0] | -2.2 [-4.8, +0.2] | +1.6 [-0.4, +3.8] | -1.0 [-7.0, +5.0] | -0.1 [-1.6, +1.4] |
+| PRM-7B - majority | +3.0 [+1.0, +5.1] | +1.8 [+0.7, +2.7] | -2.4 [-5.2, +0.4] | +0.6 [-1.2, +2.4] | -2.0 [-8.0, +4.0] | +0.2 [-1.2, +1.7] |
+| RT-zs - RP-rel-ds | -0.5 [-2.0, +1.1] | +0.3 [-0.4, +1.0] | -0.1 [-2.3, +2.0] | +0.5 [-1.2, +2.1] | -0.5 [-5.0, +4.2] | -0.1 [-1.2, +1.0] |
+
+**Interpretation.** On ReProbe's own benchmark and training data, with ReProbe's own
+labels, the read token beats ReProbe. With DeepSeek-R1 labels RT-ds leads the retrained
+ReProbe by +0.055 overall PR-AUC [+0.039, +0.074], the released checkpoint by +0.063,
+and the gain holds on both halves (ID +0.085, OOD +0.037). With self labels RT-self leads
+the retrained ReProbe by +0.070 and the best published probe (RP-rel-self, .603) by
++0.049 [+0.030, +0.067]. The read token sees only the trace up to the step and trains
+26x fewer parameters; ReProbe, as released, sees the whole trace. That future access
+buys ReProbe almost nothing: masking it moves the retrained probe by -0.005 [-0.015,
++0.003] and the release by -0.007, in line with §21.16 and §21.17. ReProbe's gain over
+Attn+Logit therefore comes from hidden states, not from the future it can see.
+
+The read token's lead is largest where ReProbe is weakest: ProofNet (+0.121 PR-AUC
+RT-ds over RP-ds) and StrategyQA (+0.127), with AUROC 0.817 and 0.810 against 0.723 and
+0.707. On the three planning sets, where 47% to 59% of steps are incorrect, the
+hidden-state arms stay close (PR-AUC Trips 0.793 to 0.823, Meetings 0.813 to 0.855,
+Calendar 0.784 to 0.816).
+
+Label source matters little to the read token: self minus DS is +0.007 [-0.001,
++0.014] on PR-AUC. The read token trained on PRM800K human labels in a different layout
+(RT-zs) already beats the released DS probe on the OOD sets (+0.032) and is level with
+the released self probe (+0.005 [-0.018, +0.031] with the PRM800K MATH problems
+removed). Retraining on ReProbe's data adds +0.036, most of it in-domain.
+
+ReProbe's labels transfer to ProcessBench's human first-error labels for the read
+token: RT-ds reaches 0.654 calib-20, level with the PRM800K-trained tokens read in the
+same layout (RT-zs 0.652, +0.002 [-0.012, +0.015]) and with RTH-ICS in its own chat
+layout (0.651, §21.41). The same data gives ReProbe 0.539 (RT-ds +0.115 [+0.095,
++0.135]). On ProcessBench, unlike PR-AUC, masking the future helps ReProbe (+0.013 DS,
++0.015 self), and self labels transfer worse for the read token (RT-ds - RT-self +0.024).
+
+Better step detection does not yet buy better answers. On the released best-of-N pools,
+under our grading, every verifier's mean accuracy falls between 71.1 and 73.2 and none
+beats majority vote (73.0) with a CI above 0: RT-self 72.4, RP-rel-self 72.9, Qwen2.5-Math-PRM-7B 73.2. The read
+token ranks candidates within a question as well as any arm (RT-self mean AUROC 0.665,
+the highest), but StrategyQA and Calendar sit near chance for every verifier, and on
+MATH and GSM8K Qwen2.5-Math-PRM-7B leads (0.797 and 0.879 against 0.742 and 0.805 for
+RT-self; best-of-N -2.7 [-4.8, -0.8] and -0.9 [-1.6, -0.1] points).
+
+**Status of reprobe_comparison_v2.** Part A trains RP and RT on Phi-4 (`$R2/phi4`,
+Qwen3-8B labels on Phi-4 replies; the read token's runs are done, ReProbe's are
+running in TamIA 656071) and Qwen3-32B (weights and test sets being prepared). Facts
+checked on the released files so far: the Qwen3-32B managers reproduce Table 5 exactly
+(stored AP .676 / .535 / .682 / .752 / .698 / .734 / .303 / .302), but their traces use
+the structured non-thinking prompt, not native thinking as the paper states, and the
+table swaps Meetings with Calendar and StrategyQA with ScienceQA. Table 5's GSM8K PRM
+column does not match the stored PRM scores (Qwen2.5-Math-PRM-7B .930 in the table, .552
+stored; Universal-PRM .903 against .413; Qwen2.5-Math-7B-PRM800K .894 against .493), so
+Qwen2.5-Math-PRM-7B's overall on the released data is .566, below ReProbe's .585, not
+.613 above it. The Phi-4 managers reproduce Table 9's Attn+Logit numbers on its five
+labeled sets (.404 / .340 / .155 / .347 / .347). Part B2, beam search with B = 5 and
+N = 5 against the released ReProbe and a random-choice control, is running in TamIA
+656295.
+
+**Next step.** Finish v2 Part A on Phi-4, then Qwen3-32B, where the paper's own probe
+trails a 7B PRM in Table 5; read B2 beam search against the random-choice control.
+
+Outputs: `$R = /project/aip-azouaq/dchikhi/cot_mech/reprobe_cmp_v1`. Test sets and
+splits in `$R/data/`; scores in `$R/runs/{rp,rt,released}/`; step-detection,
+MATH-clean, best-of-N and ProcessBench analyses with RT-ds on seeds 0 and 2 in
+`$R/analysis_rtds02/` (`nopb/`, `math_clean/`, `bon/`, `pb_point.json`, `pb_boot.json`,
+`seed_metrics.json`); the other arms' tables in `$R/analysis_nopb/`,
+`$R/analysis_math_clean/`, `$R/analysis_relself/`, `$R/analysis_s1/` and
+`$R/bon/analysis/`. v2: `$R2 = /project/aip-azouaq/dchikhi/cot_mech/reprobe_cmp_v2`.
+
 ---
 
 
@@ -6554,6 +7063,18 @@ and RTH under the official ProcessBench evaluation.
 ---
 
 ## 24. Next Steps
+
+*Addendum 2026-10-30 (§21.42).* On ReProbe's benchmark with matched data, the read
+token beats ReProbe on step PR-AUC (+0.055 DS labels, +0.070 self labels) and on
+ProcessBench (+0.115 calib-20), with 26x fewer parameters and no access to later steps.
+Best-of-N on the released pools does not separate the verifiers. Next: reprobe_comparison_v2
+on Phi-4 and Qwen3-32B, and beam search against a random-choice control.
+
+*Addendum 2026-10-28 (§21.41).* The inline read token with chained reads and a step
+marker (RTH-ICS) reaches 0.651 calib-20, equals RTH on answer selection, and reads from
+the generation cache 2.5x (one trajectory) to 8x (10 candidates) faster than the PRM.
+Next: the online read (append, read, drop during generation) checked against the
+offline scores on 50 traces, then step rejection with it.
 
 *Addendum 2026-10-26 (§21.40).* RTH, the read token's own linear head, is the
 method carried forward: 0.656 calib-20, level with the PRM states, ahead of DRV.

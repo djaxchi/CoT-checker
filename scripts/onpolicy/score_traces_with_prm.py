@@ -115,6 +115,9 @@ def main() -> None:
                         "same n_steps per trace")
     p.add_argument("--orientation_traces", type=int, default=20,
                    help="traces per class used for the sign gate before scoring starts")
+    p.add_argument("--orientation_metric", choices=["mean", "worst"], default="mean",
+                   help="per-trace P(correct) for the gate: mean over steps, or the worst step "
+                        "(a weak PRM's mean step score can tie across classes on easy pools)")
     p.add_argument("--orientation_scan", type=int, default=3000,
                    help="most traces read while collecting the gate's two classes")
     p.add_argument("--max_traces", type=int, default=0)
@@ -167,14 +170,15 @@ def main() -> None:
         steps = split_into_steps(r["solution"])
         if not steps:
             continue
-        m = sum(score_one(model, tok, r["problem"], steps, device)) / len(steps)
+        ps = score_one(model, tok, r["problem"], steps, device)
+        m = min(ps) if a.orientation_metric == "worst" else sum(ps) / len(ps)
         (pos if r["correct"] else neg).append(m)
         if len(pos) >= a.orientation_traces and len(neg) >= a.orientation_traces:
             break
     if not pos or not neg:
         sys.exit("[prm] orientation gate needs both correct and incorrect traces")
     mp, mn = sum(pos) / len(pos), sum(neg) / len(neg)
-    print(f"[prm] orientation: mean P(correct) {mp:.4f} on {len(pos)} correct traces "
+    print(f"[prm] orientation ({a.orientation_metric} step): mean P(correct) {mp:.4f} on {len(pos)} correct traces "
           f"vs {mn:.4f} on {len(neg)} incorrect", flush=True)
     if mp <= mn:
         sys.exit("[prm] FAILED: the PRM does not rate correct traces higher. "
@@ -217,7 +221,7 @@ def main() -> None:
     (a.out.parent / f"{a.out.stem}_manifest.json").write_text(json.dumps({
         "prm": a.prm_name_or_path, "cell": a.cell_name, "n_traces": len(out),
         "score_schema": "suspicion_probability_and_logit_v1", "softmax_dtype": "float32",
-        "orientation": {"mean_correct": mp, "mean_incorrect": mn},
+        "orientation": {"metric": a.orientation_metric, "mean_correct": mp, "mean_incorrect": mn},
         "segmentation_mismatch": mismatch,
         "shard_idx": a.shard_idx, "num_shards": a.num_shards,
         "created_at": datetime.now(timezone.utc).isoformat(),

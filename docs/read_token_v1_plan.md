@@ -619,6 +619,193 @@ Fused reads against the Hugging Face read over 7,078 reads: P(incorrect) differe
 0.0018, max 0.017; the Hugging Face read against its own uncached reference: mean 0.0020,
 max 0.063, so the fast path sits inside bf16 kernel noise.
 
+## Stage I: spending generation compute with the online read, simulated (added 2026-10-28, before any run)
+
+**Question.** The read token scores each step as it is written for about 0.27 ms
+(H4). Can that score save generation tokens or buy accuracy at a fixed token
+budget, where picking the best of N finished traces (H3, §21.13) did not?
+
+**Data.** The saved Instruct pools (§21.13, regraded): T = 1.0 and T = 0.7, MATH-500
+(500 problems) and GSM8K (1,319), 10 trajectories per problem, treated as i.i.d.
+draws. Step scores (P(incorrect)) from RTH-ICS seed 1 (H3's pick), RTH-IC seed 0, RTH
+and the PRM; per-token confidence and step token spans from the teacher-forced
+DeepConf pass (`encode_token_confidence.py`, `tts_instruct_v1`, `tts_instruct_t07_v1`).
+A step's score is available once its last token is written; every scorer is causal.
+Votes use `answer_key`; a key is correct if its trajectories are.
+
+**Split.** Problems split in half by a fixed hash: exploratory (thresholds, operating
+points, the confidence rule's orientation and window) and confirmatory (every reported
+number). Order effects averaged over 50 random trajectory orders per problem;
+intervals from a paired bootstrap over confirmatory problems (1,000 resamples).
+
+**A1, early pruning.** Trajectories are drawn in order. A drawn trajectory is killed at
+the first step whose running worst score exceeds tau (its tokens up to that step are
+spent, its answer is lost) or runs to the end (all its tokens spent). Drawing stops
+after K completed trajectories or when the 10 are used; the answer is the majority over
+completed ones (none completed: counted wrong). Baseline: majority over the first n
+completed draws with no pruning (n = 1..10). The DeepConf competitor kills at the first
+token whose running group confidence (window 32 or 64 tokens, picked on exploratory)
+falls below its threshold, checked at every token. An oracle that kills every wrong
+trajectory at its first step bounds the gain.
+
+  Operating points: for n in {4, 10}, the (tau, K) with the best exploratory accuracy
+  among those whose exploratory mean tokens per problem stay at or under majority@n's.
+  Primary readings, confirmatory, RTH-ICS:
+  * Accuracy at matched budget: accuracy minus majority@n's, with its tokens <= majority@n's.
+  * Tokens at matched accuracy: the cheapest exploratory point whose accuracy reaches
+    majority@10's; its confirmatory token saving and accuracy difference.
+  * Against the competitors: the same rows for the PRM, RTH and DeepConf, and the
+    paired difference RTH-ICS minus each.
+
+**A2, adaptive N.** Sample until the leading answer is safe, then stop. Baseline:
+adaptive consistency (stop when the leading answer's vote share among completed draws
+reaches a threshold after at least 2 draws). Verifier variant: each completed vote
+weighted by 1 minus its worst step score, same stopping rule on weighted shares; plus
+A1's pruning inside. Reported as accuracy against mean tokens, thresholds swept;
+operating point matched to majority@10 accuracy as in A1.
+
+**A3, abstention.** Selective accuracy when the system may decline. Confidence of the
+majority@10 answer: vote share (baseline), DeepConf confidence of its supporting
+traces, and 1 minus the mean worst step score of its supporting traces (verifier).
+Also single-trace abstention (N = 1): worst step score against DeepConf confidence.
+Reported: accuracy at 50% and 80% coverage and the area under the risk-coverage curve.
+
+**Prespecified readings.**
+* A1 GO for an online run: RTH-ICS saves >= 20% of majority@10's tokens at matched
+  accuracy on the confirmatory half with the saving's 95% CI above 0, and is not worse
+  than DeepConf by more than 2 accuracy points at matched tokens.
+* A1 accuracy gain: a matched-budget accuracy gain whose CI excludes 0 is reported as
+  such; otherwise "saves compute, no accuracy gain".
+* A3 is reported as is: the read token helps abstention if its area under the
+  risk-coverage curve beats vote share's with the CI excluding 0.
+* All pools and datasets reported; MATH-500 at T = 1.0 is primary (the H4 timing pool).
+
+**Script.** `scripts/analysis/online_compute_sim.py`, local, no GPU.
+
+**Result (2026-10-28, `results/read_token_v1/online_sim/`, log `results/read_token_v1/online_sim.log`).**
+Confirmatory halves: 255 MATH-500 and 651 GSM8K problems per pool. Within-problem AUROC
+of the worst step for a correct trajectory (confirmatory): MATH-500 T=1.0 RTH-ICS 0.698,
+RTH 0.710, PRM 0.755, DeepConf 0.612 (window 32, higher = confident, picked on
+exploratory); GSM8K T=1.0 0.726 / 0.710 / 0.845 / 0.592.
+
+A1, exploratory-selected operating points, confirmatory accuracy minus majority [95% CI]
+and token saving:
+
+| cell | scorer | at majority@4's budget | at majority@10's accuracy |
+|---|---|---|---|
+| MATH-500 T=1.0 (primary) | RTH-ICS | +0.0005 [-0.006, +0.006], saves 13% | no pruning selected (0%) |
+| | PRM | no pruning selected | +0.002, saves 1% |
+| | DeepConf | no pruning selected | no pruning selected |
+| | oracle | +0.075 [+0.051, +0.102] | +0.058, saves 91% |
+| GSM8K T=1.0 | RTH-ICS | -0.0001, saves 20% | -0.006 [-0.014, +0.002], saves 58% |
+| | PRM | +0.013 [+0.005, +0.021], saves 19% | +0.002, saves 89% |
+| MATH-500 T=0.7 | RTH-ICS | +0.003 [-0.006, +0.012], saves 9% | -0.001 [-0.016, +0.015], saves 44% |
+| | PRM | +0.007 [-0.006, +0.020], saves 17% | no pruning selected |
+| GSM8K T=0.7 | RTH-ICS | -0.008 [-0.016, -0.001], saves 20% | no pruning selected |
+| | PRM | +0.013 [+0.004, +0.022], saves 20% | +0.011 [+0.002, +0.022], saves 48% |
+
+Most of the matched-accuracy savings come from voting fewer trajectories (majority@4 is
+within 0.1 to 1.7 points of majority@10), not from pruning. Reading: A1 NO-GO on the
+primary cell (no saving at majority@10's accuracy); the PRM is the better pruner on
+GSM8K (+1.3 points at majority@4's budget); the oracle shows the headroom the detector
+leaves (+3.2 to +9.0 points at matched budget).
+
+A2 (descriptive, upper envelope on confirmatory): verifier-weighted adaptive N beats
+adaptive consistency by about 1 point at majority@4's budget on MATH-500 (RTH-ICS
+T=0.7 +2.1 against consistency +1.1 over majority@4) and the PRM leads on GSM8K.
+
+A3, single-trace abstention (N = 1), area under the risk-coverage curve, confirmatory
+(lower is better; [CI] of other minus RTH-ICS):
+
+| cell | RTH-ICS | PRM | DeepConf | RTH |
+|---|---|---|---|---|
+| MATH-500 T=1.0 | **0.0336** | 0.0407 [+0.0007, +0.0137] | 0.0438 [+0.0058, +0.0162] | 0.0375 [-0.0001, +0.0091] |
+| MATH-500 T=0.7 | **0.0271** | 0.0351 [+0.0038, +0.0127] | 0.0436 [+0.0094, +0.0256] | 0.0305 [+0.0008, +0.0071] |
+| GSM8K T=1.0 | 0.0201 | 0.0189 [-0.0081, +0.0041] | 0.0253 [-0.0035, +0.0118] | 0.0245 |
+| GSM8K T=0.7 | 0.0225 | 0.0187 [-0.0117, +0.0030] | 0.0328 [+0.0020, +0.0179] | 0.0288 |
+
+Accuracy at 80% coverage, MATH-500 T=1.0: RTH-ICS 0.938, PRM 0.931, DeepConf 0.924 (all
+answers 0.829). For the majority@10 answer, vote share stays the best confidence on
+MATH-500 T=1.0 (AURC 0.0115 against RTH-ICS 0.0164) and no scorer beats it with a CI
+excluding 0. Reading: the read token is the best single-sample abstention signal on
+MATH-500, ahead of the PRM and DeepConf with CIs excluding 0, and level with the PRM on
+GSM8K.
+
+**Stage I addendum (2026-10-28, exploratory, after the result).** Single-trace abstention
+at a matched answer rate, read token (RTH-ICS seed 1) minus PRM, accuracy on answered
+(confirmatory, bootstrap over problems): MATH-500 T=1.0 +0.012 [+0.004, +0.021] at 90%
+answered, +0.007 [-0.002, +0.022] at 80%; MATH-500 T=0.7 +0.017 [+0.008, +0.026] and
++0.021 [+0.009, +0.032]; GSM8K T=1.0 -0.003 and -0.002 (CIs include 0); GSM8K T=0.7
+-0.009 [-0.016, -0.002] and -0.005. Share of the random-to-oracle AURC gap closed:
+MATH-500 0.885 / 0.922 (read) against 0.839 / 0.870 (PRM); GSM8K 0.777 / 0.770 against
+0.792 / 0.817. Stopping a trace at the first step over tau gives the same decisions as
+abstaining at its end (the running worst only rises) and, at 80% answered, saves 25% of
+MATH-500 T=1.0 tokens (PRM 20%). The prior-shift threshold 0.722 (1 - 0.278, Stage G)
+answers 68.5% at 0.962 on MATH-500 T=1.0 and 94% at 0.947 on GSM8K: an operating point,
+not a comparison (the PRM's scale differs).
+
+## Stage J: the read token against the PRM while the policy generates (plan, frozen before the run)
+
+Both scorers are causal, so the live decisions equal Stage I's simulated ones; what a
+live run adds is the cost: wall-clock, tokens per second, decision latency and memory,
+with the read token riding on the policy's decode call and the PRM as a second model
+extending its own cache step by step.
+
+* Engine (`scripts/live_engine.py`): one layer loop for both models over per-row
+  key/value columns (continuous batching, a finished row refilled from the queue), with
+  column metadata giving read_token_inline's visibility (text never sees a read; read k
+  sees the text through its separator, reads 0..k-1, its marker). The policy's decode
+  calls are CUDA graphs per (slots 1 or 3, 512-column bucket), captured before timing;
+  prefill and PRM calls are eager (the PRM's GPU time is recorded with CUDA events).
+* Arms (`scripts/analysis/live_compare.py`): plain, read, read_stop, prm, prm_stop.
+  Read: a marker and a read slot ride on the decode call that feeds a step's separator.
+  PRM: after that call, the rows that finished a step extend their PRM cache by the
+  step's tokens and `<extra_0>` in one call. Stop arms abstain once the running worst
+  exceeds tau, from Stage I's exploratory half at 80% answered (MATH-500 T=1.0):
+  tau = 0.854 (read), 0.418 (PRM).
+* Data: confirmatory MATH-500 problems, Qwen3-8B chat layout, T = 1.0, top-p 0.95,
+  top-k 50, 4,096-token cap (the instruct_t10 pool's settings). B = 1: 64 problems;
+  B = 16: 255 problems x 2 samples (4 shards, one H100 each). Per-job uniforms, so arms
+  sample the same text unless the logits differ.
+* Checks: pool trajectories replayed through the live path (teacher-forced) against the
+  pool's saved RTH-ICS and PRM scores; the no-stop arms' live scores against offline
+  scoring of the same texts (score_inline; one full PRM forward). Unit tests on tiny
+  models (`tests/test_live_engine.py`): live reads equal `uncached_reference`, the live
+  PRM loop equals one full forward, batched rows and pad slots change nothing.
+* Readings: overhead of read over plain and of prm over plain (wall-clock and tokens
+  per second at B = 1 and 16); the stop arms' wall-clock, tokens and accuracy on
+  answered; decision latency per step; memory (weights + cache bytes). Replay and
+  live-vs-offline differences at the H4 noise floor (P difference mean about 0.002) or
+  the run is not reported.
+
+**Stage J result, first pass (TamIA 652991, 2026-10-29).** Shards 0, 1 and 3 finished;
+shard 2 crashed in its B = 16 PRM arm (a scatter past the PRM cache: pad slots of a
+batched PRM call took columns n + j past the copy's width). Fixed (pad slots write a
+junk column, the PRM cache gets 1,024 more columns of headroom, a row that would not fit
+raises) with a regression test; shard 2 rerun as 653044. Replay against the pool's saved
+scores: read token mean |dP| 0.0016 to 0.0023, PRM 0.0010 to 0.0011, no step-count
+mismatch; live against offline scoring of the same texts: read token 0.0018 to 0.0023,
+PRM 0.0003 to 0.0004. Both inside the noise floor, so the run is reportable.
+
+## Stage K: the read token against its comparison points (added 2026-10-29, the user's choice)
+
+Names on the page: **offline read token** = RTH (verifier template, one pass per step),
+**online read token** = RTH-ICS (inside the policy's trace, during generation).
+Comparison points, every result: the weak PRM (Qwen2.5-Math-7B-PRM800K, fine-tuned on
+PRM800K, published ProcessBench F1 0.565, beaten by our leaderboard), the strong PRM
+(Qwen2.5-Math-PRM-7B), Qwen3-8B's last step token (layer 35, verifier template) and the
+best leaderboard probe (`step_tokens x transformer d512`).
+
+* Weak PRM scored like the strong one: native pass, head calib-20 on ProcessBench
+  (backbone_geometry, as §21.31's gate), step scores on the four Instruct answer pools
+  (score_traces_with_prm.py, segmentation checked against the strong PRM's files).
+* Class views (`scripts/analysis/rep_views.py`): one vector per PRM800K step per
+  candidate (PRMs: separator state, layer 28; Qwen3-8B: last step token, layer 35; best
+  probe: its pooled 512-d embedding, `scripts/analysis/cell_embed.py`; read tokens: final
+  state). PCA (top 2) and shrunk LDA fit on val_5k, applied to test_2k; the same 500 +
+  500 test steps plotted for all; test AUROC of LDA, PC1, PC2, head; d'.
+* Job: `slurm/rep_compare_tamia.sh`. Descriptive, no bar.
+
 ## Code needed
 
 * `scripts/read_token_probe.py`: `--freeze_soft` (embedding excluded from the

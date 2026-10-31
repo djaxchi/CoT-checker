@@ -406,6 +406,9 @@ def main() -> None:
     p.add_argument("--soft_attn", choices=["no_cudnn"], default=None,
                    help="soft-token pass only: SDPA without the cuDNN backend (default: any SDPA backend)")
     p.add_argument("--keep_all", action="store_true", help="encode: also store all m states")
+    p.add_argument("--read_blocks", default="",
+                   help="encode: also store these decoder blocks' outputs at the last read token "
+                        "(pre-norm, offsets included) as read_block<l>; block 34 = hidden_states[35]")
     p.add_argument("--train", type=Path)
     p.add_argument("--n_train", type=int, default=40000)
     p.add_argument("--epochs", type=int, default=1)
@@ -526,12 +529,18 @@ def main() -> None:
             HA = np.zeros((len(items), rt.m, d), np.float16)
             HM = np.zeros((len(items), 1, d), np.float16)
         S = np.full(len(items), np.nan, np.float32)
+        rblocks = [int(x) for x in a.read_blocks.split(",") if x]
+        RB = {l: np.zeros((len(items), 1, d), np.float16) for l in rblocks}
         t0 = time.perf_counter()
         for b in batches([len(toks[i]) for i in keep], a.max_tokens, None):
             rows = [keep[i] for i in b]
+            cap = {l: None for l in rblocks}
             with torch.no_grad():
                 hall = read_all_states(model, rt, [toks[i] for i in rows], pad, dev, grad=False,
-                                       soft_attn=soft_attn)
+                                       soft_attn=soft_attn, capture=cap if rblocks else None)
+            for l in rblocks:
+                RB[l][rows, 0] = cap[l].cpu().numpy()
+            with torch.no_grad():
                 h = reduce_states(rt, hall)
                 s = torch.sigmoid(rt.logit(h)).cpu().numpy()
             H[rows, 0] = h.cpu().numpy()
@@ -540,6 +549,7 @@ def main() -> None:
                 HM[rows, 0] = hall.mean(1).cpu().numpy()
             S[rows] = s
         extra = {"sep_all": HA, "sep_mean": HM} if a.keep_all else {}
+        extra.update({f"read_block{l}": RB[l] for l in rblocks})
         np.savez(a.out / f"{name}.shard0.npz", layers=np.array([-1]),
                  y=np.array([it["label"] for it in items], np.int8),
                  kept=np.isin(np.arange(len(items)), keep), head_p_correct=1 - S, sep=H, **extra)

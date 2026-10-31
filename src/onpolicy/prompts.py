@@ -117,6 +117,23 @@ def reprobe_prompt(question: str) -> str:
             "<|im_start|>assistant\n<think>\n\n</think>\nReasoning Steps:\n")
 
 
+# ReProbe's Phi-4 instruction (from its released Phi-4 managers): the Qwen one plus an
+# example about substeps under the single-line rule.
+REPROBE_INSTRUCTION_PHI4 = REPROBE_INSTRUCTION.replace(
+    "substeps within a step.\n",
+    "substeps within a step.\n    - For example:\n        - Good (One step on a single line): "
+    "\"- Step 3: Multiply 5 by 4 to get 20.\"\n        - Bad (with substeps or line breaks): "
+    "\"- Step 5: Solve the equations of Step 3 and 4\n" + " " * 52 + "- From Step 3: the result is 4\n"
+    + " " * 52 + "- From Step 4: the result is 5\"\n", 1)
+
+
+def reprobe_prompt_phi4(question: str) -> str:
+    """ReProbe's Phi-4 sampling context up to the first step (Phi-4 chat template)."""
+    return ("<|im_start|>system<|im_sep|>You are a helpful AI assistant.<|im_end|>"
+            f"<|im_start|>user<|im_sep|>{REPROBE_INSTRUCTION_PHI4}{question}<|im_end|>"
+            "<|im_start|>assistant<|im_sep|>Reasoning Steps:\n")
+
+
 def generation_prefix(problem: str, prefix: str) -> str:
     """Context the model had at the start of a step, given the steps before it.
 

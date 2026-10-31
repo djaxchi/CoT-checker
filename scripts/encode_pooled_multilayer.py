@@ -58,7 +58,9 @@ def prm800k_items(path: Path, limit: int, seed: int) -> list[dict]:
         rows = [rows[i] for i in pick]
     return [{"uid": r["uid"], "problem": r["problem"], "prefix": r["prefix"],
              "prior_steps": [s for s in r["prefix"].split("\n\n") if s.strip()] if r["prefix"] else [],
-             "step": r["candidate_step"], "label": int(r["label"])} for r in rows]
+             "step": r["candidate_step"], "label": int(r["label"]),
+             # trace fields, when the file carries them (reprobe_comparison_v1 test and PB items)
+             **{k: r[k] for k in ("id", "step_idx", "first_error") if k in r}} for r in rows]
 
 
 def pb_items(path: Path, subset: str) -> list[dict]:

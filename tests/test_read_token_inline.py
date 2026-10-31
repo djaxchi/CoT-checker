@@ -118,6 +118,19 @@ def test_build_sequences_reads_each_item_after_its_separator(monkeypatch):
     assert s["spos"] == [len("<p>"), len("<p>ab\n\n"), len("<p>ab\n\ncd\n\n")]
 
 
+def test_build_sequences_reprobe_layout_reads_after_each_line(monkeypatch):
+    import scripts.read_token_inline as ri
+    monkeypatch.setitem(ri.LAYOUTS, "reprobe", lambda problem: f"<{problem}>")
+    items = [item("p", "", "ab"), item("p", "ab", "cd"), item("p", "ab\ncd", "e")]
+    seqs, alone = build_sequences(CharTok(), items, "reprobe", chain=True)
+    assert alone == 0 and len(seqs) == 1
+    s = seqs[0]
+    text = "<p>ab\ncd\ne\n"
+    assert len(s["ids"]) == len(text)
+    assert s["pos"] == [len("<p>ab\n"), len("<p>ab\ncd\n"), len(text)]
+    assert s["spos"] == [len("<p>"), len("<p>ab\n"), len("<p>ab\ncd\n")]
+
+
 def test_build_sequences_reads_an_item_alone_without_a_token_boundary(monkeypatch):
     import scripts.read_token_inline as ri
     monkeypatch.setitem(ri.LAYOUTS, "chat", lambda problem: f"<{problem}>")
@@ -309,3 +322,14 @@ def test_train_chained_then_encode(tmp_path, monkeypatch):
     ri.main()
     z = np.load(out / "val.shard0.npz")
     assert z["kept"].all() and z["sep"].shape == (8, 1, 32) and np.isfinite(z["head_p_correct"]).all()
+
+
+def test_read_capture_is_the_block_output_the_final_norm_reads():
+    # the last block's output at each read token, offsets included, normed = the returned state
+    model, rt, mk = tiny_model(), deep_token(), marker()
+    cap = {1: None, 2: None}
+    got = inline_read(model, rt, MSEQS, 0, DEV, grad=False, mk=mk, chain=True, capture=cap)
+    assert cap[1].shape == got.shape == cap[2].shape
+    assert torch.allclose(model.model.norm(cap[2]), got, atol=1e-5)
+    assert not torch.allclose(cap[1], cap[2], atol=1e-3)
+    assert not any(l._forward_hooks for l in model.model.layers)

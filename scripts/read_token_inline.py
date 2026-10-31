@@ -67,18 +67,20 @@ from scripts.encode_pooled_multilayer import pb_items, prm800k_items  # noqa: E4
 from scripts.read_token_probe import (  # noqa: E402
     ReadToken, batches, make_optimizer, read_all_states, read_hooks, read_token_from_ckpt,
     soft_kernels, tokenize)
-from src.onpolicy.prompts import chat_prompt  # noqa: E402
+from src.onpolicy.prompts import chat_prompt, reprobe_prompt, reprobe_prompt_phi4  # noqa: E402
 
 SEP = "\n\n"
-LAYOUTS = {"chat": chat_prompt}
+LAYOUTS = {"chat": chat_prompt, "reprobe": reprobe_prompt, "reprobe_phi4": reprobe_prompt_phi4}
+# step separator per layout: ReProbe writes one step per line (reprobe_comparison_v1)
+SEPS = {"chat": SEP, "reprobe": "\n", "reprobe_phi4": "\n"}
 
 
-def item_text(it: dict) -> str:
+def item_text(it: dict, sep: str = SEP) -> str:
     """The item's earlier steps and its step, as they sit in the trajectory."""
-    return (it["prefix"] + SEP if it["prefix"] else "") + it["step"]
+    return (it["prefix"] + sep if it["prefix"] else "") + it["step"]
 
 
-def group_items(items: list[dict]) -> list[dict]:
+def group_items(items: list[dict], sep: str = SEP) -> list[dict]:
     """Sequences {"problem", "text", "members"}: every item in exactly one, riding on
     the longest item of its problem whose text equals it or continues it after SEP."""
     by_problem = defaultdict(list)
@@ -87,10 +89,10 @@ def group_items(items: list[dict]) -> list[dict]:
     out = []
     for problem, idx in by_problem.items():
         seqs: list[dict] = []
-        for i in sorted(idx, key=lambda i: (-len(item_text(items[i])), i)):
-            s = item_text(items[i])
+        for i in sorted(idx, key=lambda i: (-len(item_text(items[i], sep)), i)):
+            s = item_text(items[i], sep)
             for q in seqs:
-                if q["text"] == s or q["text"].startswith(s + SEP):
+                if q["text"] == s or q["text"].startswith(s + sep):
                     q["members"].append(i)
                     break
             else:
@@ -165,11 +167,12 @@ def boundary_at_or_before(ends: dict[int, int], c: int) -> int:
     return ends[max(before)] if before else 0
 
 
-def chain_slots(prompt: str, text: str, ends: dict[int, int], member_pos: list[int]) -> tuple[list[int], list[int]]:
+def chain_slots(prompt: str, text: str, ends: dict[int, int], member_pos: list[int],
+                sep: str = SEP) -> tuple[list[int], list[int]]:
     """A read slot at every step separator of `text` that ends on a token boundary, and at
     every member position: (slot positions, slot step starts), ascending. A slot's step
     starts where the previous slot sits (the first at the end of the prompt)."""
-    seps = {ends[len(prompt) + m.end()] for m in re.finditer(re.escape(SEP), text + SEP)
+    seps = {ends[len(prompt) + m.end()] for m in re.finditer(re.escape(sep), text + sep)
             if len(prompt) + m.end() in ends}
     slots = sorted(seps | set(member_pos))
     first = boundary_at_or_before(ends, len(prompt))
@@ -184,7 +187,7 @@ def build_sequences(tok, items: list[dict], layout: str = "chat", chain: bool = 
     sequence, labelled or not, since a read token there also sees the earlier read tokens.
     Also returns how many items had to be read on their own (no token boundary at their
     separator)."""
-    prompt_of = LAYOUTS[layout]
+    prompt_of, sep = LAYOUTS[layout], SEPS.get(layout, SEP)
     out, alone = [], 0
 
     def finish(prompt, text, ids, ends, pos, spos, members):
@@ -192,22 +195,22 @@ def build_sequences(tok, items: list[dict], layout: str = "chat", chain: bool = 
         pos, spos, members = [pos[o] for o in order], [spos[o] for o in order], [members[o] for o in order]
         if not chain:
             return {"ids": ids, "pos": pos, "spos": spos, "members": members, "slot": list(range(len(pos)))}
-        slots, starts = chain_slots(prompt, text, ends, pos)
+        slots, starts = chain_slots(prompt, text, ends, pos, sep)
         return {"ids": ids, "pos": slots, "spos": starts, "members": members,
                 "slot": [slots.index(q) for q in pos]}
 
-    for g in group_items(items):
+    for g in group_items(items, sep):
         prompt = prompt_of(g["problem"])
-        ids, ends = encode_text(tok, prompt + g["text"] + SEP)
+        ids, ends = encode_text(tok, prompt + g["text"] + sep)
         pos, spos, members = [], [], []
         for i in g["members"]:
             it = items[i]
-            start = len(prompt) + (len(it["prefix"]) + len(SEP) if it["prefix"] else 0)
-            q = ends.get(len(prompt) + len(item_text(it)) + len(SEP))
+            start = len(prompt) + (len(it["prefix"]) + len(sep) if it["prefix"] else 0)
+            q = ends.get(len(prompt) + len(item_text(it, sep)) + len(sep))
             if q is None:
                 alone += 1
-                own, own_ends = encode_text(tok, prompt + item_text(it) + SEP)
-                out.append(finish(prompt, item_text(it), own, own_ends, [len(own)],
+                own, own_ends = encode_text(tok, prompt + item_text(it, sep) + sep)
+                out.append(finish(prompt, item_text(it, sep), own, own_ends, [len(own)],
                                   [boundary_at_or_before(own_ends, start)], [i]))
                 continue
             pos.append(q)
@@ -301,9 +304,10 @@ def text_pass(model, seqs: list[tuple], pad: int, dev, passive: dict | None = No
 
 
 def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str | None = None,
-              mk: StartMarker | None = None) -> torch.Tensor:
+              mk: StartMarker | None = None, capture: dict | None = None) -> torch.Tensor:
     """Every read token (and start marker) over a text_pass cache in one call, (sum of K, d).
-    Appends to the cache."""
+    Appends to the cache. capture: {block: None} to also fill in each listed block's output
+    at every read token (pre-norm, offsets included), (sum of K, d), in the same order."""
     if rt.m != 1:
         raise ValueError("inline reads need an m = 1 read token")
     if lay["marker"] != (mk is not None):
@@ -314,20 +318,27 @@ def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str
         emb = torch.cat([mk.soft.to(model.dtype)[None].expand(B, K, -1), emb], 1)
     with torch.set_grad_enabled(grad), read_hooks(model, rt, n=K), marker_hooks(model, mk, 0, K), \
             soft_kernels(soft_attn):
-        h = model.model(inputs_embeds=emb, attention_mask=lay["mask"], position_ids=lay["pos"],
-                        past_key_values=cache, use_cache=True).last_hidden_state
+        # registered after the offset hooks, so they record the offset-shifted outputs
+        handles = gather_hooks(model, sorted(capture), lay["rows"], lay["cols"], capture) if capture else []
+        try:
+            h = model.model(inputs_embeds=emb, attention_mask=lay["mask"], position_ids=lay["pos"],
+                            past_key_values=cache, use_cache=True).last_hidden_state
+        finally:
+            for hd in handles:
+                hd.remove()
     return h.float()[lay["rows"], lay["cols"]]
 
 
 def inline_read(model, rt: ReadToken, seqs: list[tuple], pad: int, dev, grad: bool,
                 soft_attn: str | None = None, passive: dict | None = None,
-                mk: StartMarker | None = None, chain: bool = False) -> torch.Tensor:
+                mk: StartMarker | None = None, chain: bool = False,
+                capture: dict | None = None) -> torch.Tensor:
     """Final-layer (post-norm) states of every read token, (sum of K, d), row by row
     (text_pass, then read_pass)."""
     if rt.m != 1:
         raise ValueError("inline reads need an m = 1 read token")
     cache, lay = text_pass(model, seqs, pad, dev, passive, marker=mk is not None, chain=chain)
-    return read_pass(model, rt, cache, lay, grad, soft_attn, mk)
+    return read_pass(model, rt, cache, lay, grad, soft_attn, mk, capture)
 
 
 def uncached_reference(model, rt: ReadToken, ids: list[int], pos: list[int], dev,
@@ -426,6 +437,8 @@ def main() -> None:
     p.add_argument("--prm800k", nargs="*", default=[], help="encode: name:path[:limit]")
     p.add_argument("--pb", nargs="*", default=[], help="encode: subset:path")
     p.add_argument("--passive_blocks", default="24,35", help="encode: text-state blocks stored as `passive`")
+    p.add_argument("--read_blocks", default="",
+                   help="encode: read-token block outputs stored as read_block<l> (34 = hidden_states[35])")
     p.add_argument("--ckpt", type=Path, help="encode: read_token.pt (default: OUT/read_token.pt); "
                                              "an RTH token reads inline unchanged (Stage H1)")
     p.add_argument("--out", type=Path, required=True)
@@ -557,15 +570,20 @@ def main() -> None:
         P = np.zeros((len(items), len(pblocks) + 1, d), np.float16)
         S = np.full(len(items), np.nan, np.float32)
         kept = np.zeros(len(items), bool)
+        rblocks = [int(x) for x in a.read_blocks.split(",") if x]
+        RB = {l: np.zeros((len(items), 1, d), np.float16) for l in rblocks}
         for b in seq_batches([len(s["ids"]) for s in seqs], [len(s["members"]) for s in seqs],
                              a.max_tokens, None, None):
             cap = {l: None for l in pblocks}
             cap["final"] = None
+            rcap = {l: None for l in rblocks}
             with torch.no_grad():
                 h = inline_read(model, rt, [row(seqs[i], mk) for i in b], pad, dev,
-                                grad=False, soft_attn=soft_attn, passive=cap, mk=mk, chain=chain)
+                                grad=False, soft_attn=soft_attn, passive=cap, mk=mk, chain=chain,
+                                capture=rcap if rblocks else None)
                 mi = member_index([seqs[i] for i in b], dev)
                 h = h[mi]
+                rcap = {k: v[mi] for k, v in rcap.items()}
                 cap = {k: v[mi] for k, v in cap.items()}
                 s = torch.sigmoid(rt.logit(h)).cpu().numpy()
             if not torch.isfinite(h).all():
@@ -575,12 +593,14 @@ def main() -> None:
             P[rows] = torch.stack([cap[l] for l in pblocks] + [cap["final"]], 1).cpu().numpy()
             S[rows] = s
             kept[rows] = True
+            for l in rblocks:
+                RB[l][rows, 0] = rcap[l].cpu().numpy()
         # one (n, 1, d) array per passive row: every array but `layers` must be per item
         passive = {f"passive_block{l}": P[:, j:j + 1] for j, l in enumerate(pblocks)}
         passive["passive_final"] = P[:, -1:]
         np.savez(a.out / f"{name}.shard0.npz", layers=np.array([-1]),
                  y=np.array([it["label"] for it in items], np.int8), kept=kept,
-                 head_p_correct=1 - S, sep=H, **passive)
+                 head_p_correct=1 - S, sep=H, **passive, **{f"read_block{l}": RB[l] for l in rblocks})
         with open(a.out / f"{name}.shard0.meta.jsonl", "w") as f:
             for it in items:
                 f.write(json.dumps({k: it[k] for k in ("uid", "id", "step_idx", "first_error", "label")

@@ -194,9 +194,9 @@ def main() -> None:
         kind, _, path = rest.partition(":")
         arms[name] = (RTScorer(model, tok, Path(path), dev) if kind == "rt" else
                       RPScorer(model, tok, Path(path), dev) if kind == "rp" else RandomScorer(a.seed))
-    done = set()
-    if a.out.exists():
-        done = {(r["qi"], r["arm"]) for r in map(json.loads, open(a.out))}
+    done = set()  # every (question, arm) already in any output file of this set, shards included
+    for f in a.out.parent.glob(f"{a.set}*.jsonl"):
+        done |= {(r["qi"], r["arm"]) for r in map(json.loads, open(f)) if r.get("set") == a.set}
     a.out.parent.mkdir(parents=True, exist_ok=True)
     with open(a.out, "a") as f:
         for r in qs.to_dict("records"):

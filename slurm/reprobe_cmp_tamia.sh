@@ -29,7 +29,8 @@
 #   LABELS="qwen3 self" HF_MODELS=$SCRATCH/hf_cache STAGE=s2rp sbatch slurm/reprobe_cmp_tamia.sh
 #   (s2rp: RT on GPU3 uses the second label set; s2rt: GPU0-2 the first, GPU3 the second;
 #   with one label set, e.g. Qwen3-32B LABELS=oss: s2rp GPU3 runs the released probe in
-#   $R/released/oss, then RT seed 0; s2rt runs RT seeds 1 and 2 on GPU0-1)
+#   $R/released/oss, then RT seed 0; s2rt runs RT seeds 1 and 2 on GPU0-1). RT_MICRO_TOKENS
+#   splits each optimizer batch for memory (Qwen3-32B: 4000), same batches and loss.
 set -euo pipefail
 STAGE="${STAGE:?s1, s2rp or s2rt}"
 SMOKE="${SMOKE:-0}"
@@ -101,7 +102,7 @@ rt_train() {
     export CUDA_VISIBLE_DEVICES=$1
     python scripts/read_token_inline.py train --model $Q3 --layout $LAYOUT --init_text " correct" --deep \
       --head linear --chain --start_marker --start_deep --train "$D/rt/$2_train.items.jsonl" --n_train 0 \
-      --seed "$3" --lr 3e-3 --soft_attn no_cudnn --out "$L/$name" "${sm[@]}"
+      --seed "$3" --lr 3e-3 --soft_attn no_cudnn --micro_tokens "${RT_MICRO_TOKENS:-0}" --out "$L/$name" "${sm[@]}"
     mkdir -p "$RUN/tokens/$name" && cp "$L/$name/read_token.pt" "$RUN/tokens/$name/"
     rt_encode "$1" "$L/$name/read_token.pt" "$name"
   ) > "$LOGS/$name-$SLURM_JOB_ID.log" 2>&1
@@ -140,17 +141,21 @@ elif [[ "$STAGE" == bon ]]; then
   ( for s in 0 1 2; do rt_encode 3 "$RUN/tokens/rt_${LB}_seed$s/read_token.pt" "rt_${LB}_seed$s"; done
   ) > "$LOGS/bon_rt_b-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
 elif [[ "$STAGE" == beam ]]; then
-  g=0
-  for s in ${BEAM_SETS:-gsm8k math strategyqa scienceqa}; do
+  # BEAM_SHARD=<set> instead splits that set's first BEAM_LIMIT questions over the 4 GPUs
+  g=0; L="${BEAM_LIMIT:-100}"; SETS=(${BEAM_SETS:-gsm8k math strategyqa scienceqa})
+  [[ -z "${BEAM_SHARD:-}" ]] || SETS=("$BEAM_SHARD" "$BEAM_SHARD" "$BEAM_SHARD" "$BEAM_SHARD")
+  for s in "${SETS[@]}"; do
+    if [[ -n "${BEAM_SHARD:-}" ]]; then part=(--offset $((g * L / 4)) --limit $((L / 4))); o="$R/beam/$s.part$g.jsonl"
+    else part=(--limit "$L"); o="$R/beam/$s.jsonl"; fi
     CUDA_VISIBLE_DEVICES=$g python scripts/reprobe_cmp/beam_search.py --pools "$SCRATCH/cot_mech/reprobe_bon/pools" \
-      --set "$s" --limit "${BEAM_LIMIT:-100}" --model $Q3 --out "$R/beam/$s.jsonl" \
+      --set "$s" "${part[@]}" --model $Q3 --out "$o" \
       --arm "rt_${LB}=rt:$RUN/tokens/rt_${LB}_seed0/read_token.pt" "rp_${LB}=rp:$R/released/$LB" random=random \
-      > "$LOGS/beam_$s-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+      > "$LOGS/beam_$s$g-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
     g=$((g + 1))
   done
 elif [[ "$STAGE" == s2rt ]]; then
-  if [[ "$LB" == "$LA" ]]; then  # one label set: seed 0 ran in s2rp
-    for s in 1 2; do rt_train $((s - 1)) "$LA" $s & pids+=($!); done
+  if [[ "$LB" == "$LA" ]]; then  # one label set: seed 0 ran in s2rp (RT_SEEDS overrides)
+    g=0; for s in ${RT_SEEDS:-1 2}; do rt_train $g "$LA" $s & pids+=($!); g=$((g + 1)); done
   else
     for s in 0 1 2; do rt_train $s "$LA" $s & pids+=($!); done
     ( rt_train 3 "$LB" 1; rt_train 3 "$LB" 2 ) & pids+=($!)

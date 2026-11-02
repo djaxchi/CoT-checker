@@ -333,3 +333,78 @@ def test_read_capture_is_the_block_output_the_final_norm_reads():
     assert torch.allclose(model.model.norm(cap[2]), got, atol=1e-5)
     assert not torch.allclose(cap[1], cap[2], atol=1e-3)
     assert not any(l._forward_hooks for l in model.model.layers)
+
+
+def test_micro_chunks_split_by_padded_tokens():
+    from scripts.read_token_inline import micro_chunks
+    assert micro_chunks([3, 4, 5], [10, 10, 10], 0) == [[3, 4, 5]]
+    assert micro_chunks([3, 4, 5], [10, 10, 30], 25) == [[3, 4], [5]]
+    assert micro_chunks([7], [100], 10) == [[7]]
+
+
+def test_parse_sweep():
+    from scripts.read_token_inline import cfg_tag, parse_sweep
+    assert parse_sweep(None, 3e-3, 0.05) == [(3e-3, 0.05)]
+    assert parse_sweep("1e-3:0.05,2e-3:0.2", 3e-3, 0.05) == [(1e-3, 0.05), (2e-3, 0.2)]
+    assert cfg_tag(1e-3, 0.2) == "lr0.001_wu0.2"
+    for bad in ("1e-3:0.05,1e-3:0.05", "0:0.05", "1e-3:1.0"):
+        with pytest.raises(ValueError):
+            parse_sweep(bad, 3e-3, 0.05)
+
+
+def _instep_data(tmp_path):
+    import json
+    rows = [{"uid": f"u{p}{k}", "problem": f"q{p}", "prefix": "\n\n".join(f"s{p}{j}" for j in range(k)),
+             "candidate_step": f"s{p}{k}", "label": (p + k) % 2} for p in range(5) for k in range(3)]
+    data = tmp_path / "items.jsonl"
+    data.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return data
+
+
+def _train_instep(monkeypatch, data, out, *extra):
+    import sys
+
+    import scripts.read_token_inline as ri
+    import scripts.read_token_store as rs
+    monkeypatch.setattr(rs, "load_model", lambda name, dev: (tiny_model(), CliTok()))
+    monkeypatch.setattr(sys, "argv", ["x", "train", "--init_text", "x", "--deep", "--chain", "--start_marker",
+                                      "--start_init_text", "y", "--start_deep", "--train", str(data),
+                                      "--n_train", "0", "--max_tokens", "60", "--out", str(out), *extra])
+    ri.main()
+
+
+def _params(path):
+    ck = torch.load(path, weights_only=False)
+    return [ck["soft"], ck["deep"], ck["start_soft"], ck["start_deep"], *ck["head"].values()]
+
+
+def test_sweep_first_config_is_the_single_run(tmp_path, monkeypatch):
+    data = _instep_data(tmp_path)
+    _train_instep(monkeypatch, data, tmp_path / "single", "--lr", "3e-3", "--warmup", "0.25")
+    _train_instep(monkeypatch, data, tmp_path / "sweep", "--sweep", "3e-3:0.25,1e-3:0.5")
+    a, b = _params(tmp_path / "single/read_token.pt"), _params(tmp_path / "sweep/lr0.003_wu0.25/read_token.pt")
+    assert all(torch.allclose(x, y, atol=1e-6) for x, y in zip(a, b))
+    # and the training moved the parameters, so the comparison is not trivially equal
+    c = _params(tmp_path / "sweep/lr0.001_wu0.5/read_token.pt")
+    assert not all(torch.allclose(x, y, atol=1e-6) for x, y in zip(a, c))
+
+
+def test_sweep_configs_do_not_leak_into_each_other(tmp_path, monkeypatch):
+    # the second config of a sweep equals that config trained alone: the shared text cache is
+    # restored between configs and no gradient crosses from one config's read to the next
+    data = _instep_data(tmp_path)
+    _train_instep(monkeypatch, data, tmp_path / "pair", "--sweep", "3e-3:0.25,1e-3:0.5")
+    _train_instep(monkeypatch, data, tmp_path / "alone", "--lr", "1e-3", "--warmup", "0.5")
+    a, b = _params(tmp_path / "pair/lr0.001_wu0.5/read_token.pt"), _params(tmp_path / "alone/read_token.pt")
+    assert all(torch.allclose(x, y, atol=1e-6) for x, y in zip(a, b))
+
+
+def test_sweep_val_writes_scores_and_traces(tmp_path, monkeypatch):
+    import json
+    data = _instep_data(tmp_path)
+    _train_instep(monkeypatch, data, tmp_path / "sw", "--sweep", "3e-3:0.25,1e-3:0.5", "--val", str(data))
+    js = json.loads((tmp_path / "sw/sweep.json").read_text())
+    assert [c["tag"] for c in js["configs"]] == ["lr0.003_wu0.25", "lr0.001_wu0.5"]
+    assert js["val_n"] == 15 and abs(js["const_loss"] - 0.6931) < 0.01
+    for c in js["configs"]:
+        assert 0 <= c["val_auroc"] <= 1 and 0 <= c["val_ap"] <= 1 and c["trace"] and c["dead_at"] is None

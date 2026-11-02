@@ -41,6 +41,11 @@ separator token before each read token (block outputs at --passive_blocks, and
 the post-norm final state), for the
 passive control that reads the same text without a read token.
 
+--sweep 'lr:warmup,...' (docs/instep_lr_sweep_plan.md) trains several configs on the same
+batches in one process: each batch's text pass runs once and every config reads over that
+cache (restored between configs); --val then scores every config on a validation file the
+same way and writes OUT/sweep.json.
+
     python scripts/read_token_inline.py train --init_text " correct" --deep \\
         --train <data>/prm800k_probe_train_full.jsonl --n_train 100000 --seed 0 --out <dir>
     python scripts/read_token_inline.py encode --out <dir> --prm800k val:<val.jsonl> --pb math:<pb.jsonl>
@@ -401,6 +406,50 @@ def seq_batches(lengths: list[int], n_items: list[int], max_tokens: int, max_ite
     return out
 
 
+def micro_chunks(batch: list[int], lengths: list[int], micro_tokens: int) -> list[list[int]]:
+    """Consecutive pieces of a batch, each at most micro_tokens padded tokens (a single
+    sequence always fits); the whole batch when micro_tokens is 0."""
+    if not micro_tokens:
+        return [batch]
+    out, cur, longest = [], [], 0
+    for i, n in zip(batch, lengths):
+        if cur and (len(cur) + 1) * max(longest, n) > micro_tokens:
+            out.append(cur)
+            cur, longest = [], 0
+        cur.append(i)
+        longest = max(longest, n)
+    return out + [cur]
+
+
+def parse_sweep(spec: str | None, lr: float, warmup: float) -> list[tuple[float, float]]:
+    """--sweep 'lr:warmup,...' as [(peak lr, OneCycle pct_start)]; [(lr, warmup)] without one."""
+    if not spec:
+        return [(lr, warmup)]
+    out = []
+    for part in spec.split(","):
+        l, w = part.split(":")
+        out.append((float(l), float(w)))
+    if len(set(out)) != len(out) or not all(l > 0 and 0 < w < 1 for l, w in out):
+        raise ValueError(f"bad --sweep {spec!r}")
+    return out
+
+
+def cfg_tag(lr: float, warmup: float) -> str:
+    return f"lr{lr:g}_wu{warmup:g}"
+
+
+def text_kv(cache) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """The text pass's keys and values per layer (no gradient), to restore between configs."""
+    return [(layer.keys, layer.values) for layer in cache.layers]
+
+
+def reset_cache(cache, kv0: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    """Put the cache back to the text alone. A read pass appends with torch.cat (new tensors),
+    so the stored text tensors are untouched and carry no graph from an earlier config."""
+    for layer, (k, v) in zip(cache.layers, kv0):
+        layer.keys, layer.values = k, v
+
+
 def row(seq: dict, mk: StartMarker | None) -> tuple:
     """The (ids, pos[, spos]) row text_pass takes for one built sequence."""
     return (seq["ids"], seq["pos"]) if mk is None else (seq["ids"], seq["pos"], seq["spos"])
@@ -412,6 +461,58 @@ def rth_items_per_step(tok, items: list[dict], max_tokens: int, max_seq_len: int
     lens = [n for n in lens if n <= max_seq_len]
     n_steps = len(batches(lens, max_tokens, None))
     return len(lens) / n_steps, n_steps
+
+
+def score_val(a, model, tok, pad, dev, runs: list[dict], chain: bool, y_train: torch.Tensor,
+              steps: int, secs: float, t_text: float, t_read: float) -> dict:
+    """P(incorrect) of every trained config on the --val items, one text pass per batch, and
+    OUT/sweep.json: per config the val AUROC and AP, the training-loss trace and the timing,
+    plus the constant predictor's loss on the training labels. Selection reads only this file,
+    so no test set is touched while choosing a config."""
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    items = prm800k_items(a.val, 0, a.seed + 1)
+    if a.smoke:
+        items = items[:a.smoke]
+    seqs, _ = build_sequences(tok, items, a.layout, chain=chain)
+    mk0 = runs[0]["mk"]
+    scores = {r["tag"]: np.full(len(items), np.nan) for r in runs}
+    t0 = time.perf_counter()
+    for b in seq_batches([len(s["ids"]) for s in seqs], [len(s["members"]) for s in seqs],
+                         a.max_tokens, None, None):
+        rows = [i for j in b for i in seqs[j]["members"]]
+        with torch.no_grad():
+            cache, lay = text_pass(model, [row(seqs[i], mk0) for i in b], pad, dev,
+                                   marker=mk0 is not None, chain=chain)
+            kv0 = text_kv(cache)
+            mi = member_index([seqs[i] for i in b], dev)
+            for r in runs:
+                if r["dead"] is not None:
+                    continue
+                reset_cache(cache, kv0)
+                h = read_pass(model, r["rt"], cache, lay, False, a.soft_attn, r["mk"])[mi]
+                scores[r["tag"]][rows] = torch.sigmoid(r["rt"].logit(h)).float().cpu().numpy()
+    yv = np.array([int(it["label"]) for it in items])
+    p = float(y_train.float().mean())
+    out = {"seed": a.seed, "train": str(a.train), "val": str(a.val), "layout": a.layout,
+           "n_train_items": int(len(y_train)), "train_prev": p,
+           "const_loss": float(-(p * math.log(p) + (1 - p) * math.log(1 - p))) if 0 < p < 1 else 0.0,
+           "steps": steps, "secs_train": secs, "secs_text": t_text, "secs_reads": t_read,
+           "secs_val": time.perf_counter() - t0, "val_n": int(len(yv)), "val_prev": float(yv.mean()),
+           "configs": []}
+    for r in runs:
+        s = scores[r["tag"]]
+        ok = np.isfinite(s)
+        both = ok.all() and 0 < yv.sum() < len(yv)
+        out["configs"].append({
+            "tag": r["tag"], "lr": r["lr"], "warmup": r["warmup"], "dead_at": r["dead"],
+            "final_loss": r["run"], "trace": r["trace"],
+            "val_auroc": float(roc_auc_score(yv, s)) if both else None,
+            "val_ap": float(average_precision_score(yv, s)) if both else None})
+        print(f"[val] {r['tag']}: AUROC {out['configs'][-1]['val_auroc']} AP {out['configs'][-1]['val_ap']}",
+              flush=True)
+    with open(a.out / "sweep.json", "w") as f:
+        json.dump(out, f)
+    return out
 
 
 def main() -> None:
@@ -432,8 +533,17 @@ def main() -> None:
     p.add_argument("--n_train", type=int, default=100000)
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--lr", type=float, default=3e-3)
+    p.add_argument("--warmup", type=float, default=0.05, help="train: OneCycle pct_start")
+    p.add_argument("--sweep", default=None,
+                   help="train: 'lr:warmup,lr:warmup,...' trains every config on the same batches, "
+                        "sharing each batch's text pass; tokens go to OUT/<tag>/read_token.pt")
+    p.add_argument("--val", type=Path, default=None,
+                   help="train: score these items with every trained config (one shared text pass) "
+                        "and write OUT/sweep.json")
     p.add_argument("--max_tokens", type=int, default=16000)
     p.add_argument("--max_seq_len", type=int, default=3072, help="train: longer sequences are dropped")
+    p.add_argument("--micro_tokens", type=int, default=0,
+                   help="train: gradient-accumulation chunks of at most this many padded tokens (0: off)")
     p.add_argument("--prm800k", nargs="*", default=[], help="encode: name:path[:limit]")
     p.add_argument("--pb", nargs="*", default=[], help="encode: subset:path")
     p.add_argument("--passive_blocks", default="24,35", help="encode: text-state blocks stored as `passive`")
@@ -459,14 +569,24 @@ def main() -> None:
         if len(tids) != 1:
             raise SystemExit(f"--init_text {a.init_text!r} is {len(tids)} tokens; inline reads use m = 1")
         init = emb[torch.tensor(tids, device=emb.device)].detach().float()
-        rt = ReadToken(1, d, init.cpu(), head=a.head, n_layers=n_layers if a.deep else 0).to(dev)
-        mk = None
+        sinit = None
         if a.start_marker:
             sids = tok(a.start_init_text, add_special_tokens=False)["input_ids"]
             if len(sids) != 1:
                 raise SystemExit(f"--start_init_text {a.start_init_text!r} is {len(sids)} tokens, not 1")
             sinit = emb[torch.tensor(sids, device=emb.device)].detach().float().cpu()
-            mk = StartMarker(d, sinit, n_layers if a.start_deep else 0).to(dev)
+        configs = parse_sweep(a.sweep, a.lr, a.warmup)
+        # every config starts from the same parameters: the RNG state is restored before each,
+        # so the first config is exactly the single run of the same seed
+        rng0 = torch.get_rng_state()
+        runs = []
+        for lr_c, wu_c in configs:
+            torch.set_rng_state(rng0)
+            rt_c = ReadToken(1, d, init.cpu(), head=a.head, n_layers=n_layers if a.deep else 0).to(dev)
+            mk_c = StartMarker(d, sinit, n_layers if a.start_deep else 0).to(dev) if a.start_marker else None
+            runs.append({"lr": lr_c, "warmup": wu_c, "tag": cfg_tag(lr_c, wu_c), "rt": rt_c, "mk": mk_c,
+                         "trace": [], "run": 0.0, "dead": None})
+        rt, mk = runs[0]["rt"], runs[0]["mk"]
         items = prm800k_items(a.train, a.n_train, a.seed)
         if a.smoke:
             items = items[:a.smoke]
@@ -480,7 +600,8 @@ def main() -> None:
         bl = seq_batches([len(s["ids"]) for s in seqs], [len(s["members"]) for s in seqs],
                          a.max_tokens, cap, a.seed)
         print(f"[config] model={a.model} layout={a.layout} init={a.init_text!r} deep={a.deep} "
-              f"head={a.head} n_train={a.n_train} seed={a.seed} lr={a.lr} start_marker="
+              f"head={a.head} n_train={a.n_train} seed={a.seed} "
+              f"configs={','.join(r['tag'] for r in runs)} start_marker="
               f"{repr(a.start_init_text) if mk is not None else None} start_deep={a.start_deep} chain={chain}", flush=True)
         print(f"[data] {len(items)} items -> {len(seqs)} sequences, {n_read} read slots "
               f"({alone} read alone, {n_long} sequences over {a.max_seq_len} tokens dropped); "
@@ -507,42 +628,88 @@ def main() -> None:
                     k += 1
         y = torch.tensor([float(items[i]["label"]) for s in seqs for i in s["members"]])
         offs = np.cumsum([0] + [len(s["members"]) for s in seqs])
-        opt = make_optimizer(rt, a.lr, freeze_soft=False)
-        if mk is not None:
-            opt.add_param_group({"params": list(mk.parameters()), "lr": a.lr, "weight_decay": 0.0})
-        params = [q for q in rt.parameters() if q.requires_grad] + (list(mk.parameters()) if mk else [])
         steps = a.epochs * len(bl)
-        sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=steps, pct_start=0.05)
-        t0, step, run = time.perf_counter(), 0, 0.0
+        for r in runs:
+            r["opt"] = make_optimizer(r["rt"], r["lr"], freeze_soft=False)
+            if r["mk"] is not None:
+                r["opt"].add_param_group({"params": list(r["mk"].parameters()), "lr": r["lr"],
+                                          "weight_decay": 0.0})
+            r["params"] = ([q for q in r["rt"].parameters() if q.requires_grad]
+                           + (list(r["mk"].parameters()) if r["mk"] is not None else []))
+            r["sched"] = torch.optim.lr_scheduler.OneCycleLR(r["opt"], max_lr=r["lr"], total_steps=steps,
+                                                             pct_start=r["warmup"])
+        sweep = len(runs) > 1
+        sync = torch.cuda.synchronize if dev.type == "cuda" else (lambda: None)
+        t0, step, t_text, t_read = time.perf_counter(), 0, 0.0, 0.0
         for ep in range(a.epochs):
             ebl = bl if ep == 0 else seq_batches([len(s["ids"]) for s in seqs],
                                                  [len(s["members"]) for s in seqs], a.max_tokens, cap,
                                                  a.seed + ep)
             for b in ebl:
-                h = inline_read(model, rt, [row(seqs[i], mk) for i in b], pad, dev,
-                                grad=True, soft_attn=a.soft_attn, mk=mk, chain=chain)
-                h = h[member_index([seqs[i] for i in b], dev)]
-                yb = torch.cat([y[offs[i]:offs[i + 1]] for i in b]).to(dev)
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(rt.logit(h), yb)
-                if not torch.isfinite(loss):
-                    raise SystemExit(f"non-finite loss at step {step}")
-                opt.zero_grad(); loss.backward()
-                torch.nn.utils.clip_grad_norm_(params, 1.0)
-                opt.step(); sched.step(); step += 1
-                run = 0.98 * run + 0.02 * float(loss) if step > 1 else float(loss)
+                # --micro_tokens splits the optimizer batch into gradient-accumulation chunks
+                # (the same batch and mean loss, less memory: Qwen3-32B's read pass keeps every
+                # layer's expanded keys and values for the backward)
+                parts = micro_chunks(b, [len(seqs[i]["ids"]) for i in b], a.micro_tokens)
+                n_items = sum(offs[i + 1] - offs[i] for i in b)
+                live = [r for r in runs if r["dead"] is None]
+                for r in live:
+                    r["opt"].zero_grad()
+                    r["loss"] = 0.0
+                for part in parts:
+                    # the text is read once per batch; every config reads over the same cache
+                    ts = time.perf_counter()
+                    cache, lay = text_pass(model, [row(seqs[i], mk) for i in part], pad, dev,
+                                           marker=mk is not None, chain=chain)
+                    kv0 = text_kv(cache)
+                    mi = member_index([seqs[i] for i in part], dev)
+                    yb = torch.cat([y[offs[i]:offs[i + 1]] for i in part]).to(dev)
+                    sync(); tr = time.perf_counter(); t_text += tr - ts
+                    for r in live:
+                        reset_cache(cache, kv0)
+                        h = read_pass(model, r["rt"], cache, lay, True, a.soft_attn, r["mk"])[mi]
+                        lp = torch.nn.functional.binary_cross_entropy_with_logits(
+                            r["rt"].logit(h), yb, reduction="sum") / n_items
+                        if not torch.isfinite(lp):
+                            if not sweep:
+                                raise SystemExit(f"non-finite loss at step {step}")
+                            r["dead"] = step  # this config stops; the others go on
+                            continue
+                        lp.backward()
+                        r["loss"] += float(lp.detach())
+                    sync(); t_read += time.perf_counter() - tr
+                    del cache, kv0
+                step += 1
+                for r in live:
+                    if r["dead"] is not None:
+                        continue
+                    torch.nn.utils.clip_grad_norm_(r["params"], 1.0)
+                    r["opt"].step(); r["sched"].step()
+                    r["run"] = 0.98 * r["run"] + 0.02 * r["loss"] if step > 1 else r["loss"]
+                    if step % 10 == 0 or step == steps:
+                        r["trace"].append([step, round(r["run"], 5)])
                 if step % 50 == 0 or step == steps:
-                    print(f"[train inline] step {step}/{steps} loss {run:.4f} "
-                          f"({time.perf_counter()-t0:.0f}s)", flush=True)
-        torch.save({"soft": rt.soft.detach().cpu(), "head": rt.head.state_dict(), "m": 1,
-                    "model": a.model, "init": "text", "init_text": a.init_text, "read": "last",
-                    "head_kind": a.head, "freeze_soft": False, "seed": a.seed, "n_train": a.n_train,
-                    "soft_attn": a.soft_attn, "deep": None if rt.deep is None else rt.deep.detach().cpu(),
-                    "interv": None, "rank": 0, "lora_dims": None, "interv_state": None, "lr": a.lr,
-                    "layout": a.layout, "inline": True, "items_per_step": cap,
-                    "start_soft": None if mk is None else mk.soft.detach().cpu(),
-                    "start_deep": None if mk is None or mk.deep is None else mk.deep.detach().cpu(),
-                    "start_init_text": a.start_init_text if mk is not None else None, "chain": chain},
-                   a.out / "read_token.pt")
+                    losses = " ".join(f"{r['tag']} {r['run']:.4f}" if r["dead"] is None else f"{r['tag']} dead"
+                                      for r in runs)
+                    print(f"[train inline] step {step}/{steps} loss {losses} ({time.perf_counter()-t0:.0f}s; "
+                          f"text {t_text:.0f}s, reads {t_read:.0f}s)", flush=True)
+        secs = time.perf_counter() - t0
+        for r in runs:
+            rt_c, mk_c = r["rt"], r["mk"]
+            dst = a.out / r["tag"] if sweep else a.out
+            dst.mkdir(parents=True, exist_ok=True)
+            torch.save({"soft": rt_c.soft.detach().cpu(), "head": rt_c.head.state_dict(), "m": 1,
+                        "model": a.model, "init": "text", "init_text": a.init_text, "read": "last",
+                        "head_kind": a.head, "freeze_soft": False, "seed": a.seed, "n_train": a.n_train,
+                        "soft_attn": a.soft_attn, "deep": None if rt_c.deep is None else rt_c.deep.detach().cpu(),
+                        "interv": None, "rank": 0, "lora_dims": None, "interv_state": None, "lr": r["lr"],
+                        "warmup": r["warmup"], "dead_at": r["dead"],
+                        "layout": a.layout, "inline": True, "items_per_step": cap,
+                        "start_soft": None if mk_c is None else mk_c.soft.detach().cpu(),
+                        "start_deep": None if mk_c is None or mk_c.deep is None else mk_c.deep.detach().cpu(),
+                        "start_init_text": a.start_init_text if mk_c is not None else None, "chain": chain},
+                       dst / "read_token.pt")
+        if a.val is not None:
+            score_val(a, model, tok, pad, dev, runs, chain, y, steps, secs, t_text, t_read)
         return
 
     ck = torch.load(a.ckpt or a.out / "read_token.pt", map_location="cpu", weights_only=False)

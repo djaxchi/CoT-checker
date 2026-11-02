@@ -20,6 +20,22 @@ time (--batch 10: the N = 10 candidates of a best-of-N problem in one call):
   prm           Qwen2.5-Math-PRM-7B over its template, one forward (batched with padding)
   policy_on_prm_tokens  the policy's forward over the PRM's token ids (same length, other model)
 
+With --reprobe_release (a released ReProbe hidden-state probe, reprobe_comparison_v2), on
+the policy's final hidden states of the same text (what generation already computes, so
+they are given, as the read token is given the cache):
+
+  reprobe_head     ReProbe's head over every step of the trajectory (one copy of the
+                   trace per step, as it scores a finished trace)
+  reprobe_offline  text + reprobe_head
+  reprobe_step     the head for the last step only: its per-step cost during generation
+                   (its encoder sees the whole trace with a per-step entity embedding, so
+                   nothing carries over from the previous step); batch 1 only
+  reprobe_head_graph, reprobe_step_graph
+                   the same calls captured as CUDA graphs (text length padded to a
+                   multiple of --t_step, input copy included), the counterpart of read_graph
+
+Step spans for the head are the text between consecutive read positions (timing only).
+
 Every fast read is checked against read_hf: relative state difference and P(incorrect)
 difference per read.
 
@@ -97,6 +113,78 @@ def prm_batch(ptok, rows: list[dict], dev) -> tuple[torch.Tensor, torch.Tensor, 
     return x.to(dev), att.to(dev), sum(map(len, ids))
 
 
+def reprobe_inputs(model, seqs: list[tuple], pad: int, dev) -> dict:
+    """ReProbe head inputs for the rows of `seqs`: final hidden states, valid positions, and
+    the claim masks of every step and of each row's last step. Step k of a row spans the
+    text tokens [pos[k-1], pos[k]) (k = 0: the token before pos[0]), read at feature p - 1."""
+    T = max(len(r[0]) for r in seqs)
+    ids = torch.full((len(seqs), T), pad, dtype=torch.long)
+    att = torch.zeros((len(seqs), T), dtype=torch.long)
+    claims, owner, last = [], [], []
+    for b, r in enumerate(seqs):
+        ids[b, :len(r[0])] = torch.tensor(r[0])
+        att[b, :len(r[0])] = 1
+        for k, pk in enumerate(r[1]):
+            lo = r[1][k - 1] if k else pk - 1
+            m = torch.zeros(T, dtype=torch.long)
+            m[max(lo - 1, 0):max(pk - 1, 1)] = 1
+            claims.append(m)
+            owner.append(b)
+        last.append(len(claims) - 1)
+    ids, att = ids.to(dev), att.to(dev)
+    with torch.no_grad():
+        feats = model.model(input_ids=ids, attention_mask=att).last_hidden_state
+    claims, owner = torch.stack(claims).to(dev), torch.tensor(owner, device=dev)
+    return {"feats": feats, "valid": att.bool(), "claims": claims, "owner": owner,
+            "claims_last": claims[last], "owner_last": owner[last]}
+
+
+class GraphedHead:
+    """ReProbe's head as one CUDA graph per (rows, claims, padded length): padding positions
+    are invalid, so they are never attended and the logits are unchanged."""
+
+    def __init__(self, head, run_head, t_step: int):
+        self.head, self.run_head, self.t_step, self.graphs = head, run_head, t_step, {}
+        self.pool = None
+
+    def call(self, feats, valid, claims, owner):
+        B, T, F = feats.shape
+        Tb = -(-T // self.t_step) * self.t_step
+        key = (B, claims.shape[0], Tb)
+        if key not in self.graphs:
+            st = {"feats": torch.zeros(B, Tb, F, dtype=feats.dtype, device=feats.device),
+                  "valid": torch.zeros(B, Tb, dtype=torch.bool, device=feats.device),
+                  "claims": torch.zeros(claims.shape[0], Tb, dtype=claims.dtype, device=feats.device),
+                  "owner": torch.zeros_like(owner)}
+            f = lambda: self.run_head(self.head, st["feats"], st["valid"], st["claims"], st["owner"], "visible")
+            st["valid"][:, 0] = True
+            st["claims"][:, 0] = 1
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s), torch.no_grad():
+                for _ in range(2):
+                    f()
+            torch.cuda.current_stream().wait_stream(s)
+            if self.pool is None:
+                self.pool = torch.cuda.graph_pool_handle()
+            g = torch.cuda.CUDAGraph()
+            with torch.no_grad(), torch.cuda.graph(g, pool=self.pool):
+                st["out"] = f()
+            self.graphs[key] = (g, st)
+        g, st = self.graphs[key]
+
+        def run():
+            st["feats"][:, :T].copy_(feats)
+            st["valid"].zero_()
+            st["valid"][:, :T].copy_(valid)
+            st["claims"].zero_()
+            st["claims"][:, :T].copy_(claims)
+            st["owner"].copy_(owner)
+            g.replay()
+            return st["out"]
+        return run
+
+
 def decode_inputs(T: int, n_extra: int, marker: bool, dev):
     """One text slot (the next token) plus n_extra slots, all at position T over the whole
     cache; slots see the text and themselves, a read slot also its marker slot."""
@@ -124,6 +212,10 @@ def main() -> None:
     p.add_argument("--no_fused", action="store_true", help="skip the compiled FusedReader rows")
     p.add_argument("--cudnn", action="store_true", help="allow the cuDNN attention backend in the timed loop")
     p.add_argument("--order_check", type=int, default=30, help="trajectories for the call-order check (0: none)")
+    p.add_argument("--reprobe_release", type=Path, default=None,
+                   help="a released ReProbe hidden-state probe directory: also time its head")
+    p.add_argument("--reprobe_claim_tokens", type=int, default=160000,
+                   help="steps x length per head call, as reprobe_probe.score_traces micro-batches")
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
     dev = torch.device("cuda")
@@ -136,12 +228,23 @@ def main() -> None:
     mk = marker_from_ckpt(ck, dev)
     chain, sa = bool(ck.get("chain")), ck.get("soft_attn")
     pm, ptok = load_model(a.prm_model, dev)
+    rp_head = rp_graph = None
+    if a.reprobe_release is not None:
+        from scripts.reprobe_cmp.reprobe_probe import head_from_release, run_head
+        from src.probes.reprobe_head import n_params
+        rp_head = head_from_release(a.reprobe_release, dev, model.config.hidden_size)
+        rp_graph = GraphedHead(rp_head, run_head, a.t_step)
     fr = FastReader(model, rt, mk)
     graphed = {"graph": Buckets(fr, t_step=a.t_step, kernels=lambda: soft_kernels(sa))}
     res: dict = {"gpu": torch.cuda.get_device_name(0), "ckpt": str(a.inline_ckpt), "chain": chain,
                  "marker": mk is not None, "t_step": a.t_step,
                  "attn_impl": {"policy": model.config._attn_implementation, "prm": pm.config._attn_implementation},
-                 "torch": torch.__version__, "cudnn_attention": a.cudnn}
+                 "torch": torch.__version__, "cudnn_attention": a.cudnn,
+                 "params": {"read_token": sum(p.numel() for p in rt.parameters())
+                            + (sum(p.numel() for p in mk.parameters()) if mk is not None else 0)}}
+    if rp_head is not None:
+        res["reprobe_release"] = str(a.reprobe_release)
+        res["params"]["reprobe_head"] = n_params(rp_head)
     if not a.no_fused:
         try:
             graphed["fused"] = Buckets(FusedReader(model, rt, mk), t_step=a.t_step, kernels=lambda: soft_kernels(sa))
@@ -206,7 +309,7 @@ def main() -> None:
                       f"{time.perf_counter() - t0:.0f}s", flush=True)
 
             sec, toks = defaultdict(list), defaultdict(list)
-            n_tr, rel, dp = [], [], []
+            n_tr, rel, dp, rp_eq = [], [], [], []
             for i, (g, seqs) in enumerate(zip(groups, gseqs)):
                 hold = {}
                 t_text = timed(lambda: hold.update(cl=text_pass(model, seqs, pad, dev, marker=mk is not None,
@@ -234,6 +337,34 @@ def main() -> None:
                     nxt = torch.tensor([[pad]], device=dev)
                     per["decode_hf"] = timed(lambda: model.model(input_ids=nxt, past_key_values=cache, use_cache=True))
                     drop_after(cache, T)
+                if rp_head is not None:
+                    ri = reprobe_inputs(model, seqs, pad, dev)
+                    k = max(1, a.reprobe_claim_tokens // ri["feats"].shape[1])
+                    calls = {"reprobe_head": [(ri["claims"][c:c + k], ri["owner"][c:c + k])
+                                              for c in range(0, len(ri["owner"]), k)]}
+                    if B == 1:
+                        calls["reprobe_step"] = [(ri["claims_last"], ri["owner_last"])]
+                    eager = {n: [lambda c=c, o=o: run_head(rp_head, ri["feats"], ri["valid"], c, o, "visible")
+                                 for c, o in cl] for n, cl in calls.items()}
+                    for n, fs in eager.items():
+                        per[n] = timed(lambda fs=fs: [f() for f in fs])
+                    per["reprobe_offline"] = t_text + per["reprobe_head"]
+                    if rp_graph is not None:
+                        try:
+                            for n, cl in calls.items():
+                                fs = [rp_graph.call(ri["feats"], ri["valid"], c, o) for c, o in cl]
+                                for f in fs:  # captures outside the timed call
+                                    f()
+                                per[n + "_graph"] = timed(lambda fs=fs: [f() for f in fs])
+                                with torch.no_grad():
+                                    for f, ef in zip(fs, eager[n]):
+                                        rp_eq.append((n + "_graph", (torch.sigmoid(f().double())
+                                                                     - torch.sigmoid(ef().double())).abs().cpu().numpy()))
+                        except Exception as e:  # capture unsupported: keep the eager rows
+                            res["reprobe_graph_error"] = repr(e)
+                            print(f"[reprobe graph] disabled: {e!r}", flush=True)
+                            rp_graph = None
+                    del ri, calls, eager
                 x, att, n_prm = prm_batch(ptok, g, dev)
                 per["prm"] = timed(lambda: pm.model(input_ids=x, attention_mask=att))
                 # the policy over the PRM's own tokens: separates the model from the input length
@@ -264,6 +395,10 @@ def main() -> None:
                 out["equivalence_vs_read_hf"][n] = {"reads": int(len(r_)), "rel_state_diff_mean": float(r_.mean()),
                                                     "rel_state_diff_max": float(r_.max()),
                                                     "p_diff_mean": float(p_.mean()), "p_diff_max": float(p_.max())}
+            for n in dict.fromkeys(m for m, _ in rp_eq):
+                p_ = np.concatenate([x for m, x in rp_eq if m == n])
+                out["equivalence_vs_read_hf"][n + "_vs_eager"] = {"reads": int(len(p_)), "p_diff_mean": float(p_.mean()),
+                                                                  "p_diff_max": float(p_.max())}
             res[f"b{B}"] = out
             print(f"[b{B}] traces {int(np.sum(n_tr))}, per-trace seconds (mean / median):", flush=True)
             for k, v in out.items():

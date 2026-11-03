@@ -15,10 +15,15 @@ trajectories with the highest scores." Here:
     after --max_steps;
   * the answer is the finished trajectory with the lowest worst-step score (the best-of-N
     aggregation); if none finished, the active one with the lowest;
-  * verifiers share the policy's own forward model: `rt` (a read token, read inline in the
-    reprobe layout exactly as scripts/read_token_inline.py encodes), `rp` (a released
-    ReProbe hidden-state probe; in the loop there is no future to see) and `random`
-    (uniform scores: the same search with no verifier, which prices the search itself).
+  * verifiers: `rt` (a read token, read inline in the reprobe layout exactly as
+    scripts/read_token_inline.py encodes) and `rp` (a released ReProbe hidden-state probe;
+    in the loop there is no future to see) share the policy's own forward model; `prm` (a
+    Qwen process reward model, a second model on the same GPU, fed the problem and the steps
+    as scripts/instep_v1/score_prm.py does: the score is 1 - P(correct) at the last step's
+    separator); `random` (uniform scores: the same search with no verifier, which prices the
+    search itself).
+  * sets without a programmatic grader (ProofNet, Trips, Meetings) are written with
+    "correct": null and graded afterwards by scripts/instep_v1/tts_judge.py.
 
 Arms run on the same questions with the same per-question sampling seed. Grading is
 src/eval/reprobe_bon_grade.py. One JSON line per (question, arm) in --out.
@@ -41,7 +46,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from src.eval.reprobe_bon_grade import grade  # noqa: E402
+from src.eval.reprobe_bon_grade import GRADED, grade  # noqa: E402
 from src.onpolicy.prompts import reprobe_prompt  # noqa: E402
 
 SKIP = ("Reasoning Steps:", "SOLUTION:", "<start of response>")
@@ -97,6 +102,36 @@ class RPScorer:
             traces.append({"trace_id": str(i), "ids": ids, "ctx": len(ptoks), "steps": [pos], "labels": [-1]})
         sc = score_traces(self.model, {"p": (self.head, "visible")}, traces, self.dev, self.pad, 24000, 160000)["p"]
         return np.array([sc.get(f"{i}::0", 1.0) for i in range(len(trajs))])
+
+
+class PRMScorer:
+    """1 - P(correct) of each trajectory's last step from a Qwen PRM (score_prm.py protocol)."""
+
+    def __init__(self, path: str, dev):
+        from transformers import AutoModel, AutoTokenizer
+        from scripts.instep_v1.score_prm import SEP
+        self.tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
+        self.model = AutoModel.from_pretrained(path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+                                               local_files_only=True).to(dev).eval()
+        self.dev, self.sep = dev, self.tok.encode(SEP)[0]
+        self.pad = self.tok.pad_token_id if self.tok.pad_token_id is not None else self.tok.eos_token_id
+
+    def __call__(self, problem: str, trajs: list[list[str]]) -> np.ndarray:
+        from scripts.instep_v1.score_prm import messages, p_correct_at_seps
+        ids = [self.tok.encode(self.tok.apply_chat_template(messages(problem, [x.strip() for x in t]), tokenize=False,
+                                                            add_generation_prompt=False)) for t in trajs]
+        lens = [len(x) for x in ids]
+        x = torch.full((len(ids), max(lens)), self.pad, dtype=torch.long)
+        att = torch.zeros_like(x)
+        for j, r in enumerate(ids):
+            x[j, :lens[j]] = torch.tensor(r)
+            att[j, :lens[j]] = 1
+        x, att = x.to(self.dev), att.to(self.dev)
+        with torch.no_grad():
+            out = self.model(input_ids=x, attention_mask=att, use_cache=False)
+        logits = out[0] if isinstance(out, tuple) else out.logits
+        pc = p_correct_at_seps(logits, x, self.sep, lens)
+        return np.array([1.0 - r[-1] for r in pc])
 
 
 class RandomScorer:
@@ -170,7 +205,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pools", type=Path, required=True, help="the best-of-N pools (questions and gold answers)")
     p.add_argument("--set", required=True)
-    p.add_argument("--arm", nargs="+", required=True, help="name=rt:CKPT | name=rp:RELEASE_DIR | name=random")
+    p.add_argument("--arm", nargs="+", required=True,
+                   help="name=rt:CKPT | name=rp:RELEASE_DIR | name=prm:MODEL | name=random")
     p.add_argument("--limit", type=int, default=100, help="first N questions of the set")
     p.add_argument("--offset", type=int, default=0)
     p.add_argument("--B", type=int, default=5)
@@ -193,7 +229,8 @@ def main() -> None:
         name, _, rest = spec.partition("=")
         kind, _, path = rest.partition(":")
         arms[name] = (RTScorer(model, tok, Path(path), dev) if kind == "rt" else
-                      RPScorer(model, tok, Path(path), dev) if kind == "rp" else RandomScorer(a.seed))
+                      RPScorer(model, tok, Path(path), dev) if kind == "rp" else
+                      PRMScorer(path, dev) if kind == "prm" else RandomScorer(a.seed))
     done = set()  # every (question, arm) already in any output file of this set, shards included
     for f in a.out.parent.glob(f"{a.set}*.jsonl"):
         done |= {(r["qi"], r["arm"]) for r in map(json.loads, open(f)) if r.get("set") == a.set}
@@ -210,8 +247,9 @@ def main() -> None:
                 t0 = time.perf_counter()
                 res = search(model, tok, scorer, r["q"], a.B, a.N, a.max_steps, a.max_new_tokens, dev)
                 reply = "\n".join(res["steps"])
-                ok, key = grade(a.set, reply, str(r["answer"]), r["q"])
-                f.write(json.dumps({"set": a.set, "qi": int(r["qi"]), "arm": name, "correct": bool(ok), "key": key,
+                ok, key = grade(a.set, reply, str(r["answer"]), r["q"]) if a.set in GRADED else (None, None)
+                f.write(json.dumps({"set": a.set, "qi": int(r["qi"]), "arm": name,
+                                    "correct": None if ok is None else bool(ok), "key": key,
                                     "seconds": round(time.perf_counter() - t0, 1), **res}, ensure_ascii=False) + "\n")
                 f.flush()
                 print(f"[beam] {a.set} q{r['qi']} {name}: correct {ok} steps {len(res['steps'])} "

@@ -134,6 +134,16 @@ def reprobe_prompt_phi4(question: str) -> str:
             "<|im_start|>assistant<|im_sep|>Reasoning Steps:\n")
 
 
+# ReProbe's native-thinking prompt (paper Fig. 9; Qwen3-1.7B and the paper's Qwen3-32B
+# claim): no step format, the reply starts with the model's own "<think>".
+REPROBE_THINK_INSTRUCTION = "Answer the following question. Enclose your answer in <answer></answer>.\n<Question>: "
+
+
+def reprobe_prompt_think(question: str) -> str:
+    """ReProbe's native-thinking sampling context, up to the reply's "<think>"."""
+    return f"<|im_start|>user\n{REPROBE_THINK_INSTRUCTION}{question}<|im_end|>\n<|im_start|>assistant\n"
+
+
 def generation_prefix(problem: str, prefix: str) -> str:
     """Context the model had at the start of a step, given the steps before it.
 

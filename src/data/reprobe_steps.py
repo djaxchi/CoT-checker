@@ -31,6 +31,8 @@ import numpy as np
 
 SKIP_STARTS = ("Reasoning Steps:", "SOLUTION:", "<start of response>", "<end of response>")
 LABEL_KEY = ("claim", "StepFactCheck_correctness")
+# the native-thinking managers (Qwen3-1.7B, Table 4) store their GPT-OSS-120B labels here
+LABEL_KEY_THINK = ("claim", "StepFactCheckThinking")
 RP_AL_KEY = ("claim", "LuqClaimEstimatorDummy_claim")
 
 try:
@@ -129,6 +131,55 @@ def step_item(reply: str, step: dict) -> tuple[str, str]:
     return before[:-1] if before else "", body
 
 
+def token_ends(tok, prompt: str, reply: str) -> list[int]:
+    """Reply-relative character ends of the tokens of prompt + reply (as the read token
+    tokenises it), ascending."""
+    enc = tok(prompt + reply, add_special_tokens=False, return_offsets_mapping=True)
+    return sorted({e - len(prompt) for _, e in enc["offset_mapping"] if e > len(prompt)})
+
+
+def sentence_item(reply: str, step: dict, ends: list[int]) -> tuple[str, str]:
+    """(prefix, step) for a sentence step (native thinking: steps are sentences, not
+    lines, and about a fifth of them end inside a token such as ".\n\n"). The step is
+    widened to token boundaries: its end moves to the end of the token holding its last
+    character, its start to the last boundary at or before it, so prefix + step is the
+    reply up to a token boundary and the read token reads the tokens the model wrote."""
+    import bisect
+    j = bisect.bisect_left(ends, step["end"])
+    e = ends[j] if j < len(ends) else len(reply)
+    i = bisect.bisect_right(ends, step["start"]) - 1
+    s = min(ends[i] if i >= 0 else 0, e)
+    return reply[:s], reply[s:e]
+
+
+def token_claim_steps(reply: str, tokens: list[int], decode: Callable[[list[int]], str],
+                      claims: list) -> list[dict] | None:
+    """Stored claims as split_to_steps rows, spans taken from their aligned token ids (the
+    native-thinking claims' `sentence` is re-spaced by the sentence splitter, e.g. "..." as
+    ". . .", so it is not always a substring of the reply). A step runs from its first
+    aligned token's start to its last one's end; None if the tokens and the reply disagree
+    (one must be a prefix of the other)."""
+    cache: dict[int, int] = {}
+
+    def at(n: int) -> int:
+        if n not in cache:
+            cache[n] = len(decode(tokens[:n]))
+        return cache[n]
+
+    d = decode(tokens)
+    if not (d.startswith(reply) or reply.startswith(d.rstrip("\ufffd"))):  # tokens may cover a prefix
+        return None
+    out = []
+    for c in claims:
+        c = vars(c) if hasattr(c, "__dict__") else c
+        ids = [int(t) for t in c["aligned_token_ids"]]
+        if not ids:
+            return None
+        a, b = min(at(ids[0]), len(reply)), min(at(ids[-1] + 1), len(reply))
+        out.append({"sentence": reply[a:b], "start": a, "end": b, "aligned_token_ids": ids})
+    return out
+
+
 def _claim_steps(reply: str, claims: list) -> list[dict] | None:
     """The manager's own stored steps (lm_polygraph claims) as split_to_steps rows; None
     if a claim's sentence is not found in order in the reply."""
@@ -144,20 +195,29 @@ def _claim_steps(reply: str, claims: list) -> list[dict] | None:
     return out
 
 
-def manager_traces(m: dict, decode: Callable[[list[int]], str], name: str) -> list[dict]:
+def manager_traces(m: dict, decode: Callable[[list[int]], str], name: str,
+                   token_spans: bool = False) -> list[dict]:
     """One dict per trace: prompt, reply, reply tokens, steps, labels (1 incorrect,
     0 correct, -1 unlabeled) and every stored estimator's step scores.
 
     Steps come from the StepsExtractor port. When its step count disagrees with the
     labels and the manager stores its own steps (`stats.claims`, the later managers),
-    those are used instead for every trace of the set; "steps_from" says which."""
+    those are used instead for every trace of the set; "steps_from" says which.
+    token_spans (native thinking): always the stored claims, located by their tokens."""
     st = m["stats"]
-    labels = np.asarray(m["gen_metrics"][LABEL_KEY], dtype=float)
+    key = LABEL_KEY if LABEL_KEY in m["gen_metrics"] else LABEL_KEY_THINK
+    labels = np.asarray(m["gen_metrics"][key], dtype=float)
     scores = {k[1]: np.asarray(v, dtype=float) for k, v in m["estimations"].items() if k[0] == "claim"}
     rows = list(zip(st["input_texts"], st["greedy_texts"], st["greedy_tokens"]))
-    split = [split_to_steps(reply, [int(t) for t in toks], decode) for _, reply, toks in rows]
+    split = [] if token_spans else [split_to_steps(reply, [int(t) for t in toks], decode) for _, reply, toks in rows]
     source = "port"
-    if sum(len(x) for x in split) != len(labels) and "claims" in st:
+    if token_spans:  # native thinking: the stored sentence claims, located by their tokens
+        split = [token_claim_steps(reply, [int(t) for t in toks], decode, cl)
+                 for (_, reply, toks), cl in zip(rows, st["claims"])]
+        if any(x is None for x in split):
+            raise ValueError(f"{name}: a reply's tokens do not decode to its text")
+        source = "claims_tokens"
+    elif sum(len(x) for x in split) != len(labels) and "claims" in st:
         split = [_claim_steps(reply, cl) for (_, reply, _), cl in zip(rows, st["claims"])]
         if any(x is None for x in split):
             raise ValueError(f"{name}: a stored claim is not found in its reply")

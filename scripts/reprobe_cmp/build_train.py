@@ -22,7 +22,9 @@ Writes to --out:
 
     python scripts/reprobe_cmp/build_train.py --labels ds:$R2/raw/ds.parquet \\
         self:$R2/raw/self.parquet --v2_meta $R2/manifest_v2/meta --pb_dir $PB --out $R/data
-    (v2: --backbone qwen3_32b --labels oss:<parquet>; --backbone phi4 --labels qwen3:<p> self:<p>)
+    (v2: --backbone qwen3_32b --labels oss:<parquet>; --backbone phi4 --labels qwen3:<p> self:<p>;
+     --backbone qwen3_1_7b --labels oss:<parquet>, native thinking: sentence steps widened to
+     token boundaries, no ProcessBench since it has no thinking-format rewrite)
 """
 
 from __future__ import annotations
@@ -39,8 +41,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.encode_processbench_token_store import load_traces  # noqa: E402
 from src.data.prm_trajectories import problem_key  # noqa: E402
-from src.data.reprobe_steps import split_to_steps, step_item  # noqa: E402
-from scripts.reprobe_cmp.build_testsets import BACKBONES  # noqa: E402
+from src.data.reprobe_steps import (sentence_item, split_to_steps, step_item, token_claim_steps,  # noqa: E402
+                                    token_ends)
+from scripts.reprobe_cmp.build_testsets import BACKBONES, SENTENCE_STEPS  # noqa: E402
 
 TRAIN_SPLITS = ("train", "calib", "test")
 PB_SUBSETS = ("gsm8k", "math", "olympiadbench", "omnimath")
@@ -83,11 +86,49 @@ def pb_reply(steps: list[str]) -> str:
     return "\n".join(f"- Step {k + 1}: " + re.sub(r"\s*\n\s*", " ", s).strip() for k, s in enumerate(steps))
 
 
+def structured_row(tok, prompt_of, r: dict, claims: list, special: set[int]):
+    """(input_ids, context length, steps, read-token (prefix, step) pairs) of a one-step-per-
+    line reply, or the audit counter of why it is dropped."""
+    ids = [int(t) for t in r["input_ids"]]
+    ptoks = tok(prompt_of(r["question"]), add_special_tokens=False)["input_ids"]
+    if ids[:len(ptoks)] != ptoks:
+        return "drop_prompt_mismatch"
+    ctx = len(ptoks)
+    spans = char_spans(r["reply"], [x["sentence"] for x in claims])
+    if spans is None:
+        return "drop_sentence_not_in_reply"
+    steps = [{"aligned_token_ids": adjusted_ids(ids, ctx, list(x["aligned_token_ids"]), special),
+              "start": a0, "end": b0} for x, (a0, b0) in zip(claims, spans)]
+    if any(not st["aligned_token_ids"] for st in steps):
+        return "drop_empty_alignment"
+    try:
+        bodies = [step_item(r["reply"], st) for st in steps]
+    except ValueError:
+        return "drop_step_not_at_line_start"
+    return ids, ctx, steps, bodies
+
+
+def thinking_row(tok, prompt_of, r: dict, claims: list):
+    """(input_ids, context length, steps, reply up to the last step) of a native-thinking
+    reply, or the audit counter of why it is dropped. ReProbe's stored input_ids carry a
+    garbled prompt (the question, a repeated tail of it, no instruction) and a reply cut
+    short of its claims, so both arms read the paper's prompt (Fig. 9, as in the test
+    managers) followed by the reply's own tokens; claims index those tokens (<think> is 0)."""
+    cut = max(int(t) for x in claims for t in x["aligned_token_ids"]) + 2
+    rtoks = tok(r["reply"], add_special_tokens=False)["input_ids"]
+    steps = token_claim_steps(r["reply"], rtoks[:cut], tok.decode, claims)
+    if steps is None or any(st["end"] <= st["start"] for st in steps):
+        return "drop_claim_tokens_not_in_reply"
+    reply = r["reply"][:steps[-1]["end"]]
+    ptoks = tok(prompt_of(r["question"]), add_special_tokens=False)["input_ids"]
+    return ptoks + rtoks[:cut - 1], len(ptoks), steps, reply
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--labels", nargs="+", required=True, help="name:parquet; the first defines the rows")
     p.add_argument("--v2_meta", type=Path, required=True, help="manifest_v2/meta with {train,dev,calib,test}.jsonl")
-    p.add_argument("--pb_dir", type=Path, required=True)
+    p.add_argument("--pb_dir", type=Path, default=None, help="ProcessBench dir (skipped when absent)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--backbone", choices=sorted(BACKBONES), default="qwen3_8b")
     a = p.parse_args()
@@ -149,27 +190,21 @@ def main() -> None:
             c["drop_label_length"] += 1
             continue
         yd = ys[names[0]]
-        ids = [int(t) for t in r["input_ids"]]
-        ptoks = tok(reprobe_prompt(r["question"]), add_special_tokens=False)["input_ids"]
-        if ids[:len(ptoks)] != ptoks:
-            c["drop_prompt_mismatch"] += 1
-            continue
-        ctx = len(ptoks)
-        spans = char_spans(r["reply"], [x["sentence"] for x in claims])
-        if spans is None:
-            c["drop_sentence_not_in_reply"] += 1
-            continue
+        if a.backbone in SENTENCE_STEPS:
+            row = thinking_row(tok, reprobe_prompt, r, claims)
+            if isinstance(row, str):
+                c[row] += 1
+                continue
+            ids, ctx, steps, reply = row
+            ends = token_ends(tok, reprobe_prompt(r["question"]), reply)
+            bodies = [sentence_item(reply, st, ends) for st in steps]
+        else:
+            row = structured_row(tok, reprobe_prompt, r, claims, special)
+            if isinstance(row, str):
+                c[row] += 1
+                continue
+            ids, ctx, steps, bodies = row
         tid = f"rp{i:05d}"
-        steps = [{"aligned_token_ids": adjusted_ids(ids, ctx, list(x["aligned_token_ids"]), special),
-                  "start": a0, "end": b0} for x, (a0, b0) in zip(claims, spans)]
-        if any(not st["aligned_token_ids"] for st in steps):
-            c["drop_empty_alignment"] += 1
-            continue
-        try:
-            bodies = [step_item(r["reply"], st) for st in steps]
-        except ValueError:
-            c["drop_step_not_at_line_start"] += 1
-            continue
         rp[side].append({"trace_id": tid, "problem_key": k, "split": sp, "input_ids": ids, "context_len": ctx,
                          "steps": [{"aligned_token_ids": st["aligned_token_ids"]} for st in steps],
                          "labels": ys})
@@ -194,7 +229,7 @@ def main() -> None:
     audit["problems"] = {side: len({t["problem_key"] for t in rows}) for side, rows in rp.items()}
 
     eot = tok.convert_tokens_to_ids("<|im_end|>")
-    for sub in PB_SUBSETS:
+    for sub in PB_SUBSETS if a.pb_dir is not None else ():
         traces, items = [], []
         for tr in load_traces(a.pb_dir / f"processbench_{sub}.jsonl"):
             reply = pb_reply(tr["steps"])

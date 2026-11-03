@@ -72,12 +72,15 @@ from scripts.encode_pooled_multilayer import pb_items, prm800k_items  # noqa: E4
 from scripts.read_token_probe import (  # noqa: E402
     ReadToken, batches, make_optimizer, read_all_states, read_hooks, read_token_from_ckpt,
     soft_kernels, tokenize)
-from src.onpolicy.prompts import chat_prompt, reprobe_prompt, reprobe_prompt_phi4  # noqa: E402
+from src.onpolicy.prompts import chat_prompt, reprobe_prompt, reprobe_prompt_phi4, reprobe_prompt_think  # noqa: E402
 
 SEP = "\n\n"
-LAYOUTS = {"chat": chat_prompt, "reprobe": reprobe_prompt, "reprobe_phi4": reprobe_prompt_phi4}
-# step separator per layout: ReProbe writes one step per line (reprobe_comparison_v1)
-SEPS = {"chat": SEP, "reprobe": "\n", "reprobe_phi4": "\n"}
+LAYOUTS = {"chat": chat_prompt, "reprobe": reprobe_prompt, "reprobe_phi4": reprobe_prompt_phi4,
+           "reprobe_think": reprobe_prompt_think}
+# step separator per layout: ReProbe writes one step per line (reprobe_comparison_v1); in
+# native thinking a step is a sentence whose text already carries its spacing (items are
+# widened to token boundaries upstream, src/data/reprobe_steps.sentence_item), so none
+SEPS = {"chat": SEP, "reprobe": "\n", "reprobe_phi4": "\n", "reprobe_think": ""}
 
 
 def item_text(it: dict, sep: str = SEP) -> str:
@@ -176,9 +179,10 @@ def chain_slots(prompt: str, text: str, ends: dict[int, int], member_pos: list[i
                 sep: str = SEP) -> tuple[list[int], list[int]]:
     """A read slot at every step separator of `text` that ends on a token boundary, and at
     every member position: (slot positions, slot step starts), ascending. A slot's step
-    starts where the previous slot sits (the first at the end of the prompt)."""
+    starts where the previous slot sits (the first at the end of the prompt). Without a
+    separator (native-thinking sentence steps) the steps are the members themselves."""
     seps = {ends[len(prompt) + m.end()] for m in re.finditer(re.escape(sep), text + sep)
-            if len(prompt) + m.end() in ends}
+            if len(prompt) + m.end() in ends} if sep else set()
     slots = sorted(seps | set(member_pos))
     first = boundary_at_or_before(ends, len(prompt))
     return slots, [first] + slots[:-1]

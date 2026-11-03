@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """ReProbe's eight step-level test sets, from its released managers (reprobe_comparison_v1
-and v2, S0), for Qwen3-8B (Table 1), Qwen3-32B (Table 5) or Phi-4 (Table 9).
+and v2, S0), for Qwen3-8B (Table 1), Qwen3-32B (Table 5), Phi-4 (Table 9) or Qwen3-1.7B
+in native thinking (Table 4; steps are sentences, items widened to token boundaries).
 
 For each set, downloads `ue_manager.pth` (login node; or --local <dir> holding
 <set>/ue_manager.pth), unpickles it with an allowlist (src/data/reprobe_steps.py),
@@ -33,12 +34,14 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from src.data.reprobe_steps import RP_AL_KEY, load_manager, manager_traces, step_item  # noqa: E402
-from src.onpolicy.prompts import reprobe_prompt, reprobe_prompt_phi4  # noqa: E402
+from src.data.reprobe_steps import (RP_AL_KEY, load_manager, manager_traces, sentence_item,  # noqa: E402
+                                    step_item, token_ends)
+from src.onpolicy.prompts import reprobe_prompt, reprobe_prompt_phi4, reprobe_prompt_think  # noqa: E402
 
 SUFFIX = "layer1_dim512_head16_e5_lr5e-4_pos3"
 P4 = f"rediska0123/ue_manager_Phi-4_qwen3_anno_phi4_{SUFFIX}_on_"
 Q32 = "JingweiNi/ue_manager_Qwen3-32B_hs_5e_on_"
+Q17 = "JingweiNi/ue_manager_Qwen3-1.7B_natural_hs_10.8k_length_1024_7e_on_"
 # backbone -> tokenizer, prompt builder, the chat turn that ends the question, and
 # set -> (manager repo, the paper's PR-AUC of the probe whose scores the manager stores,
 # or None when the manager's probe is not in the paper)
@@ -80,7 +83,22 @@ BACKBONES = {
         "strategyqa": (P4 + "st_qa", 0.347),
         "scienceqa": (P4 + "sci_qa", 0.347),
     }),
+    # Table 4, "ReProbe, Hidden States, GPT-OSS-anno": the 10.8k-trace, 7-epoch run's
+    # managers reproduce it on 7 of 8 sets. Meetings: this manager holds 93 traces and gives
+    # .553 (the 5-epoch run's 120 traces .558), neither the printed .505, so it is not gated.
+    "qwen3_1_7b": ("Qwen/Qwen3-1.7B", reprobe_prompt_think, "<|im_end|>\n<|im_start|>assistant\n", {
+        "math": (Q17 + "math_new", 0.312),
+        "gsm8k": (Q17 + "gsm8k_new", 0.433),
+        "proofnet": (Q17 + "proofnet_new", 0.465),
+        "trips": (Q17 + "trip_new", 0.334),
+        "meetings": (Q17 + "meeting_new", None),
+        "calendar": (Q17 + "calendar_new", 0.604),
+        "strategyqa": (Q17 + "stqa_new", 0.426),
+        "scienceqa": (Q17 + "sciqa_new", 0.451),
+    }),
 }
+# backbones whose steps are sentences of a native-thinking reply
+SENTENCE_STEPS = {"qwen3_1_7b"}
 SETS = BACKBONES["qwen3_8b"][3]
 
 
@@ -89,10 +107,11 @@ def ap(y: np.ndarray, s: np.ndarray) -> float:
     return float(average_precision_score(y, s))
 
 
-def items_of(t: dict) -> list[dict]:
+def items_of(t: dict, ends: list[int] | None = None) -> list[dict]:
+    """Read-token items of a trace; `ends` (token ends, reply-relative) for sentence steps."""
     out = []
     for k, (st, y) in enumerate(zip(t["steps"], t["labels"])):
-        prefix, body = step_item(t["reply"], st)
+        prefix, body = step_item(t["reply"], st) if ends is None else sentence_item(t["reply"], st, ends)
         out.append({"uid": f"{t['trace_id']}::{k}", "id": t["trace_id"], "step_idx": k,
                     "problem": t["question"], "prefix": prefix, "candidate_step": body, "label": y})
     return out
@@ -119,7 +138,7 @@ def main() -> None:
         else:
             from huggingface_hub import hf_hub_download
             path = Path(hf_hub_download(repo, "ue_manager.pth"))
-        traces = manager_traces(load_manager(path), tok.decode, name)
+        traces = manager_traces(load_manager(path), tok.decode, name, token_spans=a.backbone in SENTENCE_STEPS)
         for t in traces:
             q = question.search(t["prompt_text"])
             if q is None or prompt_of(q.group(1)) != t["prompt_text"]:
@@ -138,7 +157,8 @@ def main() -> None:
                 f.write(json.dumps(t, ensure_ascii=False) + "\n")
         with open(d / f"{name}.items.jsonl", "w") as f:
             for t in traces:
-                for it in items_of(t):
+                ends = token_ends(tok, t["prompt_text"], t["reply"]) if a.backbone in SENTENCE_STEPS else None
+                for it in items_of(t, ends):
                     f.write(json.dumps(it, ensure_ascii=False) + "\n")
         print(f"[testsets] {name}: {len(traces)} traces, {len(y)} steps ({int(lab.sum())} labeled, "
               f"{y[lab].mean():.3f} incorrect), stored probe AP {got:.4f} vs paper "

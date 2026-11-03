@@ -131,6 +131,24 @@ def test_build_sequences_reprobe_layout_reads_after_each_line(monkeypatch):
     assert s["spos"] == [len("<p>"), len("<p>ab\n"), len("<p>ab\ncd\n")]
 
 
+def test_build_sequences_think_layout_reads_after_each_sentence(monkeypatch):
+    """Native thinking: steps are sentences carrying their own spacing, no separator; a
+    chained read slot sits at every step end, never at every character."""
+    import scripts.read_token_inline as ri
+    monkeypatch.setitem(ri.LAYOUTS, "reprobe_think", lambda problem: f"<{problem}>")
+    items = [item("p", "<t>", " A b."), item("p", "<t> A b.", " C."), item("p", "<t> A b. C.", "\n\nD.")]
+    for chain in (False, True):
+        seqs, alone = build_sequences(CharTok(), items, "reprobe_think", chain=chain)
+        assert alone == 0 and len(seqs) == 1
+        s = seqs[0]
+        text = "<p><t> A b. C.\n\nD."
+        assert len(s["ids"]) == len(text)
+        assert s["pos"] == [len("<p><t> A b."), len("<p><t> A b. C."), len(text)]
+        # chained, the first step starts where the prompt ends (the previous slot)
+        first = len("<p>") if chain else len("<p><t>")
+        assert s["spos"] == [first, len("<p><t> A b."), len("<p><t> A b. C.")]
+
+
 def test_build_sequences_reads_an_item_alone_without_a_token_boundary(monkeypatch):
     import scripts.read_token_inline as ri
     monkeypatch.setitem(ri.LAYOUTS, "chat", lambda problem: f"<{problem}>")

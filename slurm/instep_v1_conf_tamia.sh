@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=h100:4
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=01:30:00
+#SBATCH --time=00:45:00
 #SBATCH --output=%x-%j.out
 # InStep V1 runs U1 and T1 (docs/instep_v1_runbook.md), scripts/instep_v1/score_confidence.py.
 #   U1  token confidence (maxprob, maxent, ppl) of each backbone on its own traces: the 8

@@ -171,7 +171,7 @@ def yes_no_ids(tok) -> tuple[int, int]:
 
 def ptrue_from_logits(logit_yes: torch.Tensor, logit_no: torch.Tensor) -> torch.Tensor:
     """P(No) renormalized over {Yes, No}."""
-    return torch.sigmoid(logit_no.float() - logit_yes.float())
+    return torch.sigmoid(logit_no.double() - logit_yes.double())  # float64: fewer ties at 1
 
 
 @torch.no_grad()
@@ -256,7 +256,7 @@ def gate_set(traces: list[dict], ours: dict[str, dict], min_rho: float = 0.95, m
         if tag not in ours or not any(est in t.get("scores", {}) for t in traces):
             continue
         a, b, y = [], [], []
-        miss = 0
+        miss = nan_stored = 0
         for t in traces:
             st = t["scores"].get(est)
             if st is None or len(st) != len(t["steps"]):
@@ -267,12 +267,15 @@ def gate_set(traces: list[dict], ours: dict[str, dict], min_rho: float = 0.95, m
                 if u not in ours[tag]:
                     miss += 1
                     continue
+                if v is None or not math.isfinite(float(v)):  # ReProbe: NaN on token-less steps
+                    nan_stored += 1
+                    continue
                 a.append(ours[tag][u])
                 b.append(float(v))
                 y.append(int(t["labels"][k]))
         a, b, y = np.array(a), np.array(b), np.array(y)
         m = y >= 0
-        r = {"n": int(len(a)), "missing": miss, "spearman": spearman(a, b),
+        r = {"n": int(len(a)), "missing": miss, "nan_stored": nan_stored, "spearman": spearman(a, b),
              "ap_ours": ap(y[m], a[m]), "ap_stored": ap(y[m], b[m]),
              "auroc_ours": auroc(y[m], a[m]), "auroc_stored": auroc(y[m], b[m])}
         r["pass"] = bool(r["spearman"] >= min_rho and abs(r["ap_ours"] - r["ap_stored"]) <= max_dap and miss == 0)

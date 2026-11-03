@@ -213,3 +213,11 @@ def test_claimed_shards_split_work_between_processes(tmp_path):
     got2 += list(g2)
     assert sorted(got1 + got2) == [(j, 5) for j in range(5)]
     assert list(sc.claimed_shards(argparse.Namespace(shard="2/5", claim_dir=None))) == [(2, 5)]
+
+
+def test_gate_set_skips_steps_stored_as_nan():
+    traces = [{"trace_id": "t", "steps": [{}] * 4, "labels": [0, 1, -1, 0],
+               "scores": {"PerplexityClaim": [0.1, 0.9, float("nan"), 0.2]}}]
+    ours = {"ppl": {"t::0": 0.1, "t::1": 0.8, "t::2": 0.0, "t::3": 0.3}}
+    r = sc.gate_set(traces, ours)["ppl"]
+    assert r["n"] == 3 and r["nan_stored"] == 1 and r["spearman"] == pytest.approx(1.0)

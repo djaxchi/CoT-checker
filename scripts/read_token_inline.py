@@ -542,6 +542,8 @@ def main() -> None:
                         "and write OUT/sweep.json")
     p.add_argument("--max_tokens", type=int, default=16000)
     p.add_argument("--max_seq_len", type=int, default=3072, help="train: longer sequences are dropped")
+    p.add_argument("--gate_tol", type=float, default=0.05,
+                   help="train: max relative difference of the startup gate (inline vs appended read, bf16)")
     p.add_argument("--micro_tokens", type=int, default=0,
                    help="train: gradient-accumulation chunks of at most this many padded tokens (0: off)")
     p.add_argument("--prm800k", nargs="*", default=[], help="encode: name:path[:limit]")
@@ -623,7 +625,7 @@ def main() -> None:
                                            soft_attn=a.soft_attn)[0, -1] if refs is None else refs[j])
                     rel = float((got[k] - ref).norm() / ref.norm())
                     print(f"[gate] read at {pk}: relative difference {rel:.4f}", flush=True)
-                    if not rel <= 0.05:  # also catches NaN
+                    if not rel <= a.gate_tol:  # also catches NaN
                         raise SystemExit("inline read state does not match the appended read")
                     k += 1
         y = torch.tensor([float(items[i]["label"]) for s in seqs for i in s["members"]])

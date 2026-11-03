@@ -18,9 +18,12 @@
 #   STAGE=fit     scripts/instep_v1/passive_fit.py for every backbone whose states are complete
 #                 (one GPU each): scores to $OUT/scores/<backbone>/passive/, per-layer val AP
 #                 and AUROC of passive and read states to $OUT/analysis/per_layer_<backbone>.json.
+#   STAGE=curve   audit of B1 on qwen3_8b (scripts/instep_v1/passive_curve.py): passive_final
+#                 learning curve on 5k-40k training steps and the late-layer concatenation,
+#                 to $OUT/analysis/passive_curve_qwen3_8b.json.
 # SMOKE=N runs every step on the first N items, under *_smokeN output roots.
 set -euo pipefail
-STAGE="${STAGE:?encode or fit}"
+STAGE="${STAGE:?encode, fit or curve}"
 SMOKE="${SMOKE:-0}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 P="/project/aip-azouaq/$USER/cot_mech"
@@ -87,10 +90,14 @@ elif [[ $STAGE == fit ]]; then
   fit 0 qwen3_8b "$ST8/qwen3_8b" > "$LOGS/fit_qwen3_8b-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
   fit 1 phi4 "$ST/phi4" > "$LOGS/fit_phi4-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
   fit 2 qwen3_32b "$ST/qwen3_32b" > "$LOGS/fit_qwen3_32b-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+elif [[ $STAGE == curve ]]; then
+  CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/passive_curve.py --states "$ST8/qwen3_8b" \
+    --data "${R[qwen3_8b]}/data" --val_label ds --out "$OUT/analysis/passive_curve_qwen3_8b.json" \
+    > "$LOGS/curve_qwen3_8b-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
 else
   echo "unknown STAGE=$STAGE"; exit 2
 fi
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
-grep -h "^\[encode\]\|^\[passive_fit\]\|skipped\|Error\|error" "$LOGS"/*-"$SLURM_JOB_ID".log | tail -n 120 || true
+grep -h "^\[encode\]\|^\[curve\]\|^\[passive_fit\]\|skipped\|Error\|error" "$LOGS"/*-"$SLURM_JOB_ID".log | tail -n 120 || true
 exit $fail

@@ -200,6 +200,15 @@ def test_parse_per_layer_formats():
                                      {"kind": "read", "block": 7, "ap": 0.7}]})
     assert b["passive"] == [(3, 0.4), (7, 0.5)] and b["read"] == [(3, 0.6), (7, 0.7)]
     assert PV.parse_per_layer({"note": "nothing"}) == {}
+    # passive_fit.py --per_layer_out format
+    c = PV.parse_per_layer({"layers": [
+        {"key": "passive_block3", "kind": "passive", "block": 3, "val_ap": 0.4, "val_ap_by_C": {"0.1": 0.3}},
+        {"key": "passive_block7", "kind": "passive", "block": 7, "val_ap": 0.5},
+        {"key": "passive_final", "kind": "passive", "block": "final", "val_ap": 0.55},
+        {"key": "read_block3", "kind": "read", "block": 3, "val_ap": 0.6},
+        {"key": "read_block7", "kind": "read", "block": 7, "val_ap": 0.7}],
+        "picked": {"key": "passive_block7", "block": 7}, "test": {"math": {"ap": 0.3}}})
+    assert c == {"passive": [(3, 0.4), (7, 0.5)], "read": [(3, 0.6), (7, 0.7)]}
 
 
 def test_abstention_perfect_ranker():

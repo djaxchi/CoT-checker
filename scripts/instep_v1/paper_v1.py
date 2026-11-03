@@ -519,10 +519,14 @@ def parse_per_layer(obj) -> dict:
                 continue
             lay = next((r[k] for k in lk if k in r), None)
             v = num(r)
-            if lay is None or v is None:
+            try:
+                lay = int(lay)
+            except (TypeError, ValueError):  # e.g. "final"
+                continue
+            if v is None:
                 continue
             nm = next((str(r[k]) for k in nk if k in r), name)
-            out.setdefault(nm, []).append((int(lay), v))
+            out.setdefault(nm, []).append((lay, v))
 
     def walk(o, name):
         if isinstance(o, list):

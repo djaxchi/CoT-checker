@@ -120,3 +120,27 @@ def test_gate_stored_is_minus_p_correct(tmp_path):
     flipped = {u: -v for u, v in ours.items()}
     assert not gate_set(tmp_path / "x.traces.jsonl", flipped, key)["pass"]
     assert gate_set(tmp_path / "x.traces.jsonl", ours, "PRM_other") is None
+
+
+def test_bf16_round_matches_torch_and_gate_handles_stored_ties(tmp_path):
+    from scripts.instep_v1.score_prm import bf16_round
+    x = np.random.default_rng(1).uniform(size=1000).astype(np.float32)
+    assert np.array_equal(bf16_round(x), torch.tensor(x).to(torch.bfloat16).float().numpy().astype(np.float64))
+    # saturated PRM: stored = -bf16(P), ours = 1 - P in float32 -> raw Spearman hurt by ties, bf16 gate passes
+    rng = np.random.default_rng(2)
+    pc = 1 - rng.exponential(0.01, size=300).clip(0, 0.5)
+    labels = (rng.uniform(size=300) < 0.2).astype(int).tolist()
+    key = "PRM_Qwen/Qwen2.5-Math-PRM-7B"
+    write_jl(tmp_path / "x.traces.jsonl", [{"trace_id": "t", "labels": labels,
+                                             "scores": {key: (-bf16_round(pc)).tolist()}}])
+    g = gate_set(tmp_path / "x.traces.jsonl", {f"t::{k}": 1 - pc[k] for k in range(300)}, key)
+    assert g["spearman_bf16"] == pytest.approx(1.0) and g["d_ap_bf16"] == pytest.approx(0.0)
+    assert g["pass"] and g["n_unique_stored"] < 300
+
+
+def test_merge_set_rerun_rechecks_final_file(tmp_path):
+    write_jl(tmp_path / "s.shard0.jsonl", [{"uid": "a::0", "p": 0.1}, {"uid": "a::1", "p": 0.2}])
+    merge_set(tmp_path, "s", 1, ["a::0", "a::1"])
+    assert merge_set(tmp_path, "s", 1, ["a::0", "a::1"]) == 2
+    with pytest.raises(ValueError):
+        merge_set(tmp_path, "s", 1, ["a::0", "a::1", "a::2"])

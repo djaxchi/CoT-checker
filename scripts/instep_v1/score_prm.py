@@ -22,7 +22,10 @@ arm format of scripts/reprobe_cmp/analyze.py).
 
 Gate (merge): on every test set whose traces carry scores["PRM_<model>"], Spearman between
 our p and the stored value and PR-AUC (fast_ap, labels v >= 0) of both; pass = Spearman >=
-0.98 and |dAP| <= 0.01. Written to <out>/gate_prm.json.
+0.98 and |dAP| <= 0.01, computed on our scores rounded to bf16 like the stored ones (ReProbe's
+softmax ran in bf16, so a saturated PRM-7B leaves ~20 distinct stored values per 100 steps and
+the ties alone pull the raw Spearman down to ~0.92-0.98; the raw numbers are reported too, and
+the written scores keep full float32 precision). Written to <out>/gate_prm.json.
 
     score: CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/score_prm.py score --tag prm7b \\
                --out $OUT/scores --inputs qwen3_8b:math:$R/data/test/math.items.jsonl ... \\
@@ -197,10 +200,13 @@ def cmd_score(a) -> None:
 
 # ---------------------------------------------------------------- merge + gate
 def merge_set(d: Path, name: str, num_shards: int, uids: list[str]) -> int:
-    """Concatenate <name>.shard*.jsonl into <name>.jsonl in item order; every uid exactly once."""
+    """Concatenate <name>.shard*.jsonl into <name>.jsonl in item order; every uid exactly once.
+    Without shard files an existing <name>.jsonl is re-checked (a rerun of merge for the gate)."""
     sc = {}
-    for s in range(num_shards):
-        p = d / f"{name}.shard{s}.jsonl"
+    shards = [d / f"{name}.shard{s}.jsonl" for s in range(num_shards)]
+    if not any(p.exists() for p in shards) and (d / f"{name}.jsonl").exists():
+        shards = [d / f"{name}.jsonl"]
+    for p in shards:
         if p.exists():
             for r in jl(p):
                 if r["uid"] in sc:
@@ -233,12 +239,26 @@ def gate_set(traces_path: Path, scores: dict, key: str) -> dict | None:
     if not ours:
         return None
     ours, st, y = np.array(ours), np.array(st), np.array(y)
-    rho = float(spearmanr(ours, st).correlation)
-    ap_o, ap_s = fast_ap(y, ours), fast_ap(y, st)
-    return {"n": int(len(y)), "prevalence": float(y.mean()), "spearman": rho, "ap_ours": ap_o,
-            "ap_stored": ap_s, "d_ap": ap_o - ap_s,
-            "max_abs_diff_p_vs_1_plus_stored": float(np.max(np.abs(ours - (1 + st)))),
-            "pass": bool(rho >= 0.98 and abs(ap_o - ap_s) <= 0.01)}
+    ob = -bf16_round(1 - ours)  # ReProbe's value: -P(correct), P from a bf16 softmax
+    rho, rho_b = float(spearmanr(ours, st).correlation), float(spearmanr(ob, st).correlation)
+    ap_o, ap_b, ap_s = fast_ap(y, ours), fast_ap(y, ob), fast_ap(y, st)
+    d = np.abs(ours - (1 + st))
+    return {"n": int(len(y)), "prevalence": float(y.mean()), "n_unique_stored": int(len(np.unique(st))),
+            "spearman": rho, "ap_ours": ap_o, "ap_stored": ap_s, "d_ap": ap_o - ap_s,
+            "spearman_bf16": rho_b, "ap_ours_bf16": ap_b, "d_ap_bf16": ap_b - ap_s,
+            "median_abs_diff": float(np.median(d)), "share_within_0.008": float((d <= 0.008).mean()),
+            "max_abs_diff_p_vs_1_plus_stored": float(d.max()),
+            "pass_raw": bool(rho >= 0.98 and abs(ap_o - ap_s) <= 0.01),
+            "pass": bool(rho_b >= 0.98 and abs(ap_b - ap_s) <= 0.01)}
+
+
+def bf16_round(x) -> np.ndarray:
+    """Round float32 values to the nearest bfloat16 (ties to even), as float32. The stored
+    ReProbe PRM scores come from a softmax in bf16 (2^-8 resolution on [0.5, 1)), so saturated
+    PRMs tie many steps; the gate compares like with like on this rounded copy."""
+    b = np.asarray(x, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    b = ((b + 0x7FFF + ((b >> 16) & 1)) >> 16) << 16
+    return b.astype(np.uint32).view(np.float32).astype(np.float64)
 
 
 def cmd_merge(a) -> None:
@@ -274,9 +294,10 @@ def cmd_merge(a) -> None:
                 gate[f"{bb}/{tag}/{name}"] = g
                 ok &= g["pass"]
                 print(f"[gate] {bb:9s} {tag:7s} {name:10s} n={g['n']:5d} rho={g['spearman']:.4f} "
-                      f"AP ours {g['ap_ours']:.4f} stored {g['ap_stored']:.4f} (d {g['d_ap']:+.4f}) "
-                      f"max|p-(1+s)| {g['max_abs_diff_p_vs_1_plus_stored']:.3f} {'PASS' if g['pass'] else 'FAIL'}",
-                      flush=True)
+                      f"(bf16 {g['spearman_bf16']:.4f}) AP ours {g['ap_ours']:.4f} (bf16 {g['ap_ours_bf16']:.4f}) "
+                      f"stored {g['ap_stored']:.4f} | med|d| {g['median_abs_diff']:.4f} "
+                      f"<=.008 {g['share_within_0.008']:.3f} max {g['max_abs_diff_p_vs_1_plus_stored']:.3f} "
+                      f"{'PASS' if g['pass'] else 'FAIL'}{'' if g['pass_raw'] else ' (raw FAIL)'}", flush=True)
     (a.out / "gate_prm.json").write_text(json.dumps({"all_pass": ok, "smoke": a.smoke, "cells": gate}, indent=1))
     print(f"[gate] {'ALL PASS' if ok else 'FAILED'} ({len(gate)} cells) -> {a.out / 'gate_prm.json'}", flush=True)
     if a.strict and not ok:

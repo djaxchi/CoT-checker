@@ -109,7 +109,8 @@ def main() -> None:
             raise SystemExit(f"{name}: no sweep.json matches {pattern}")
         tables[name] = summarize(files, metric)
         picks[name] = pick(tables[name])
-        lines += [f"## {name} (validation {metric.upper()}, {len(files)} seeds)", "",
+        n_seeds = len({sd for t in tables[name].values() for sd in t["seeds"]})
+        lines += [f"## {name} (validation {metric.upper()}, {n_seeds} seeds, {len(files)} files)", "",
                   "| config | mean | sd | min | unstable seeds | max late loss / constant |",
                   "|---|---|---|---|---|---|"]
         for k, t in sorted(tables[name].items(), key=lambda kv: (kv[1]["lr"], kv[1]["warmup"])):

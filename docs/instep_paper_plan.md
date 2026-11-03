@@ -91,7 +91,7 @@ Table 4) for a scale curve. All on the ReProbe benchmark; ProcessBench on Qwen3-
 10. Appendix: calib-20, confidence-wrong limit, released ReProbe attends to future steps,
     ReProbe Table 5 reproducibility notes, seeds and the lr rule.
 
-## Gaps, ReProbe-first priority
+## Gaps, ReProbe-first priority (superseded by the V1 run list below; kept for history)
 
 | # | run | feeds | cost |
 |---|---|---|---|
@@ -105,3 +105,51 @@ Table 4) for a scale curve. All on the ReProbe benchmark; ProcessBench on Qwen3-
 | G8 | inline per-layer separability store | Fig 5 | store + CPU |
 | G9 | optional: Qwen3-1.7B; ProcessBench on Phi-4 / Qwen3-32B | Fig 3 | medium |
 | G10 | literature refresh | related work | none |
+
+## V1 run list (2026-11-03, revised twice)
+
+Rule (user): on ReProbe's task and test sets, the numbers printed in the ReProbe paper
+(arXiv 2511.06209 v5; Table 1 Qwen3-8B, Table 5 Qwen3-32B, Table 9 Phi-4) are cited as given
+for every method it reports. We run what the paper does not have, and we fill the gaps where
+the paper is incomplete or does not match its own released files.
+
+### Two tiers of comparators
+
+* Tier A (full metrics: PR-AUC, AUROC, F1 at the validation threshold, oracle F1, always-positive
+  F1, paired trace bootstrap): InStep, ReProbe (released + matched retrain), strong PRM
+  (Qwen2.5-Math-PRM-7B), weak PRM (Qwen2.5-Math-7B-PRM800K), passive linear, MaxProb (best
+  token-confidence row in Tables 1 and 9), P(True) (Qwen3-8B). These need step scores on test
+  AND validation, which the paper does not give.
+* Tier B (PR-AUC as printed, no interval): every other row of Tables 1, 5, 9.
+
+### What the paper lacks, and how V1 fills it
+
+| gap in the paper | V1 fill |
+|---|---|
+| PR-AUC only; no AUROC, no thresholded F1, no seeds or intervals | Tier A step scores on test + val, F1 at the val threshold, paired bootstrap |
+| no ProcessBench, no human labels | every Tier A method on ProcessBench |
+| Table 5 GSM8K PRM column disagrees with the released scores (.930 vs .552); two column pairs swapped; traces are non-thinking although the text says native thinking | PRMs re-scored by us on the released 32B traces; table prints both numbers with a footnote |
+| Table 9 planning columns on traces that are not released | PRMs scored by us on the released Phi-4 planning traces; headline Phi-4 comparison on the five released sets |
+| released ReProbe attends to steps after the one it scores (mask bug) | our causal retrain (RPc) reported next to it (done) |
+| efficiency claimed, no latency against a PRM | cost table (done on Qwen3-8B) |
+| best-of-N (Table 3) graded by an LLM judge, not reproducible programmatically | best-of-N within our harness only (done; re-scored with the new tokens) |
+
+### Jobs
+
+| job | what | backbones |
+|---|---|---|
+| E1 | score the sweep's InStep tokens (DS x3, PRM800K x3) on the 8 sets, ProcessBench, validation, best-of-N pools; abstention re-scored | Qwen3-8B |
+| P1 | strong + weak PRM on all 8 test sets + validation (one protocol); gate: our test scores reproduce the stored ones where stored | all 3 |
+| U1 | MaxProb (+ MaxEntropy, Perplexity) on test + validation; gate: our test scores reproduce the stored ones | all 3 |
+| T1 | P(True) on test + validation | Qwen3-8B |
+| B1 | passive linear (logistic, layer picked on validation) | all 3 |
+| PB | ProcessBench: weak PRM, MaxProb, P(True), passive | Qwen3-8B |
+| L1 | ladder on ReProbe DS data, 3 seeds: embedding-only token, + offsets, + chain, InStep without offsets; embedding-only on PRM800K | Qwen3-8B |
+| S1 | per-layer InStep and passive states on validation (Fig 5) | Qwen3-8B |
+| C1-C3 | CPU: paper rows (Tier B), threshold-free ProcessBench metrics, bootstraps, tables, plots | |
+
+Reporting: PR-AUC cells for paper methods print the paper's number; where our re-score
+differs by more than 0.01 the table shows ours in brackets with a footnote. F1 is reported
+per set next to that set's always-positive F1 (set prevalences run from 8.6% to 59.1%, so
+F1 is never compared across sets). Order: E1 first (no new code), then P1/U1/T1/B1 (one
+scoring script, reproduction gate first), then PB, L1, S1, C1-C3.

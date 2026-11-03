@@ -71,3 +71,15 @@ same config trained alone (`tests/test_read_token_inline.py`).
 * Main: one node, GPU g = seed g (0-2), `ds` then `prm`, then the selection.
   Outputs: `/project/aip-azouaq/$USER/cot_mech/instep_lr_sweep/{ds,prm}_seed{0-2}/`
   (`sweep.json`, one `read_token.pt` per config), `selection/selection.{md,json}`.
+
+## Result and decision (2026-11-03, TamIA 662436)
+
+The frozen rule gave one pick per source and no joint recipe: `ds` 3e-3 with 20% warm-up
+(val AP 0.603), `prm` 1.5e-3 with 5% warm-up (val AUROC 0.887, by the tie-break).
+Decision (deviation from rule 4, disclosed): InStep keeps ONE recipe for every source,
+peak lr 3e-3 with 5% warm-up, the configuration used so far. It is stable on all six runs
+(three seeds per source, late loss at most 0.83x and 0.94x the constant predictor) and
+near-best on both: `ds` 0.597 (0.006 below the pick, about half a seed SD), `prm` 0.889
+(0.002 above the pick, inside the tie margin). The paper's Qwen3-8B tokens are the
+sweep's three seeds of that config for each source; Phi-4, Qwen3-32B and the self-label
+runs already use it.

@@ -22,7 +22,7 @@
 # Outputs: $OUT/simp/<name>/ (token, sweep.json), scores $OUT/rt_simp/<backbone>/<name>/.
 # SMOKE=N: first N items.
 set -euo pipefail
-STAGE="${STAGE:?q8, phi4, q32a or q32b}"
+STAGE="${STAGE:?q8, phi4, q32a, q32b, redo32 or encode}"
 SMOKE="${SMOKE:-0}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 CM="/project/aip-azouaq/$USER/cot_mech"
@@ -72,8 +72,26 @@ run() {
     HF_HOME=$hf CUDA_VISIBLE_DEVICES=$g python scripts/read_token_inline.py train --model $model --init_text " correct" \
       --head linear "${flags[@]}" "${tr[@]}" "${extra[@]}" --sweep "3e-3:0.05" --epochs "$ep" --seed "$s" \
       --soft_attn no_cudnn --out "$tok" "${SM[@]}" || exit 1
+    enc "$g" "$bb" "$name" || exit 1
+  ) > "$LOGS/simp_${bb}_$name-$SLURM_JOB_ID.log" 2>&1
+}
+
+# enc <gpu> <bb> <name>: score a trained token (a single-config run saves <tok>/read_token.pt)
+enc() {
+  local g=$1 bb=$2 name=$3 model hf dd layout sets=()
+  case $bb in
+    8b)   model=Qwen/Qwen3-8B; hf=/project/aip-azouaq/$USER/hf_cache; dd=$CM/reprobe_cmp_v1/data; layout=reprobe ;;
+    phi4) model=microsoft/phi-4; hf=$SCRATCH/hf_cache; dd=$CM/reprobe_cmp_v2/phi4/data; layout=reprobe_phi4 ;;
+    32b)  model=Qwen/Qwen3-32B; hf=$SCRATCH/hf_cache; dd=$CM/reprobe_cmp_v2/qwen3_32b/data; layout=reprobe ;;
+  esac
+  for x in math gsm8k proofnet trips meetings calendar strategyqa scienceqa; do sets+=("$x:$dd/test/$x.items.jsonl"); done
+  [[ $bb == 8b ]] && for x in gsm8k math olympiadbench omnimath; do sets+=("pb_$x:$dd/pb/$x.items.jsonl"); done
+  sets+=("val:$dd/rt/all_val.items.jsonl")
+  local tok="$OUT/simp/${bb}_$name" dst="$OUT/rt_simp/$bb/$name" tmp="$L/enc_${bb}_$name" ck
+  ck="$tok/read_token.pt"; [[ -f "$ck" ]] || ck="$tok/lr0.003_wu0.05/read_token.pt"
+  (
     HF_HOME=$hf CUDA_VISIBLE_DEVICES=$g python scripts/read_token_inline.py encode --model $model --layout $layout \
-      --ckpt "$tok/lr0.003_wu0.05/read_token.pt" --out "$tmp" --prm800k "${sets[@]}" --passive_blocks "" "${SM[@]}" || exit 1
+      --ckpt "$ck" --out "$tmp" --prm800k "${sets[@]}" --passive_blocks "" "${SM[@]}" || exit 1
     mkdir -p "$dst"
     python - "$tmp" "$dst" <<'PY' || exit 1
 import sys, shutil, numpy as np
@@ -85,7 +103,7 @@ for z in src.glob("*.shard0.npz"):
     shutil.copy(src / z.name.replace(".npz", ".meta.jsonl"), dst)
 PY
     rm -rf "$tmp"
-  ) > "$LOGS/simp_${bb}_$name-$SLURM_JOB_ID.log" 2>&1
+  )
 }
 
 pids=()
@@ -102,6 +120,23 @@ case $STAGE in
   q32b)
     for s in 0 1 2; do run $s 32b off oss $s 4 & pids+=($!); done
     run 3 32b instep oss 2 2 & pids+=($!) ;;
+  redo32)  # 32B off seed 2 hit a CUDA OOM in the startup gate (job 664300)
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    run 0 32b off oss 2 4 & pids+=($!) ;;
+  encode)  # score every trained token that has no scores yet (jobs 664297-664300 saved
+           # single-config tokens at <tok>/read_token.pt, not <tok>/<tag>/)
+    todo=()
+    for t in "$OUT"/simp/*; do
+      [[ -f $t/read_token.pt || -f $t/lr0.003_wu0.05/read_token.pt ]] || continue
+      n=$(basename "$t"); bb=${n%%_*}; name=${n#*_}
+      [[ -f "$OUT/rt_simp/$bb/$name/val.shard0.npz" ]] || todo+=("$bb:$name")
+    done
+    echo "to encode: ${todo[*]}"
+    for g in 0 1 2 3; do
+      ( f=0; i=0; for x in "${todo[@]}"; do
+          if (( i % 4 == g )); then enc $g "${x%%:*}" "${x#*:}" > "$LOGS/enc_${x/:/_}-$SLURM_JOB_ID.log" 2>&1 || f=1; fi
+          i=$((i + 1)); done; exit $f ) & pids+=($!)
+    done ;;
   *) echo "unknown STAGE=$STAGE"; exit 2 ;;
 esac
 fail=0

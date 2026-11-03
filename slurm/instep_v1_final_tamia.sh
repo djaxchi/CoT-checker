@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=00:45:00
+#SBATCH --time=00:30:00
 #SBATCH --output=%x-%j.out
 # InStep paper V1, run C1 (docs/instep_v1_runbook.md): CPU-only final aggregation. Every arm
 # that exists under $OUT, reprobe_cmp_v1 and reprobe_cmp_v2 is scored on the three backbones

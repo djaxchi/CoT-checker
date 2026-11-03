@@ -12,8 +12,9 @@ that the printed Meetings/Calendar and StrategyQA/ScienceQA columns are swapped 
 stored ReProbe column gives meetings .698, calendar .734, strategyqa .303, scienceqa .302, the
 printed row reads .734, .698, .302, .303 under Meetings, Calendar, StrQA, SciQA). `per_set()`
 undoes the swap by default (`corrected=True`); the ID, OOD and overall means are unaffected.
-Its GSM8K column of Qwen2.5-Math-PRM-7B (.930) also disagrees with the released stored scores
-(.552); that is not corrected here, it is reported by the consistency check.
+Its GSM8K column also disagrees with the released stored scores for all five PRM rows (e.g.
+Qwen2.5-Math-PRM-7B prints .930, the stored scores give .552); that is not corrected here, it is
+reported by the consistency check (KNOWN_ISSUES).
 
 Table 9 note: the Phi-4 planning columns (Trips, Meetings, Calendar) come from traces that are
 not released; the five released sets (MATH, GSM8K, ProofNet, StrategyQA, ScienceQA) form the
@@ -138,9 +139,18 @@ STORED = {
 
 # disagreements that are known and explained (backbone, method, set) -> reason
 KNOWN_ISSUES = {
-    ("qwen3_32b", PRM7B, "gsm8k"): "Table 5 prints .930; the released stored scores give a different value",
+    # every PRM row of Table 5's GSM8K column disagrees with the released stored scores (e.g. PRM-7B
+    # prints .930, the stored column gives .552) while the ReProbe row (.535) reproduces
+    **{("qwen3_32b", m, "gsm8k"): "Table 5 GSM8K column of the PRM rows does not match the released stored scores"
+       for m in (SKYWORK, H4, UNIVERSAL, PRM800K, PRM7B)},
     **{("phi4", m, s): "Table 9 planning columns come from traces that are not released"
        for m in TABLES["phi4"]["rows"] for s in ("trips", "meetings", "calendar")},
+    # Table 1's UQ rows on four sets were computed on another label set than the released one:
+    # the printed Random row (.173/.061/.153/.116 on MATH/GSM8K/ProofNet/StrategyQA) is far from
+    # the released positive rates (.161/.086/.103/.189), while the ReProbe rows reproduce exactly
+    **{("qwen3_8b", m, s): "Table 1 UQ rows on this set do not use the released labels (printed Random AP "
+       "differs from the released positive rate)"
+       for m in (RANDOM, MAXPROB, MAXENT, PPL) for s in ("math", "gsm8k", "proofnet", "strategyqa")},
 }
 
 

@@ -86,6 +86,10 @@ PAPER_MAP = {
                   "maxprob_stored": None},
 }
 
+# arms whose score is not a re-score of the printed method (shown in Tier A only): the released
+# Qwen3-32B head rescored by us does not reproduce ReProbe's own stored column
+NO_BRACKET = {("qwen3_32b", "rp_rel")}
+
 
 # ---------------------------------------------------------------------------- arm specs
 def seeds(base: str, n: int = 3) -> list[str]:
@@ -605,7 +609,8 @@ def table1(bb: str, R: dict) -> dict:
         flagged = False
         for meth in PN.methods(bb):
             p = PN.per_set(bb, meth)
-            cand = sorted(ours_by_method.get(meth, []), key=lambda k: arms[k]["kind"] == "stored")
+            cand = sorted((k for k in ours_by_method.get(meth, []) if (bb, k) not in NO_BRACKET),
+                          key=lambda k: arms[k]["kind"] == "stored")
             cells = []
             for s in TEST:
                 c = f3(p.get(s))
@@ -617,8 +622,9 @@ def table1(bb: str, R: dict) -> dict:
             gcells = [f3(p.get(g)) for g in groups]
             rows.append([meth, "B"] + cells + gcells + ["-", "-", "-", "-"])
         if flagged:
-            notes.append("[x]: our re-score of the same method on the same released traces, where it differs from the "
-                         "printed cell by more than 0.01.")
+            notes.append("[x]: our PR-AUC for the same method on the released traces (our re-score, or ReProbe's stored "
+                         "scores recomputed when we have no re-score), shown where it differs from the printed cell by "
+                         "more than 0.01.")
         if PN.TABLES[bb]["column_fix"]:
             notes.append("Table 5 columns Meetings/Calendar and StrategyQA/ScienceQA are printed swapped; they are "
                          "shown here under the set the released scores identify (see the consistency check).")

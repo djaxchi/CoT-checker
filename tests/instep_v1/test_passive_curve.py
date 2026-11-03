@@ -38,4 +38,21 @@ def test_curve_and_concat_rows(tmp_path, monkeypatch):
     assert [r["n_train"] for r in rows] == [200, 2000, 2000, 2000]  # 20000 capped at the 2000 rows
     assert rows[2]["keys"] == list(keys)
     assert rows[1]["val_ap"] > rows[0]["val_ap"]  # more training rows help
+    # training states split in two parts in another dir: same rows, same fit
+    other = tmp_path / "full"
+    other.mkdir()
+    write_set(other, "train_p0", [f"tr{i}::0" for i in range(1000)], y[:1000], {k: v[:1000] for k, v in xs.items()})
+    write_set(other, "train_p1", [f"tr{i}::0" for i in range(1000, 2000)], y[1000:], {k: v[1000:] for k, v in xs.items()})
+    out2 = tmp_path / "curve2.json"
+    monkeypatch.setattr(sys, "argv", ["passive_curve.py", "--states", str(states), "--data", str(data),
+                                      "--val_label", "ds", "--out", str(out2), "--sizes", "0",
+                                      "--concat_sizes", "0", "--train_states", str(other),
+                                      "--train_names", "train_p0,train_p1", "--scores_out", str(tmp_path / "sc")])
+    pc.main()
+    rows2 = json.loads(out2.read_text())["rows"]
+    assert [r["n_train"] for r in rows2] == [2000, 2000]
+    assert abs(rows2[0]["val_ap"] - rows[1]["val_ap"]) < 1e-6 and abs(rows2[1]["val_ap"] - rows[3]["val_ap"]) < 1e-6
     assert rows[3]["val_ap"] > rows[1]["val_ap"]  # five noisy copies of the signal beat one
+    lines = (tmp_path / "sc" / "concat5" / "math.jsonl").read_text().splitlines()
+    assert len(lines) == 300 and json.loads(lines[0])["uid"] == "math0::0"
+    assert (tmp_path / "sc" / "final" / "val.jsonl").exists() and not (tmp_path / "sc" / "final" / "train40k.jsonl").exists()

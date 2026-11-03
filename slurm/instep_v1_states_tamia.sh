@@ -21,9 +21,14 @@
 #   STAGE=curve   audit of B1 on qwen3_8b (scripts/instep_v1/passive_curve.py): passive_final
 #                 learning curve on 5k-40k training steps and the late-layer concatenation,
 #                 to $OUT/analysis/passive_curve_qwen3_8b.json.
+#   STAGE=fullpassive  B1 on the full DS training split (167k steps, not 40k): text states at
+#                 blocks 23,27,31,35 + final of all of ds_train (4 trace-disjoint parts, one per
+#                 GPU, read with the offsets-only DS token; text states do not depend on it), then
+#                 passive_curve.py on 40k / 80k / all, scores of the all-data fits (passive_final and
+#                 the 5-state concatenation) to $OUT/scores/qwen3_8b/passive_full/{final,concat5}/.
 # SMOKE=N runs every step on the first N items, under *_smokeN output roots.
 set -euo pipefail
-STAGE="${STAGE:?encode, fit or curve}"
+STAGE="${STAGE:?encode, fit, curve or fullpassive}"
 SMOKE="${SMOKE:-0}"
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 P="/project/aip-azouaq/$USER/cot_mech"
@@ -94,6 +99,30 @@ elif [[ $STAGE == curve ]]; then
   CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/passive_curve.py --states "$ST8/qwen3_8b" \
     --data "${R[qwen3_8b]}/data" --val_label ds --out "$OUT/analysis/passive_curve_qwen3_8b.json" \
     > "$LOGS/curve_qwen3_8b-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+elif [[ $STAGE == fullpassive ]]; then
+  D8="${R[qwen3_8b]}/data"; FS="$ST/qwen3_8b_fulltrain"; mkdir -p "$FS" "$SLURM_TMPDIR/parts"
+  TOK8="$OUT/rungsweep/off_ds_seed0/lr0.003_wu0.05/read_token.pt"
+  python - "$D8/rt/ds_train.items.jsonl" "$SLURM_TMPDIR/parts" "$SMOKE" <<'PY'
+import json, sys, zlib
+src, out, smoke = sys.argv[1], sys.argv[2], int(sys.argv[3])
+fs = [open(f"{out}/train_p{g}.jsonl", "w") for g in range(4)]
+for i, l in enumerate(open(src)):
+    if smoke and i >= 4 * smoke: break
+    tid = json.loads(l)["uid"].rsplit("::", 1)[0]
+    fs[zlib.crc32(tid.encode()) % 4].write(l)
+PY
+  for g in 0 1 2 3; do
+    ( HF_HOME=/project/aip-azouaq/$USER/hf_cache CUDA_VISIBLE_DEVICES=$g python scripts/read_token_inline.py encode --model Qwen/Qwen3-8B --layout reprobe \
+        --ckpt "$TOK8" --out "$FS" --prm800k "train_p$g:$SLURM_TMPDIR/parts/train_p$g.jsonl" \
+        --passive_blocks 23,27,31,35 "${SM[@]}" ) > "$LOGS/fullenc_p$g-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+  done
+  fail=0; for p in "${pids[@]}"; do wait "$p" || fail=1; done; pids=()
+  [[ $fail == 0 ]] || { grep -h "Error\|error" "$LOGS"/fullenc_p*-"$SLURM_JOB_ID".log | tail; exit 1; }
+  part=(--sizes 40000,80000,0 --concat_sizes 40000,0); [[ $SMOKE == 0 ]] || part=(--sizes 0 --concat_sizes 0)
+  CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/passive_curve.py --states "$ST8/qwen3_8b" \
+    --data "$D8" --val_label ds --train_states "$FS" --train_names train_p0,train_p1,train_p2,train_p3 \
+    "${part[@]}" --scores_out "$OUT/scores/qwen3_8b/passive_full" \
+    --out "$OUT/analysis/passive_full_qwen3_8b.json" > "$LOGS/fullfit-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
 else
   echo "unknown STAGE=$STAGE"; exit 2
 fi

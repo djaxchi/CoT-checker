@@ -1,7 +1,8 @@
 """PR-AUC tables of the ReProbe paper (arXiv 2511.06209 v5), transcribed as printed (Tier B).
 
 Source: the arXiv HTML of v5 (https://arxiv.org/html/2511.06209v5), parsed table by table.
-Table 1 = Qwen3-8B, Table 5 = Qwen3-32B (native thinking), Table 9 = Phi-4.
+Table 1 = Qwen3-8B, Table 4 = Qwen3-1.7B (native thinking), Table 5 = Qwen3-32B (native
+thinking), Table 9 = Phi-4.
 
 Each table: `printed_columns` is the set order of the printed header; every row holds the eight
 per-set values in that order, then ID, OOD and overall (as printed). Use `per_set()` to get
@@ -15,6 +16,11 @@ undoes the swap by default (`corrected=True`); the ID, OOD and overall means are
 Its GSM8K column also disagrees with the released stored scores for all five PRM rows (e.g.
 Qwen2.5-Math-PRM-7B prints .930, the stored scores give .552); that is not corrected here, it is
 reported by the consistency check (KNOWN_ISSUES).
+
+Table 4 note: the ReProbe row's Meetings cell prints .505, but the released 7-epoch manager gives
+.553 and the printed OOD (.474) and overall (.447) means are those of .553 (with .505 they would
+be .464 and .441): the cell is a typo, corrected by `per_set()` (`cell_fix`). Table 4 has no UQ,
+Skywork or H4 rows, and its PRM scores are not in the released managers.
 
 Table 9 note: the Phi-4 planning columns (Trips, Meetings, Calendar) come from traces that are
 not released; the five released sets (MATH, GSM8K, ProofNet, StrategyQA, ScienceQA) form the
@@ -76,6 +82,21 @@ TABLES: dict[str, dict] = {
             RP_HS_DS: (.534, .650, .281, .793, .817, .789, .344, .450, .488, .639, .582),
         },
     },
+    "qwen3_1_7b": {
+        "table": "Table 4",
+        "printed_columns": TEST,
+        "column_fix": {},
+        "cell_fix": {(RP_HS_OSS, "meetings"): .553},
+        "rows": {
+            SHEPHERD: (.049, .248, .234, .219, .481, .338, .265, .313, .177, .323, .268),
+            RLHF_DS: (.063, .267, .228, .169, .498, .322, .449, .368, .186, .361, .296),
+            RLHF_MI: (.047, .184, .164, .141, .457, .275, .273, .279, .132, .285, .228),
+            UNIVERSAL: (.175, .331, .299, .272, .708, .446, .335, .329, .268, .418, .362),
+            PRM800K: (.217, .392, .505, .270, .716, .587, .391, .336, .371, .460, .427),
+            PRM7B: (.293, .270, .465, .328, .732, .605, .378, .293, .343, .467, .421),
+            RP_HS_OSS: (.312, .433, .465, .334, .505, .604, .426, .451, .403, .474, .447),
+        },
+    },
     "qwen3_32b": {
         "table": "Table 5",
         "printed_columns": TEST,  # as printed; the data says two pairs are swapped (column_fix)
@@ -120,6 +141,9 @@ STORED = {
                  RP_AL_DS: "LuqClaimEstimatorDummy_claim",
                  H4: "PRM_HuggingFaceH4/Qwen2.5-Math-1.5B-Instruct-PRM-0.2",
                  UNIVERSAL: "PRM_universalprm/Universal-PRM"},
+    "qwen3_1_7b": {RANDOM: "RandomBaselineClaim", MAXPROB: "MaximumClaimProbability",
+                   MAXENT: "MaxTokenEntropyClaim", PPL: "PerplexityClaim",
+                   RP_HS_OSS: "LuqClaimEstimatorDummy_claim"},
     "qwen3_32b": {SKYWORK: "PRM_Skywork/Skywork-o1-Open-PRM-Qwen-2.5-1.5B",
                   H4: "PRM_HuggingFaceH4/Qwen2.5-Math-1.5B-Instruct-PRM-0.2",
                   UNIVERSAL: "PRM_universalprm/Universal-PRM",
@@ -164,6 +188,8 @@ def per_set(backbone: str, method: str, corrected: bool = True) -> dict[str, flo
     out = {}
     for col, x in zip(t["printed_columns"], v[:8]):
         out[t["column_fix"].get(col, col) if corrected else col] = float(x)
+    if corrected:
+        out.update({c: float(x) for (m, c), x in t.get("cell_fix", {}).items() if m == method})
     out.update({"id": float(v[8]), "ood": float(v[9]), "overall": float(v[10])})
     if backbone == "phi4":
         out["t9"] = float(sum(out[s] for s in T9) / len(T9))

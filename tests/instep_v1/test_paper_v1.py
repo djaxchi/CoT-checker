@@ -117,6 +117,11 @@ def test_paper_tables_internally_consistent():
     for bb, t in PN.TABLES.items():
         for m, v in t["rows"].items():
             assert len(v) == 11, (bb, m)
+            # a typo'd cell (cell_fix) is checked at its corrected value; the printed one fails
+            fix = {t["printed_columns"].index(c): x for (mm, c), x in t.get("cell_fix", {}).items() if mm == m}
+            if fix:
+                assert abs(np.mean(v[:8]) - v[10]) > 0.0016, (bb, m)
+            v = tuple(fix.get(i, x) for i, x in enumerate(v[:8])) + tuple(v[8:])
             assert abs(np.mean(v[:8]) - v[10]) <= 0.0016, (bb, m)
             assert abs(np.mean(v[:3]) - v[8]) <= 0.0016, (bb, m)
             assert abs(np.mean(v[3:8]) - v[9]) <= 0.0016, (bb, m)

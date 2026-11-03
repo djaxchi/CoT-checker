@@ -84,14 +84,15 @@ BACKBONES = {
         "scienceqa": (P4 + "sci_qa", 0.347),
     }),
     # Table 4, "ReProbe, Hidden States, GPT-OSS-anno": the 10.8k-trace, 7-epoch run's
-    # managers reproduce it on 7 of 8 sets. Meetings: this manager holds 93 traces and gives
-    # .553 (the 5-epoch run's 120 traces .558), neither the printed .505, so it is not gated.
+    # managers reproduce every printed cell but Meetings, which prints .505; this manager
+    # (93 traces) gives .553, and the printed OOD (.474) and overall (.447) means are the
+    # ones .553 gives (.505 would give .464 and .441), so the .505 cell is a typo.
     "qwen3_1_7b": ("Qwen/Qwen3-1.7B", reprobe_prompt_think, "<|im_end|>\n<|im_start|>assistant\n", {
         "math": (Q17 + "math_new", 0.312),
         "gsm8k": (Q17 + "gsm8k_new", 0.433),
         "proofnet": (Q17 + "proofnet_new", 0.465),
         "trips": (Q17 + "trip_new", 0.334),
-        "meetings": (Q17 + "meeting_new", None),
+        "meetings": (Q17 + "meeting_new", 0.553),
         "calendar": (Q17 + "calendar_new", 0.604),
         "strategyqa": (Q17 + "stqa_new", 0.426),
         "scienceqa": (Q17 + "sciqa_new", 0.451),

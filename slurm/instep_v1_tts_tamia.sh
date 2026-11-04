@@ -14,11 +14,13 @@
 #                 InStep-DS (seeds 0-2), InStep-self (seeds 0-2) and the released ReProbe
 #                 hidden-state probes (DeepSeek, self); scores join the existing arm dirs
 #   STAGE=beam    beam search B=5 x N=5 (scripts/reprobe_cmp/beam_search.py) on BEAM_SETS with
-#                 BEAM_ARMS (names below), the first BEAM_LIMIT questions of each set split
-#                 over the 4 GPUs; rows join $V1/beam (resumable: a (question, arm) already in
-#                 any <set>*.jsonl there is skipped)
+#                 BEAM_ARMS (names below), BEAM_LIMIT questions of each set from BEAM_OFFSET
+#                 (default 0; several jobs shard the questions) split over the 4 GPUs; rows join
+#                 $V1/beam (resumable: a (question, arm) already in any <set>*.jsonl there is skipped)
 #   STAGE=judge   LLM judge (scripts/instep_v1/tts_judge.py, Qwen3-32B) on JUDGE_WHAT
-#                 (bon,val or beam) into $OUT/tts/judge_<JUDGE_TAG>, then merge
+#                 (bon,val or beam) into $OUT/tts/judge_<JUDGE_TAG>, then merge. Multi-node:
+#                 build items.jsonl once on the login node, then JUDGE_BUILD=0 JUDGE_NODES=n
+#                 JUDGE_NODE=i (i = 0..n-1) judges shards 4i..4i+3 of 4n and skips the merge
 # SMOKE=N: N questions per set (beam), N items per shard (judge), first N items (bonenc).
 set -euo pipefail
 STAGE="${STAGE:?bonenc, beam or judge}"
@@ -101,33 +103,38 @@ if [[ $STAGE == bonenc ]]; then
   done
 elif [[ $STAGE == beam ]]; then
   LIM="${BEAM_LIMIT:-300}"; [[ $SMOKE == 0 ]] || LIM=$((SMOKE * 4))
+  OFF="${BEAM_OFFSET:-0}"
   BD="$V1/beam"; [[ $SMOKE == 0 ]] || BD="$OUT/beam"
   SPEC=(); for n in ${BEAM_ARMS:?arm names}; do SPEC+=("$n=${ARM[$n]}"); done
   for g in 0 1 2 3; do
     ( f=0
       for s in ${BEAM_SETS:?sets}; do
         CUDA_VISIBLE_DEVICES=$g python scripts/reprobe_cmp/beam_search.py --pools "$POOLS" --set "$s" \
-          --offset $((g * LIM / 4)) --limit $(( (g + 1) * LIM / 4 - g * LIM / 4 )) --model $Q3 \
+          --offset $((OFF + g * LIM / 4)) --limit $(( (g + 1) * LIM / 4 - g * LIM / 4 )) --model $Q3 \
           --out "$BD/$s.${BEAM_TAG:-v1}.part$g.jsonl" --arm "${SPEC[@]}" || f=1
       done; exit $f ) > "$LOGS/tts_beam_${BEAM_TAG:-v1}_g$g-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
   done
 elif [[ $STAGE == judge ]]; then
   JD="$OUT/tts/judge_${JUDGE_TAG:?bon or beam}"
   JM="$(ls -d $SCRATCH/hf_cache/hub/models--Qwen--Qwen3-32B/snapshots/*/ | head -1)"
-  BB=(); [[ "${JUDGE_WHAT:-bon,val}" != *beam* ]] || BB=(--beam "$V1/beam")
-  python scripts/instep_v1/tts_judge.py build --pools "$POOLS" --out "$JD" --what "${JUDGE_WHAT:-bon,val}" \
-    --sets "${JUDGE_SETS:-proofnet,trips,meetings}" "${BB[@]}"
+  NODES="${JUDGE_NODES:-1}"; NODE="${JUDGE_NODE:-0}"
+  if [[ "${JUDGE_BUILD:-1}" == 1 ]]; then
+    BB=(); [[ "${JUDGE_WHAT:-bon,val}" != *beam* ]] || BB=(--beam "$V1/beam")
+    python scripts/instep_v1/tts_judge.py build --pools "$POOLS" --out "$JD" --what "${JUDGE_WHAT:-bon,val}" \
+      --sets "${JUDGE_SETS:-proofnet,trips,meetings}" "${BB[@]}"
+  fi
   SM=(); [[ $SMOKE == 0 ]] || SM=(--smoke "$SMOKE")
   for g in 0 1 2 3; do
     CUDA_VISIBLE_DEVICES=$g python scripts/instep_v1/tts_judge.py judge --out "$JD" --model "$JM" --backend hf \
-      --shard $g --num_shards 4 "${SM[@]}" > "$LOGS/tts_judge_${JUDGE_TAG}_g$g-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+      --shard $((4 * NODE + g)) --num_shards $((4 * NODES)) "${SM[@]}" \
+      > "$LOGS/tts_judge_${JUDGE_TAG}_g$((4 * NODE + g))-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
   done
 else
   echo "unknown STAGE=$STAGE"; exit 2
 fi
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
-if [[ $STAGE == judge ]]; then
+if [[ $STAGE == judge && "${JUDGE_NODES:-1}" == 1 ]]; then
   MB=(); [[ "${JUDGE_WHAT:-bon,val}" != *bon* || $SMOKE != 0 ]] || MB=(--bon "$V1/bon")
   python scripts/instep_v1/tts_judge.py merge --out "$JD" "${MB[@]}" || fail=1
 fi

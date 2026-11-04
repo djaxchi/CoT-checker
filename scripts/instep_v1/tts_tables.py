@@ -102,18 +102,29 @@ def bon_table(bon: Path, arms: dict, sets: tuple, n_boot: int, pairs: list) -> d
             continue
         g = {(r["qi"], r["k"]): r for r in jl(gp)}
         meta = jl(bon / "inputs" / f"{s}.meta.jsonl")
-        meta = [m for m in meta if (m["qi"], m["k"]) in g]
+        # a judged set may grade only the candidates the table needs (tts_judge.py picks): every
+        # scorer still picks among all candidates; ungraded candidates are NaN
+        partial = any((m["qi"], m["k"]) not in g for m in meta)
+        if not partial or not any((m["qi"], m["k"]) in g for m in meta):
+            meta = [m for m in meta if (m["qi"], m["k"]) in g]
         tid = [m["trace_id"] for m in meta]
         qi = np.array([m["qi"] for m in meta])
-        y = np.array([g[(m["qi"], m["k"])]["ok"] for m in meta], dtype=float)
-        keys = [g[(m["qi"], m["k"])].get("key") for m in meta]
+        kk = np.array([m["k"] for m in meta])
+        gr = [g.get((m["qi"], m["k"])) for m in meta]
+        y = np.array([np.nan if r is None else r["ok"] for r in gr], dtype=float)
+        keys = [None if r is None else r.get("key") for r in gr]
         keys = [k if isinstance(k, str) else None for k in keys]
-        judged = any("judged" in g[(m["qi"], m["k"])] for m in meta)
+        judged = any(r is not None and "judged" in r for r in gr)
         qs = sorted(set(qi.tolist()))
         by_q = defaultdict(list)
         for i, q in enumerate(qi):
             by_q[int(q)].append(i)
-        base = {"pass@1": np.array([y[by_q[q]].mean() for q in qs]), "pass@N": np.array([y[by_q[q]].max() for q in qs])}
+        if partial:  # pass@1 from candidate 0 alone (an unbiased sample); pass@N needs every candidate
+            base = {"pass@1": np.array([y[[i for i in by_q[q] if kk[i] == 0][0]] for q in qs])}
+            notes[s] = "partially judged: pass@1 from candidate 0, pass@N not available"
+        else:
+            base = {"pass@1": np.array([y[by_q[q]].mean() for q in qs]),
+                    "pass@N": np.array([y[by_q[q]].max() for q in qs])}
         if not judged:
             maj = []
             for q in qs:
@@ -127,6 +138,9 @@ def bon_table(bon: Path, arms: dict, sets: tuple, n_boot: int, pairs: list) -> d
                 score = np.array([m["stored"][col] for m in meta])
                 best = pick(qi, score)
                 v = np.array([y[best[q]] for q in qs])
+                if np.isnan(v).any():
+                    notes[f"{s}:{col}"] = "picks not judged"
+                    continue
                 acc[col][s], perq[col][s] = 100 * float(v.mean()), v
         for name, (kind, dirs) in arms.items():
             per_seed = []
@@ -138,7 +152,9 @@ def bon_table(bon: Path, arms: dict, sets: tuple, n_boot: int, pairs: list) -> d
                 score = np.array([ts.get(t, np.inf) for t in tid])
                 best = pick(qi, score)
                 per_seed.append(np.array([y[best[q]] for q in qs]))
-            if len(per_seed) == len(dirs):
+            if len(per_seed) == len(dirs) and any(np.isnan(x).any() for x in per_seed):
+                notes[f"{s}:{name}"] = "picks not judged"
+            elif len(per_seed) == len(dirs):
                 v = np.mean(per_seed, 0)
                 acc[name][s], perq[name][s] = 100 * float(v.mean()), v
                 acc[name][f"{s}_seeds"] = [100 * float(x.mean()) for x in per_seed]
@@ -165,7 +181,10 @@ def bon_curve(bon: Path, arms: dict, sets: tuple, ns: tuple) -> dict:
         if not gp.exists() or not (bon / "inputs" / f"{s}.meta.jsonl").exists():
             continue
         g = {(r["qi"], r["k"]): r for r in jl(gp)}
-        meta = [m for m in jl(bon / "inputs" / f"{s}.meta.jsonl") if (m["qi"], m["k"]) in g]
+        allmeta = jl(bon / "inputs" / f"{s}.meta.jsonl")
+        meta = [m for m in allmeta if (m["qi"], m["k"]) in g]
+        if len(meta) < len(allmeta):  # partially judged: picks among the first n need every grade
+            continue
         size = Counter(m["qi"] for m in meta)
         if min(size.values()) < max(ns):
             continue

@@ -86,3 +86,28 @@ def test_bon_curve_restricts_to_the_first_n_candidates(tmp_path):
     assert out["sets"] == ["math"] and out["n"] == [1, 2, 3, 4]
     assert out["curves"]["InStep-self"] == [0.0, 0.0, 100.0, 100.0]  # k2 enters at N = 3
     assert out["curves"]["majority"][:2] == [0.0, 0.0]  # "a" wins (first on ties) at N = 1, 2
+
+
+def test_bon_table_partially_judged(tmp_path):
+    """Only candidate 0 and the scorers' picks are judged: arms still pick among all candidates,
+    pass@1 comes from candidate 0, pass@N is not reported, an arm whose pick is ungraded is dropped."""
+    bon = tmp_path / "bon"
+    (bon / "inputs").mkdir(parents=True)
+    # 2 questions x 3 candidates; judged: k0 of both, q0 k1 (InStep's pick), q1 k2 (InStep's pick)
+    graded = {(0, 0): False, (0, 1): True, (1, 0): True, (1, 2): False}
+    _w(bon / "trips.graded.jsonl", [{"qi": q, "k": k, "ok": v, "key": None, "judged": True}
+                                    for (q, k), v in graded.items()])
+    stored = {(0, 0): 0.9, (0, 1): 0.5, (0, 2): 0.1, (1, 0): 0.9, (1, 1): 0.1, (1, 2): 0.5}  # picks k2, k1
+    _w(bon / "inputs" / "trips.meta.jsonl", [{"trace_id": f"t{q}{k}", "qi": q, "k": k, "stored": {UH: v}}
+                                            for (q, k), v in stored.items()])
+    arm = tmp_path / "arm"
+    arm.mkdir()
+    p = {"t00": [0.6], "t01": [0.1], "t02": [0.7], "t10": [0.6], "t11": [0.9], "t12": [0.05]}
+    _w(arm / "bon_trips.jsonl", [{"uid": f"{t}::0", "p": v[0]} for t, v in p.items()])
+    out = T.bon_table(bon, {"InStep-DS": ("rp", [str(arm)])}, ("trips",), 50, [])
+    rows = {r["row"]: r for r in out["rows"]}
+    assert rows["Qwen3-8B pass@1 (lower bound)"]["trips"] == 50  # k0: q0 wrong, q1 right
+    assert rows["Qwen3-8B pass@N (upper bound)"]["trips"] is None
+    assert rows["InStep, DeepSeek-anno"]["trips"] == 50  # q0 k1 right, q1 k2 wrong
+    assert rows["ReProbe, Attn+Logit, DeepSeek-anno"]["trips"] is None  # its picks were not judged
+    assert out["notes"]["trips"].startswith("partially judged")

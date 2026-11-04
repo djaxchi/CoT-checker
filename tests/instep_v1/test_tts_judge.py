@@ -45,3 +45,22 @@ def test_prompts_pass_a_real_bool_for_thinking():
     J._prompts(Tok(), [it], 0)
     J._prompts(Tok(), [it], 1)
     assert seen == [False, True] and all(type(v) is bool for v in seen)
+
+
+def test_needed_candidates_keeps_candidate_zero_and_every_pick():
+    meta = [{"qi": q, "k": k} for q in (0, 1) for k in range(3)]
+    a = [0.5, 0.1, 0.9, 0.2, 0.8, 0.3]  # picks q0 k1, q1 k0
+    b = [0.5, 0.9, 0.1, 0.9, 0.8, 0.3]  # picks q0 k2, q1 k2
+    assert J.needed_candidates(meta, [a, b]) == {(0, 0), (1, 0), (0, 1), (0, 2), (1, 2)}
+
+
+def test_build_only_limits_bon_items(tmp_path, monkeypatch):
+    import pandas as pd
+    from scripts.reprobe_cmp import bon_d0
+    df = pd.DataFrame([{"q": "Q", "qi": 0, "k": k, "answer": "A", "reply": f"r{k}"} for k in range(5)])
+    monkeypatch.setattr(bon_d0, "load_pool", lambda root, s: df)
+    (tmp_path / "picks.json").write_text(json.dumps({"trips": [[0, 0], [0, 3]]}))
+    J.cmd_build(argparse.Namespace(pools=tmp_path, beam=None, sets="trips", val_per_set=0, what="bon",
+                                   out=tmp_path / "j", only=tmp_path / "picks.json"))
+    items = [json.loads(l) for l in open(tmp_path / "j" / "items.jsonl")]
+    assert [it["jid"] for it in items] == ["bon|trips|0|0", "bon|trips|0|3"]

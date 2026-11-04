@@ -14,6 +14,10 @@ and `merge` reports the judge's agreement with the programmatic grade there.
          N = 10, 5 for planning, as build_bon.py) of --sets; every beam-search answer in
          --beam/<set>*.jsonl of those sets; --val_per_set candidates per graded set.
          One JSON line {jid, set, problem, reference, solution, [prog]}.
+         --only picks.json limits the best-of-N items to the (qi, k) listed per set.
+  picks  the candidates the tables need when not every candidate is judged: per question,
+         candidate 0 (an unbiased pass@1 sample) and the candidate each scorer picks (every
+         seed of every --rt/--rp arm and every stored pool column of Table 3), as picks.json.
   judge  one shard of the items (resumable): {jid, correct (true/false/null), tail}.
   merge  <bon>/<set>.graded.jsonl ({qi, k, ok, key: null}) for the judged best-of-N sets,
          <out>/beam_judged.json {set: {"qi|arm": correct}}, and <out>/judge_agreement.json.
@@ -79,11 +83,16 @@ def cmd_build(a) -> None:
     items = []
     pools = {}
     what = set(a.what.split(","))
+    only = None
+    if a.only is not None:
+        only = {s: {tuple(x) for x in v} for s, v in json.loads(a.only.read_text()).items()}
     for s in a.sets.split(","):
         df = load_pool(a.pools, s)
         pools[s] = df
         n = N_BON.get(s, 10)
         for r in (df[df.k < n].to_dict("records") if "bon" in what else []):
+            if only is not None and (int(r["qi"]), int(r["k"])) not in only[s]:
+                continue
             items.append({"jid": f"bon|{s}|{r['qi']}|{r['k']}", "set": s, "problem": r["q"],
                           "reference": str(r["answer"]), "solution": r["reply"]})
     if a.beam is not None and "beam" in what:
@@ -116,6 +125,44 @@ def cmd_build(a) -> None:
     for it in items:
         c[it["jid"].rsplit("|", 2)[0]] += 1
     print(f"[judge build] {len(items)} items: {dict(c)}", flush=True)
+
+
+def needed_candidates(meta: list[dict], scores: list) -> set:
+    """(qi, k) of candidate 0 of every question and of each score array's pick (lowest score)."""
+    import numpy as np
+    from scripts.reprobe_cmp.bon_analyze import pick
+    qi = np.array([m["qi"] for m in meta])
+    keep = {(m["qi"], m["k"]) for m in meta if m["k"] == 0}
+    for sc in scores:
+        keep.update((meta[i]["qi"], meta[i]["k"]) for i in pick(qi, np.asarray(sc, dtype=float)).values())
+    return keep
+
+
+def cmd_picks(a) -> None:
+    import numpy as np
+    from scripts.instep_v1.tts_tables import T3_ROWS, parse_arms
+    from scripts.reprobe_cmp.analyze import seed_scores
+    from scripts.reprobe_cmp.bon_analyze import trace_scores
+    arms = {**parse_arms(a.rt, "rt"), **parse_arms(a.rp, "rp")}
+    stored = sorted({src for _, _, kind, src in T3_ROWS if kind == "stored"})
+    out = {}
+    for s in a.sets.split(","):
+        meta = jl(a.bon / "inputs" / f"{s}.meta.jsonl")
+        tid = [m["trace_id"] for m in meta]
+        scores = [[m["stored"][c] for m in meta] for c in stored if c in meta[0]["stored"]]
+        for name, (kind, dirs) in arms.items():
+            for d in dirs:
+                sc = seed_scores(kind, d, f"bon_{s}", a.bon)
+                if sc is None:
+                    raise SystemExit(f"[picks] {name}: no bon_{s} scores in {d}")
+                ts = trace_scores(sc)
+                scores.append([ts.get(t, np.inf) for t in tid])
+        keep = needed_candidates(meta, scores)
+        out[s] = sorted(keep)
+        print(f"[picks] {s}: {len(scores)} scorers, {len(keep)} of {len(meta)} candidates "
+              f"({len(keep) / len(meta):.0%})", flush=True)
+    a.out.parent.mkdir(parents=True, exist_ok=True)
+    a.out.write_text(json.dumps(out))
 
 
 def _prompts(tok, items: list[dict], thinking: bool) -> list[str]:
@@ -228,6 +275,13 @@ def main() -> None:
     b.add_argument("--val_per_set", type=int, default=200)
     b.add_argument("--what", default="bon,beam,val", help="item kinds to build")
     b.add_argument("--out", type=Path, required=True)
+    b.add_argument("--only", type=Path, default=None, help="picks.json: judge only these best-of-N candidates")
+    k = sub.add_parser("picks")
+    k.add_argument("--bon", type=Path, required=True, help="best-of-N dir with inputs/<set>.meta.jsonl")
+    k.add_argument("--sets", default=",".join(JUDGED))
+    k.add_argument("--rt", action="append", help="NAME=DIR[,DIR...] read-token arm (repeatable)")
+    k.add_argument("--rp", action="append", help="NAME=DIR[,DIR...] ReProbe-format arm (repeatable)")
+    k.add_argument("--out", type=Path, required=True)
     j = sub.add_parser("judge")
     j.add_argument("--out", type=Path, required=True)
     j.add_argument("--model", default="Qwen/Qwen3-32B")
@@ -244,7 +298,7 @@ def main() -> None:
     m.add_argument("--out", type=Path, required=True)
     m.add_argument("--bon", type=Path, default=None)
     a = p.parse_args()
-    {"build": cmd_build, "judge": cmd_judge, "merge": cmd_merge}[a.cmd](a)
+    {"build": cmd_build, "picks": cmd_picks, "judge": cmd_judge, "merge": cmd_merge}[a.cmd](a)
 
 
 if __name__ == "__main__":

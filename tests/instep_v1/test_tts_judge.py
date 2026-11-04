@@ -30,3 +30,18 @@ def test_merge(tmp_path):
     assert json.loads((tmp_path / "beam_judged.json").read_text()) == {"proofnet": {"3|rt_self": False}}
     ag = json.loads((tmp_path / "judge_agreement.json").read_text())["math"]
     assert ag["n"] == 2 and ag["agreement"] == 0.5 and ag["prog_wrong_judge_correct"] == 1
+
+
+def test_prompts_pass_a_real_bool_for_thinking():
+    """Qwen3's template checks `enable_thinking is false`; the CLI's integer 0 must become False."""
+    seen = []
+
+    class Tok:
+        def apply_chat_template(self, msgs, tokenize, add_generation_prompt, enable_thinking):
+            seen.append(enable_thinking)
+            return "x"
+
+    it = {"problem": "p", "reference": "r", "solution": "s"}
+    J._prompts(Tok(), [it], 0)
+    J._prompts(Tok(), [it], 1)
+    assert seen == [False, True] and all(type(v) is bool for v in seen)

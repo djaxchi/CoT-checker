@@ -110,8 +110,13 @@ class PRMScorer:
     def __init__(self, path: str, dev):
         from transformers import AutoModel, AutoTokenizer
         from scripts.instep_v1.score_prm import SEP
+        from transformers import AutoConfig
         self.tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
-        self.model = AutoModel.from_pretrained(path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+        # the PRM's remote code reads config.pad_token_id, which transformers 5 no longer sets by default
+        cfg = AutoConfig.from_pretrained(path, trust_remote_code=True, local_files_only=True)
+        if getattr(cfg, "pad_token_id", None) is None:
+            cfg.pad_token_id = self.tok.pad_token_id
+        self.model = AutoModel.from_pretrained(path, config=cfg, torch_dtype=torch.bfloat16, trust_remote_code=True,
                                                local_files_only=True).to(dev).eval()
         self.dev, self.sep = dev, self.tok.encode(SEP)[0]
         self.pad = self.tok.pad_token_id if self.tok.pad_token_id is not None else self.tok.eos_token_id

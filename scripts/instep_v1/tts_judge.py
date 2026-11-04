@@ -119,9 +119,10 @@ def cmd_build(a) -> None:
 
 
 def _prompts(tok, items: list[dict], thinking: bool) -> list[str]:
+    # bool(): Qwen3's template tests `enable_thinking is false`, which the integer 0 fails (thinking stays on)
     return [tok.apply_chat_template([{"role": "user", "content": PROMPT.format(**{k: it[k] for k in
                                      ("problem", "reference", "solution")})}], tokenize=False,
-                                    add_generation_prompt=True, enable_thinking=thinking) for it in items]
+                                    add_generation_prompt=True, enable_thinking=bool(thinking)) for it in items]
 
 
 def cmd_judge(a) -> None:

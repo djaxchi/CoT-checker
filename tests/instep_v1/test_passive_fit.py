@@ -103,6 +103,14 @@ def test_without_per_layer_fits_passive_only(setup, monkeypatch):
     assert len(open(tmp_path / "scores" / "val.jsonl").readlines()) == 600
 
 
+def test_keys_restricts_the_fit_to_the_last_layer(setup, monkeypatch):
+    tmp_path, states, data = setup
+    run(monkeypatch, tmp_path, states, data, "--keys", "passive_final", "--per_layer_out", str(tmp_path / "pl.json"))
+    pl = json.loads((tmp_path / "pl.json").read_text())
+    assert pl["picked"]["key"] == "passive_final"  # block7 is better but not allowed
+    assert [r["key"] for r in pl["layers"]] == ["passive_final"]
+
+
 def test_rejects_val_uid_mismatch(setup, monkeypatch):
     tmp_path, states, data = setup
     rows = [json.loads(l) for l in open(data / "rt" / "all_val.items.jsonl")]

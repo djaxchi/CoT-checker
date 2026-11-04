@@ -131,6 +131,8 @@ def main() -> None:
     p.add_argument("--per_layer_out", type=Path, default=None)
     p.add_argument("--grid", default=",".join(map(str, GRID)))
     p.add_argument("--allow_partial", action="store_true", help="smoke: val meta may be a prefix of all_val")
+    p.add_argument("--keys", default=None,
+                   help="comma-separated state keys to fit, e.g. passive_final (the last layer only)")
     a = p.parse_args()
     grid = tuple(float(c) for c in a.grid.split(","))
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -163,6 +165,12 @@ def main() -> None:
     keys = state_keys(a.states / "val.shard0.npz")
     if a.per_layer_out is None:
         keys = [k for k in keys if k.startswith("passive")]
+    if a.keys:
+        want = a.keys.split(",")
+        missing = [k for k in want if k not in keys]
+        if missing:
+            raise SystemExit(f"--keys {missing} not in {a.states / 'val.shard0.npz'}")
+        keys = want
     if not any(k.startswith("passive") for k in keys):
         raise SystemExit(f"no passive states in {a.states}")
     rows, best = [], None

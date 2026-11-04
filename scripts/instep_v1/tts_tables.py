@@ -153,8 +153,64 @@ def bon_table(bon: Path, arms: dict, sets: tuple, n_boot: int, pairs: list) -> d
             "seeds": {n: {s: acc[n].get(f"{s}_seeds") for s in sets} for n in arms}}
 
 
+def bon_curve(bon: Path, arms: dict, sets: tuple, ns: tuple) -> dict:
+    """Best-of-N accuracy as N grows: for each N, only the first N candidates (k < N) of every
+    question, picked by majority vote, by each stored pool column and by each arm (mean over
+    seeds), with the same rules as bon_table. Averaged over the graded sets whose pools hold at
+    least max(ns) candidates per question, so every point of a curve averages the same sets."""
+    stored_cols = {src for _, _, kind, src in T3_ROWS if kind == "stored"}
+    per_set, used = defaultdict(list), []
+    for s in sets:
+        gp = bon / f"{s}.graded.jsonl"
+        if not gp.exists() or not (bon / "inputs" / f"{s}.meta.jsonl").exists():
+            continue
+        g = {(r["qi"], r["k"]): r for r in jl(gp)}
+        meta = [m for m in jl(bon / "inputs" / f"{s}.meta.jsonl") if (m["qi"], m["k"]) in g]
+        size = Counter(m["qi"] for m in meta)
+        if min(size.values()) < max(ns):
+            continue
+        used.append(s)
+        tid = [m["trace_id"] for m in meta]
+        qi = np.array([m["qi"] for m in meta])
+        kk = np.array([m["k"] for m in meta])
+        y = np.array([g[(m["qi"], m["k"])]["ok"] for m in meta], dtype=float)
+        keys = [g[(m["qi"], m["k"])].get("key") for m in meta]
+        keys = [k if isinstance(k, str) else None for k in keys]
+        scores = {col: [np.array([m["stored"][col] for m in meta])] for col in stored_cols if col in meta[0]["stored"]}
+        for name, (kind, dirs) in arms.items():
+            seeds = [seed_scores(kind, d, f"bon_{s}", bon) for d in dirs]
+            if all(sc is not None for sc in seeds):
+                ts = [trace_scores(sc) for sc in seeds]
+                scores[name] = [np.array([t_.get(t, np.inf) for t in tid]) for t_ in ts]
+        by_q = defaultdict(list)
+        for i, q in enumerate(qi):
+            by_q[int(q)].append(i)
+        acc = defaultdict(list)
+        for n in ns:
+            rows = np.flatnonzero(kk < n)
+            q_n = qi[rows]
+            qs = sorted(set(q_n.tolist()))
+            maj = []
+            for q in qs:
+                idx = [i for i in by_q[q] if kk[i] < n]
+                c = Counter(keys[i] for i in idx if keys[i] is not None)
+                maj.append(y[next(i for i in idx if keys[i] == c.most_common(1)[0][0])] if c else 0.0)
+            acc["majority"].append(100 * float(np.mean(maj)))
+            for name, seeds in scores.items():
+                vals = []
+                for sc in seeds:
+                    best = pick(q_n, sc[rows])
+                    vals.append(np.mean([y[rows[best[q]]] for q in qs]))
+                acc[name].append(100 * float(np.mean(vals)))
+        for name, v in acc.items():
+            per_set[name].append(v)
+    curves = {name: [float(x) for x in np.mean(v, 0)] for name, v in per_set.items() if len(v) == len(used)}
+    return {"sets": used, "n": list(ns), "curves": curves}
+
+
 def beam_table(beam: Path, judged: dict, sets: tuple, n_boot: int, pairs: list) -> dict:
     rows = defaultdict(lambda: defaultdict(dict))
+    secs = defaultdict(lambda: defaultdict(dict))  # wall-clock seconds of the whole search per question
     for f in sorted(beam.glob("*.jsonl")):
         for l in open(f):
             r = json.loads(l)
@@ -162,8 +218,9 @@ def beam_table(beam: Path, judged: dict, sets: tuple, n_boot: int, pairs: list) 
             if c is None:
                 c = judged.get(r["set"], {}).get(f"{r['qi']}|{r['arm']}")
             rows[r["set"]][r["arm"]][r["qi"]] = c
+            secs[r["set"]][r["arm"]][r["qi"]] = r.get("seconds")
     arms = [a for _, _, a in T2_ROWS if a]
-    acc, perq, info = defaultdict(dict), defaultdict(dict), {}
+    acc, perq, info, seconds = defaultdict(dict), defaultdict(dict), {}, defaultdict(dict)
     for s in sets:
         have = [a for a in arms if rows[s].get(a)]
         if not have:
@@ -173,6 +230,8 @@ def beam_table(beam: Path, judged: dict, sets: tuple, n_boot: int, pairs: list) 
         for a in have:
             v = np.array([float(rows[s][a][q]) for q in common])
             acc[a][s], perq[a][s] = 100 * float(v.mean()) if len(v) else None, v
+            t = [secs[s][a][q] for q in common if secs[s][a].get(q) is not None]
+            seconds[a][s] = float(np.mean(t)) if t and len(t) == len(common) else None
     table = []
     for sec, label, a in T2_ROWS:
         r = {"section": sec, "row": label, "note": None if a else "not released as a runnable probe"}
@@ -180,7 +239,8 @@ def beam_table(beam: Path, judged: dict, sets: tuple, n_boot: int, pairs: list) 
             r.update({s: acc[a].get(s) for s in sets})
             r.update(averages(r, sets))
         table.append(r)
-    return {"rows": table, "info": info, "pairs": boot_pairs(perq, pairs, sets, n_boot)}
+    return {"rows": table, "info": info, "pairs": boot_pairs(perq, pairs, sets, n_boot),
+            "seconds": {a: dict(v) for a, v in seconds.items()}}
 
 
 def boot_pairs(perq: dict, pairs: list, sets: tuple, n_boot: int) -> list:
@@ -271,7 +331,9 @@ def main() -> None:
     judged = json.loads(a.beam_judged.read_text()) if a.beam_judged and a.beam_judged.exists() else {}
     t2 = beam_table(a.beam, judged, T2_SETS, a.n_boot,
                     [("instep_ds", "rp_ds"), ("rt_self", "rp_self"), ("instep_ds", "prm7b"), ("instep_ds", "random")])
-    (a.out / "tts_tables.json").write_text(json.dumps({"table3_bon": t3, "table2_beam": t2}, indent=1))
+    curve = bon_curve(a.bon, arms, T3_SETS, (1, 2, 4, 6, 8, 10))
+    (a.out / "tts_tables.json").write_text(json.dumps({"table3_bon": t3, "table2_beam": t2, "bon_curve": curve},
+                                                      indent=1))
     L = md(t3, T3_SETS, "Table 3: Best-of-N accuracy (Qwen3-8B), ReProbe's released pools, one harness")
     L += [f"- Best-of-N sets not graded yet: {t3['notes']}", ""] if t3["notes"] else []
     L += md(t2, T2_SETS, "Table 2: Beam search accuracy (Qwen3-8B, B = 5, N = 5), one harness")

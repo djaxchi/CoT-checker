@@ -44,8 +44,8 @@ def test_bon_table(tmp_path):
 def test_beam_table_common_questions_and_judge(tmp_path):
     beam = tmp_path / "beam"
     beam.mkdir()
-    rows = [{"set": "math", "qi": 0, "arm": "random", "correct": False},
-            {"set": "math", "qi": 0, "arm": "instep_ds", "correct": True},
+    rows = [{"set": "math", "qi": 0, "arm": "random", "correct": False, "seconds": 2.0},
+            {"set": "math", "qi": 0, "arm": "instep_ds", "correct": True, "seconds": 3.0},
             {"set": "math", "qi": 1, "arm": "instep_ds", "correct": True},  # random never ran q1: dropped
             {"set": "proofnet", "qi": 5, "arm": "instep_ds", "correct": None},
             {"set": "proofnet", "qi": 5, "arm": "random", "correct": None}]
@@ -56,9 +56,33 @@ def test_beam_table_common_questions_and_judge(tmp_path):
     assert r["InStep, DeepSeek-anno"]["math"] == 100 and r["Random scores (same search)"]["math"] == 0
     assert r["InStep, DeepSeek-anno"]["proofnet"] == 100 and r["Random scores (same search)"]["proofnet"] == 0
     assert out["info"]["math"]["questions"] == 1
+    # seconds per question, on the same common questions as the accuracy
+    assert out["seconds"]["instep_ds"]["math"] == 3.0 and out["seconds"]["random"]["math"] == 2.0
+    assert out["seconds"]["random"]["proofnet"] is None  # not logged
 
 
 def test_averages_follow_paper():
     row = {"math": 90, "gsm8k": 90, "proofnet": 90, "trips": 10, "calendar": 30}
     a = T.averages(row, ("math", "gsm8k", "proofnet", "trips", "calendar"))
     assert a == {"ID": 90.0, "OOD": 20.0, "Overall": 62.0}
+
+
+def test_bon_curve_restricts_to_the_first_n_candidates(tmp_path):
+    bon = tmp_path / "bon"
+    (bon / "inputs").mkdir(parents=True)
+    # 1 question x 4 candidates; only k2 is correct; the arm scores k2 lowest
+    ok = {0: False, 1: False, 2: True, 3: False}
+    _w(bon / "math.graded.jsonl", [{"qi": 0, "k": k, "ok": v, "key": "abca"[k]} for k, v in ok.items()])
+    _w(bon / "inputs" / "math.meta.jsonl", [{"trace_id": f"t{k}", "qi": 0, "k": k, "stored": {UH: 0.5}}
+                                           for k in ok])
+    # a set whose pool is too small for the largest N is left out of the curve
+    _w(bon / "calendar.graded.jsonl", [{"qi": 0, "k": 0, "ok": True, "key": "x"}])
+    _w(bon / "inputs" / "calendar.meta.jsonl", [{"trace_id": "c0", "qi": 0, "k": 0, "stored": {UH: 0.5}}])
+    arm = tmp_path / "arm"
+    arm.mkdir()
+    _w(arm / "bon_math.jsonl", [{"uid": f"t{k}::0", "p": 0.1 if k == 2 else 0.9} for k in ok])
+    _w(arm / "bon_calendar.jsonl", [{"uid": "c0::0", "p": 0.1}])
+    out = T.bon_curve(bon, {"InStep-self": ("rp", [str(arm)])}, ("math", "calendar"), (1, 2, 3, 4))
+    assert out["sets"] == ["math"] and out["n"] == [1, 2, 3, 4]
+    assert out["curves"]["InStep-self"] == [0.0, 0.0, 100.0, 100.0]  # k2 enters at N = 3
+    assert out["curves"]["majority"][:2] == [0.0, 0.0]  # "a" wins (first on ties) at N = 1, 2

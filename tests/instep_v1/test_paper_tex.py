@@ -70,3 +70,25 @@ def test_add_step_takes_the_seed_mean_per_set():
     o = {"phi4": {}}
     T.add_step(o, "phi4", {"test_seed_mean": {"math": 0.4, "gsm8k": 0.2}})
     assert o["phi4"]["step"] == {"math": 0.4, "gsm8k": 0.2, "overall": 0.30000000000000004}
+
+
+def test_add_q17_takes_the_instep_seed_mean_per_set():
+    o = {}
+    T.add_q17(o, {"table": {"InStep": {s: {"ap": 0.5, "n_seeds": 3} for s in TEST}}})
+    assert o["qwen3_1_7b"]["instep"]["overall"] == 0.5 and len(o["qwen3_1_7b"]["instep"]) == 9
+
+
+def test_size_figure_uses_printed_baselines_and_our_instep_per_policy():
+    o = {k: dict(v) for k, v in OURS.items()}
+    o["qwen3_1_7b"] = {"instep": _arm(0.50)}
+    pts = {label: p for label, _, p in T.size_points(o)}
+    # Table 4 / 1 / 5 as printed: Qwen2.5-Math-PRM-7B .421 / .565 / .613, ReProbe HS .447 / .604 / .585
+    assert [round(y, 3) for _, y in pts["PRM-7B"]] == [0.421, 0.565, 0.613]
+    assert [round(y, 3) for _, y in pts["ReProbe"]] == [0.447, 0.604, 0.585]
+    assert [x for x, _ in pts["\\textbf{InStep}"]] == [1.7, 8.0, 32.0]
+    assert [y for _, y in pts["\\textbf{InStep}"]] == [0.50, 0.95, 0.63]
+    tex = T.figure_size(o)
+    assert "mark=none" in tex and "xticklabels={1.7B,8B,32B}" in tex
+    # the 32B PRM point can be replaced by the value recomputed from the released scores
+    over = {label: p for label, _, p in T.size_points(o, {"qwen3_32b": 0.566})}
+    assert [round(y, 3) for _, y in over["PRM-7B"]] == [0.421, 0.565, 0.566]

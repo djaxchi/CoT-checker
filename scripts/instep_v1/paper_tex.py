@@ -16,7 +16,8 @@ figures/fig_*.tex) are written by hand in the paper repo and \\input these files
         --final final.json --out ~/Code/InStep
 
 The paper needs \\usepackage{booktabs, pgfplots, subcaption}, \\usepackage[table]{xcolor} and the colors
-instep (main tone, fills), instepdark (same hue, marks and lines) and oursrow (shaded InStep rows).
+instep (main tone, fills), instepdark (same hue, marks and lines), oursrow (shaded InStep rows), and
+prmcol, rpcol (the PRM-7B and ReProbe lines of the test-time scaling figure).
 """
 
 from __future__ import annotations
@@ -235,19 +236,21 @@ def figure_cost(ours: dict) -> str:
 
 # ------------------------------------------------------------------------- test-time scaling figure
 PRM7B = "Qwen/Qwen2.5-Math-PRM-7B"
-# (bon_curve key, LATENCY key or None, label, pgfplots style), drawn in this order
+# One color per verifier across the three panels (colors defined in the paper's preamble). Panel (a)
+# draws thin colored lines without marks; (b) and (c) are scatters of one point per verifier.
+# (bon_curve key, LATENCY key or None, label, color, line width)
 BON_LINES = [
-    ("majority", None, "Majority vote", "black!45, dashed, mark=none"),
-    (PRM7B, "PRM", "PRM-7B", "black!75, mark=triangle*, mark size=2.2pt"),
-    ("ReProbe HS self-anno", "ReProbe", "ReProbe", "black!75, densely dotted, mark=diamond*, mark size=2.4pt"),
-    ("InStep-self", "InStep", "\\textbf{InStep}", "instepdark, thick, mark=*, mark size=2pt"),
+    ("majority", None, "Majority vote", "black!45", "0.7pt, dashed"),
+    (PRM7B, "PRM", "PRM-7B", "prmcol", "0.8pt"),
+    ("ReProbe HS self-anno", "ReProbe", "ReProbe", "rpcol", "0.8pt"),
+    ("InStep-self", "InStep", "\\textbf{InStep}", "instepdark", "1.2pt"),
 ]
-# (beam arm, Table 2 row label, point label, mark style)
+# (beam arm, Table 2 row label, point label, color)
 BEAM_ARMS = [
-    ("random", "Random scores (same search)", "random scores", "mark=o, black!55, mark size=2.2pt"),
-    ("prm7b", "Qwen2.5-Math-PRM-7B", "PRM-7B", "mark=triangle*, black!75, mark size=2.6pt"),
-    ("rp_self", "ReProbe, Hidden States, Self-anno", "ReProbe", "mark=diamond*, black!75, mark size=2.8pt"),
-    ("rt_self", "InStep, Self-anno", "\\textbf{InStep}", "mark=*, instepdark, mark size=3pt"),
+    ("random", "Random scores (same search)", "random scores", "black!45"),
+    ("prm7b", "Qwen2.5-Math-PRM-7B", "PRM-7B", "prmcol"),
+    ("rp_self", "ReProbe, Hidden States, Self-anno", "ReProbe", "rpcol"),
+    ("rt_self", "InStep, Self-anno", "\\textbf{InStep}", "instepdark"),
 ]
 SET_LABEL = {"math": "MATH", "gsm8k": "GSM8K", "proofnet": "ProofNet", "trips": "Trips", "meetings": "Meet.",
              "calendar": "Cal.", "strategyqa": "StrQA", "scienceqa": "SciQA"}
@@ -278,41 +281,40 @@ def figure_tts(tts: dict) -> str:
     ns, n_max = cur["n"], cur["n"][-1]
     # (a) best-of-N accuracy against N
     lines = []
-    for key, _, label, style in BON_LINES:
+    for key, _, label, color, width in BON_LINES:
         if key in cur["curves"]:
             co = " ".join(f"({n},{v:.2f})" for n, v in zip(ns, cur["curves"][key]))
-            lines.append(f"\\addplot[{style}] coordinates {{{co}}};\n\\addlegendentry{{{label}}}")
-    ys = [v for key, _, _, _ in BON_LINES if key in cur["curves"] for v in cur["curves"][key]]
+            lines.append(f"\\addplot[{color}, mark=none, line width={width}] coordinates {{{co}}};\n"
+                         f"\\addlegendentry{{{label}}}")
+    ys = [v for key, *_ in BON_LINES if key in cur["curves"] for v in cur["curves"][key]]
     lo, hi = _axis_pad(ys)
-    hi += 1  # headroom for the two-column legend
+    lo -= 0.5  # room for the legend (lower right, below the curves)
     # (b) best-of-N at the largest N against the verifier's time per question: N candidates at the
     # mean per-candidate latency of Figure 2b (10 per call)
     pts_b, ys_b = [], []
-    for key, lat, label, style in BON_LINES:
+    for key, lat, label, color, _ in BON_LINES:
         if lat is None or key not in cur["curves"]:
             continue
         x, y = n_max * LATENCY[lat][1], cur["curves"][key][-1]
         ys_b.append(y)
-        mark = style.split(", mark=")[1] if ", mark=" in style else "mark=*"
-        color = style.split(",")[0]
         where = {"InStep": "south east", "ReProbe": "south west"}.get(lat, "south")  # the two sit close
-        pts_b.append(f"\\addplot[only marks, {color}, mark={mark}] coordinates {{({x:.1f},{y:.2f})}};\n"
+        pts_b.append(f"\\addplot[only marks, {color}, mark=*, mark size=2.2pt] coordinates {{({x:.1f},{y:.2f})}};\n"
                      f"\\node[font=\\footnotesize, text={color}, anchor={where}, inner sep=3pt] at (axis cs:{x:.1f},{y:.2f}) "
                      f"{{{label}}};")
     maj = cur["curves"].get("majority", [None])[-1]
     if maj is not None:
         ys_b.append(maj)
-        pts_b.append(f"\\addplot[black!45, dashed, domain=10:1000, samples=2] {{{maj:.2f}}};\n"
+        pts_b.append(f"\\addplot[black!45, dashed, line width=0.7pt, domain=10:1000, samples=2] {{{maj:.2f}}};\n"
                      f"\\node[font=\\scriptsize, black!60, anchor=north east, inner sep=2pt] at (axis cs:950,{maj:.2f}) "
                      f"{{majority vote (no verifier)}};")
     lo_b, hi_b = _axis_pad(ys_b, 0.5)
     # (c) beam search: accuracy against wall-clock seconds per question
     sets, bp = beam_points(tts["table2_beam"])
     pts_c = []
-    for lab, sty, x, y in bp:
-        color = sty.split(", ")[1]
+    for lab, color, x, y in bp:
+        mark = "mark=o" if color == "black!45" else "mark=*"
         where = "east" if "InStep" in lab else "west"  # InStep and ReProbe sit close; labels on either side
-        pts_c.append(f"\\addplot[only marks, {sty}] coordinates {{({x:.2f},{y:.2f})}};\n"
+        pts_c.append(f"\\addplot[only marks, {color}, {mark}, mark size=2.2pt] coordinates {{({x:.2f},{y:.2f})}};\n"
                      f"\\node[font=\\footnotesize, text={color}, anchor={where}, inner sep=4pt] at (axis cs:{x:.2f},{y:.2f}) "
                      f"{{{lab}}};")
     xs_c, ys_c = [p[2] for p in bp], [p[3] for p in bp]
@@ -329,8 +331,9 @@ def figure_tts(tts: dict) -> str:
   xmin=0.5, xmax={n_max + 0.5}, ymin={lo:g}, ymax={hi:g},
   xtick={{{",".join(str(n) for n in ns)}}},
   xlabel={{Candidates per question $N$}}, ylabel={{Accuracy (\\%)}},
-  legend columns=2, legend style={{font=\\scriptsize, at={{(0.02,0.98)}}, anchor=north west, draw=none, fill=white,
-                fill opacity=0.85, text opacity=1, cells={{anchor=west}}}},
+  legend style={{font=\\scriptsize, at={{(0.98,0.03)}}, anchor=south east, draw=none, fill=none,
+                cells={{anchor=west}}}},
+  legend image code/.code={{\\draw[#1] (0cm,0cm) -- (0.35cm,0cm);}},  % short lines keep the legend clear of the curves
 ]
 {chr(10).join(lines)}
 \\end{{axis}}

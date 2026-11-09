@@ -25,7 +25,8 @@ that step's read token attends to, in place of the template's "Current step:"
 header; --start_deep gives it per-layer offsets of its own. --chain (Stage H-C) puts a read
 token after every step and lets each see the earlier ones (kept in a side cache
 online, still invisible to the text), so the previous read token marks where the
-step begins.
+step begins. --all_markers (with --chain and --start_marker) lets read token k also see
+the start markers of every earlier step, not only its own (all markers 0..k).
 
 Items are grouped into sequences: an item rides on a longer item of the same
 problem when its text (earlier steps + step) is that item's text up to a
@@ -253,17 +254,20 @@ def gather_hooks(model, blocks: list[int], rows: torch.Tensor, cols: torch.Tenso
 
 
 def text_pass(model, seqs: list[tuple], pad: int, dev, passive: dict | None = None,
-              marker: bool = False, chain: bool = False) -> tuple[object, dict]:
+              marker: bool = False, chain: bool = False, all_markers: bool = False) -> tuple[object, dict]:
     """The text of every row, once, without gradients: (its cache, the read layout).
 
     seqs: (text ids, pos) or (text ids, pos, spos) per row; read token k sees pos[k]
     text tokens. With marker, the read call holds K start markers then K read tokens:
     marker k at position spos[k] sees the text before it, read token k sees its text,
     its own marker and itself. With chain, read token k also sees read tokens 0..k-1 of
-    its row (they stay in a side cache instead of being dropped).
+    its row (they stay in a side cache instead of being dropped). With all_markers (needs
+    marker), read token k sees markers 0..k of its row instead of marker k alone.
     passive: {block: None, "final": None} to also fill in the text states at token
     pos[k] - 1 (the separator the read token follows), block outputs and post-norm.
     """
+    if all_markers and not marker:
+        raise ValueError("all_markers needs start markers")
     B = len(seqs)
     T = max(len(r[0]) for r in seqs)
     K = max(len(r[1]) for r in seqs)
@@ -292,6 +296,8 @@ def text_pass(model, seqs: list[tuple], pad: int, dev, passive: dict | None = No
                 mask[b, 0, k, :sp] = True
                 pos2[b, k] = sp
                 mask[b, 0, off + k, T + k] = True  # the read token sees its step's marker
+                if all_markers:
+                    mask[b, 0, off + k, T:T + k] = True  # and the earlier steps' markers
             rows.append(b)
             cols.append(off + k)
             tpos.append(pk - 1)
@@ -309,7 +315,8 @@ def text_pass(model, seqs: list[tuple], pad: int, dev, passive: dict | None = No
     if passive is not None and "final" in passive:
         passive["final"] = out.last_hidden_state[rows, tcols].float()
     return out.past_key_values, {"mask": mask.to(dev), "pos": pos2.to(dev), "rows": rows, "cols": cols,
-                                 "K": K, "marker": marker, "chain": chain}
+                                 "K": K, "marker": marker, "chain": chain,
+                                 "all_markers": all_markers}
 
 
 def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str | None = None,
@@ -341,18 +348,19 @@ def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str
 def inline_read(model, rt: ReadToken, seqs: list[tuple], pad: int, dev, grad: bool,
                 soft_attn: str | None = None, passive: dict | None = None,
                 mk: StartMarker | None = None, chain: bool = False,
-                capture: dict | None = None) -> torch.Tensor:
+                capture: dict | None = None, all_markers: bool = False) -> torch.Tensor:
     """Final-layer (post-norm) states of every read token, (sum of K, d), row by row
     (text_pass, then read_pass)."""
     if rt.m != 1:
         raise ValueError("inline reads need an m = 1 read token")
-    cache, lay = text_pass(model, seqs, pad, dev, passive, marker=mk is not None, chain=chain)
+    cache, lay = text_pass(model, seqs, pad, dev, passive, marker=mk is not None, chain=chain,
+                           all_markers=all_markers)
     return read_pass(model, rt, cache, lay, grad, soft_attn, mk, capture)
 
 
 def uncached_reference(model, rt: ReadToken, ids: list[int], pos: list[int], dev,
                        spos: list[int] | None = None, mk: StartMarker | None = None,
-                       chain: bool = False) -> torch.Tensor:
+                       chain: bool = False, all_markers: bool = False) -> torch.Tensor:
     """One plain forward, no cache, over the text up to the last read position followed by
     the markers (if mk) and the read tokens, under an explicit mask with the inline read's
     visibility and positions: the reference the cached batched read must equal, (K, d)."""
@@ -376,6 +384,8 @@ def uncached_reference(model, rt: ReadToken, ids: list[int], pos: list[int], dev
         mask[r, r] = True
         if mk is not None:
             mask[r, T + k] = True
+            if all_markers:
+                mask[r, T:T + k] = True
         if chain:
             mask[r, T + M:r] = True
     position += list(pos)
@@ -468,7 +478,7 @@ def rth_items_per_step(tok, items: list[dict], max_tokens: int, max_seq_len: int
 
 
 def score_val(a, model, tok, pad, dev, runs: list[dict], chain: bool, y_train: torch.Tensor,
-              steps: int, secs: float, t_text: float, t_read: float) -> dict:
+              steps: int, secs: float, t_text: float, t_read: float, all_markers: bool = False) -> dict:
     """P(incorrect) of every trained config on the --val items, one text pass per batch, and
     OUT/sweep.json: per config the val AUROC and AP, the training-loss trace and the timing,
     plus the constant predictor's loss on the training labels. Selection reads only this file,
@@ -486,7 +496,7 @@ def score_val(a, model, tok, pad, dev, runs: list[dict], chain: bool, y_train: t
         rows = [i for j in b for i in seqs[j]["members"]]
         with torch.no_grad():
             cache, lay = text_pass(model, [row(seqs[i], mk0) for i in b], pad, dev,
-                                   marker=mk0 is not None, chain=chain)
+                                   marker=mk0 is not None, chain=chain, all_markers=all_markers)
             kv0 = text_kv(cache)
             mi = member_index([seqs[i] for i in b], dev)
             for r in runs:
@@ -532,6 +542,8 @@ def main() -> None:
     p.add_argument("--start_deep", action="store_true", help="train: the marker gets its own offsets")
     p.add_argument("--chain", action="store_true",
                    help="train: a read token after every step, each seeing the earlier ones (H-C)")
+    p.add_argument("--all_markers", action="store_true",
+                   help="train (with --chain --start_marker): read k sees the markers of steps 0..k")
     p.add_argument("--soft_attn", choices=["no_cudnn"], default=None)
     p.add_argument("--train", type=Path)
     p.add_argument("--n_train", type=int, default=100000)
@@ -598,7 +610,9 @@ def main() -> None:
             items = items[:a.smoke]
         per_step, rth_steps = rth_items_per_step(tok, items, a.max_tokens, a.max_seq_len)
         cap = math.ceil(per_step)
-        chain = a.chain
+        chain, allm = a.chain, a.all_markers
+        if allm and not (chain and a.start_marker):
+            raise SystemExit("--all_markers needs --chain and --start_marker")
         seqs, alone = build_sequences(tok, items, a.layout, chain=chain)
         n_long = sum(len(s["ids"]) > a.max_seq_len for s in seqs)
         seqs = [s for s in seqs if len(s["ids"]) <= a.max_seq_len]
@@ -608,7 +622,8 @@ def main() -> None:
         print(f"[config] model={a.model} layout={a.layout} init={a.init_text!r} deep={a.deep} "
               f"head={a.head} n_train={a.n_train} seed={a.seed} "
               f"configs={','.join(r['tag'] for r in runs)} start_marker="
-              f"{repr(a.start_init_text) if mk is not None else None} start_deep={a.start_deep} chain={chain}", flush=True)
+              f"{repr(a.start_init_text) if mk is not None else None} start_deep={a.start_deep} chain={chain} "
+              f"all_markers={allm}", flush=True)
         print(f"[data] {len(items)} items -> {len(seqs)} sequences, {n_read} read slots "
               f"({alone} read alone, {n_long} sequences over {a.max_seq_len} tokens dropped); "
               f"{len(bl)} optimizer steps at <= {cap} items (RTH: {rth_steps} steps, "
@@ -619,10 +634,10 @@ def main() -> None:
         with torch.no_grad():
             g = sorted(seqs[:500], key=lambda s: -len(set(s["pos"])))[:2]
             got = inline_read(model, rt, [row(s, mk) for s in g], pad, dev, grad=False,
-                              soft_attn=a.soft_attn, mk=mk, chain=chain)
+                              soft_attn=a.soft_attn, mk=mk, chain=chain, all_markers=allm)
             k = 0
             for s in g:
-                refs = (uncached_reference(model, rt, s["ids"], s["pos"], dev, s["spos"], mk, chain)
+                refs = (uncached_reference(model, rt, s["ids"], s["pos"], dev, s["spos"], mk, chain, allm)
                         if mk is not None or chain else None)
                 for j, pk in enumerate(s["pos"]):
                     ref = (read_all_states(model, rt, [s["ids"][:pk]], pad, dev, grad=False,
@@ -665,7 +680,7 @@ def main() -> None:
                     # the text is read once per batch; every config reads over the same cache
                     ts = time.perf_counter()
                     cache, lay = text_pass(model, [row(seqs[i], mk) for i in part], pad, dev,
-                                           marker=mk is not None, chain=chain)
+                                           marker=mk is not None, chain=chain, all_markers=allm)
                     kv0 = text_kv(cache)
                     mi = member_index([seqs[i] for i in part], dev)
                     yb = torch.cat([y[offs[i]:offs[i + 1]] for i in part]).to(dev)
@@ -712,21 +727,23 @@ def main() -> None:
                         "layout": a.layout, "inline": True, "items_per_step": cap,
                         "start_soft": None if mk_c is None else mk_c.soft.detach().cpu(),
                         "start_deep": None if mk_c is None or mk_c.deep is None else mk_c.deep.detach().cpu(),
-                        "start_init_text": a.start_init_text if mk_c is not None else None, "chain": chain},
+                        "start_init_text": a.start_init_text if mk_c is not None else None, "chain": chain,
+                        "all_markers": allm},
                        dst / "read_token.pt")
         if a.val is not None:
-            score_val(a, model, tok, pad, dev, runs, chain, y, steps, secs, t_text, t_read)
+            score_val(a, model, tok, pad, dev, runs, chain, y, steps, secs, t_text, t_read, allm)
         return
 
     ck = torch.load(a.ckpt or a.out / "read_token.pt", map_location="cpu", weights_only=False)
     rt = read_token_from_ckpt(ck, model, dev)
     mk = marker_from_ckpt(ck, dev)
-    chain = bool(ck.get("chain"))
+    chain, allm = bool(ck.get("chain")), bool(ck.get("all_markers"))
     soft_attn = a.soft_attn or ck.get("soft_attn")
     pblocks = [int(x) for x in a.passive_blocks.split(",") if x]
     print(f"[encode] token {a.ckpt or a.out / 'read_token.pt'} (trained "
           f"{'inline, ' + ck['layout'] if ck.get('inline') else 'under the verifier template'}), "
-          f"read inline in the {a.layout} layout, start marker: {mk is not None}, chain: {chain}", flush=True)
+          f"read inline in the {a.layout} layout, start marker: {mk is not None}, chain: {chain}, "
+          f"all markers: {allm}", flush=True)
     splits = []
     for spec in a.prm800k:
         name, path, *lim = spec.split(":")
@@ -753,7 +770,7 @@ def main() -> None:
             with torch.no_grad():
                 h = inline_read(model, rt, [row(seqs[i], mk) for i in b], pad, dev,
                                 grad=False, soft_attn=soft_attn, passive=cap, mk=mk, chain=chain,
-                                capture=rcap if rblocks else None)
+                                capture=rcap if rblocks else None, all_markers=allm)
                 mi = member_index([seqs[i] for i in b], dev)
                 h = h[mi]
                 rcap = {k: v[mi] for k, v in rcap.items()}

@@ -98,10 +98,10 @@ def cmd_build(a) -> None:
     if a.beam is not None and "beam" in what:
         for s in a.sets.split(","):
             gold = {int(r["qi"]): r for r in pools[s][pools[s].k == 0].to_dict("records")}
-            seen = set()
+            seen, arms = set(), set(a.arms.split(",")) if getattr(a, "arms", None) else None
             for f in sorted(a.beam.glob(f"{s}*.jsonl")):
                 for r in jl(f):
-                    if r.get("set") != s or (r["qi"], r["arm"]) in seen:
+                    if r.get("set") != s or (r["qi"], r["arm"]) in seen or (arms and r["arm"] not in arms):
                         continue
                     seen.add((r["qi"], r["arm"]))
                     g = gold[int(r["qi"])]
@@ -276,6 +276,7 @@ def main() -> None:
     b.add_argument("--what", default="bon,beam,val", help="item kinds to build")
     b.add_argument("--out", type=Path, required=True)
     b.add_argument("--only", type=Path, default=None, help="picks.json: judge only these best-of-N candidates")
+    b.add_argument("--arms", default=None, help="beam: judge only these arms (comma-separated)")
     k = sub.add_parser("picks")
     k.add_argument("--bon", type=Path, required=True, help="best-of-N dir with inputs/<set>.meta.jsonl")
     k.add_argument("--sets", default=",".join(JUDGED))

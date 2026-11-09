@@ -64,3 +64,18 @@ def test_build_only_limits_bon_items(tmp_path, monkeypatch):
                                    out=tmp_path / "j", only=tmp_path / "picks.json"))
     items = [json.loads(l) for l in open(tmp_path / "j" / "items.jsonl")]
     assert [it["jid"] for it in items] == ["bon|trips|0|0", "bon|trips|0|3"]
+
+
+def test_build_beam_arms_filter(tmp_path, monkeypatch):
+    import pandas as pd
+    from scripts.reprobe_cmp import bon_d0
+    df = pd.DataFrame([{"q": "Q", "qi": 0, "k": 0, "answer": "A", "reply": "r"}])
+    monkeypatch.setattr(bon_d0, "load_pool", lambda root, s: df)
+    beam = tmp_path / "beam"
+    beam.mkdir()
+    rows = [{"set": "trips", "qi": 0, "arm": a, "steps": ["s"]} for a in ("prm7b", "prm800k", "instep_ds")]
+    (beam / "trips.v1.part0.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    J.cmd_build(argparse.Namespace(pools=tmp_path, beam=beam, sets="trips", val_per_set=0, what="beam",
+                                   out=tmp_path / "j", only=None, arms="prm7b,prm800k"))
+    items = [json.loads(l) for l in open(tmp_path / "j" / "items.jsonl")]
+    assert [it["jid"] for it in items] == ["beam|trips|0|prm7b", "beam|trips|0|prm800k"]

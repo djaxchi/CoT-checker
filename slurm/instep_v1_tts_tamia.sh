@@ -46,7 +46,9 @@ echo "git $(git rev-parse --short HEAD 2>/dev/null || echo none) stage=$STAGE sm
 virtualenv --no-download "$SLURM_TMPDIR/env" >/dev/null
 source "$SLURM_TMPDIR/env/bin/activate"
 pip install --no-index --upgrade pip >/dev/null
-pip install --no-index torch transformers numpy scipy scikit-learn pyyaml pandas sympy 2>&1 | tail -1
+# TF_SPEC="transformers<5" for beam runs with PRM arms only (the PRMs' remote code scores garbage
+# under transformers 5; beam_search.py refuses it)
+pip install --no-index torch "${TF_SPEC:-transformers}" numpy scipy scikit-learn pyyaml pandas sympy 2>&1 | tail -1
 Q3=Qwen/Qwen3-8B
 declare -A ARM=(
   [instep_ds]="rt:$SW/ds_seed0/lr0.003_wu0.05/read_token.pt"
@@ -120,6 +122,7 @@ elif [[ $STAGE == judge ]]; then
   NODES="${JUDGE_NODES:-1}"; NODE="${JUDGE_NODE:-0}"
   if [[ "${JUDGE_BUILD:-1}" == 1 ]]; then
     BB=(); [[ "${JUDGE_WHAT:-bon,val}" != *beam* ]] || BB=(--beam "$V1/beam")
+    [[ -z "${JUDGE_ARMS:-}" ]] || BB+=(--arms "$JUDGE_ARMS")
     python scripts/instep_v1/tts_judge.py build --pools "$POOLS" --out "$JD" --what "${JUDGE_WHAT:-bon,val}" \
       --sets "${JUDGE_SETS:-proofnet,trips,meetings}" "${BB[@]}"
   fi

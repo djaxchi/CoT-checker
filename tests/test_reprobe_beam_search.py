@@ -31,3 +31,12 @@ def test_is_final():
     assert bs.is_final("<Answer>: 3", False)
     assert bs.is_final("- Step 2: x", True)
     assert not bs.is_final("- Step 2: x", False)
+
+
+def test_prm_scorer_refuses_transformers_5(monkeypatch):
+    import pytest
+    import transformers
+    from scripts.reprobe_cmp import beam_search as bs
+    monkeypatch.setattr(transformers, "__version__", "5.22.1")
+    with pytest.raises(SystemExit):
+        bs.PRMScorer("Qwen/Qwen2.5-Math-PRM-7B", None)

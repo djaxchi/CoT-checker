@@ -108,9 +108,14 @@ class PRMScorer:
     """1 - P(correct) of each trajectory's last step from a Qwen PRM (score_prm.py protocol)."""
 
     def __init__(self, path: str, dev):
-        from transformers import AutoModel, AutoTokenizer
+        import transformers
+        from transformers import AutoConfig, AutoModel, AutoTokenizer
         from scripts.instep_v1.score_prm import SEP
-        from transformers import AutoConfig
+        # The Qwen PRMs' remote code loads under transformers 5 without a warning but scores
+        # garbage (Qwen2.5-Math-PRM-7B: P(incorrect) ~0.77 on every step; PRM800K: NaN). The
+        # PRM scoring job (slurm/instep_v1_prm_tamia.sh) and its gate ran on transformers < 5.
+        if int(transformers.__version__.split(".")[0]) >= 5:
+            raise SystemExit(f"PRM arms need transformers < 5 (found {transformers.__version__})")
         self.tok = AutoTokenizer.from_pretrained(path, local_files_only=True)
         # the PRM's remote code reads config.pad_token_id, which transformers 5 no longer sets by default
         cfg = AutoConfig.from_pretrained(path, trust_remote_code=True, local_files_only=True)
@@ -136,7 +141,10 @@ class PRMScorer:
             out = self.model(input_ids=x, attention_mask=att, use_cache=False)
         logits = out[0] if isinstance(out, tuple) else out.logits
         pc = p_correct_at_seps(logits, x, self.sep, lens)
-        return np.array([1.0 - r[-1] for r in pc])
+        s = np.array([1.0 - r[-1] for r in pc])
+        if not np.isfinite(s).all():
+            raise RuntimeError("non-finite PRM score")
+        return s
 
 
 class RandomScorer:

@@ -25,21 +25,36 @@ def test_table1_has_every_paper_row_and_bolds_best_overall():
     assert tex.count("\\\\") == 2 + 22 + 3 + 5  # header rows, paper rows, our rows, group titles
     instep_self = next(line for line in tex.splitlines() if "InStep} (self)" in line)
     assert instep_self.rstrip(" \\").endswith("\\textbf{.950}")
+    # ReProbe's column groups and shaded group rows, so the two tables compare line by line
+    assert "{Planning (OOD)}" in tex and "{QA (OOD)}" in tex and tex.count(T.GROUP_ROW) == 5
 
 
-def test_backbone_tables_have_no_holes():
+def test_one_column_table1_keeps_every_row_with_the_average_block_only():
+    tex = T.table_qwen3_8b_avg(OURS)
+    assert "Method & ID & OOD & All" in tex and "Planning" not in tex
+    assert "MATH, GSM8K," in tex and "StrQA, SciQA" in tex  # the sets behind each average
+    assert tex.count("\\\\") == 2 + 22 + 3 + 5 + 3  # header rows, paper rows, our rows, group titles, set-name line breaks
+    instep_self = next(line for line in tex.splitlines() if "InStep} (self)" in line)
+    assert instep_self.rstrip(" \\").endswith("& \\textbf{.950} & \\textbf{.950} & \\textbf{.950}")
+
+
+def test_backbone_table_merges_both_generators():
     finalj = {"backbones": {"qwen3_32b": {"metrics": {"prm7b_stored": {"overall": {"ap": 0.566}}}}}}
-    phi, q32 = T.table_backbone(OURS, "phi4"), T.table_backbone(OURS, "qwen3_32b", finalj)
-    assert "--" not in phi and "--" not in q32
-    assert "$^\\dagger$" in q32 and "$^\\dagger$" not in phi
-    assert "\\textbf{.410}" in phi  # InStep best on Phi-4
+    tex = T.table_backbones(OURS, finalj)
+    assert "Method & Phi-4 & Qwen3-32B" in tex
+    instep = next(line for line in tex.splitlines() if "InStep}" in line)
+    assert instep.rstrip(" \\").endswith("\\textbf{.410} & \\textbf{.630}")  # best on both
+    prm7b = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
+    assert prm7b.endswith("$^\\dagger$ \\\\") and tex.count("$^\\dagger$") == 1
+    maxprob = next(line for line in tex.splitlines() if line.startswith("MaxProb"))
+    assert maxprob.endswith("& -- \\\\")  # ReProbe reports no uncertainty scores on Qwen3-32B
 
 
 def test_figure_renders_one_labelled_point_per_verifier():
     fig = T.figure_cost(OURS)
     assert fig.count("\\begin{tikzpicture}") == 2 and "(3.072e+05,0.950)" in fig
     assert "InStep} (.950)" in fig and "STEP (.580)" in fig and "(2.098e+06,0.580)" in fig
-    assert "const plot" not in fig and "legend" not in fig.split("\\hfill")[0]  # panel (a): no legend
+    assert "const plot" not in fig and "legend" not in fig.split("\\vspace")[0]  # panel (a): no legend
 
 
 TTS = {"bon_curve": {"sets": ["math"], "n": [1, 2, 10],

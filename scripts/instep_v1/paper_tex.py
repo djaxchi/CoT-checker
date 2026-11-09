@@ -50,8 +50,8 @@ TEX = {
     PN.RP_AL_Q3: "ReProbe$_{\\text{A+L}}$ (Qwen3-8B)",
 }
 GROUP_TITLE = {"UQ": "Uncertainty scores (no training)", "PRM": "Process reward models (separate model)",
-               "ReProbe": "ReProbe (probe on stored generator states)",
-               "step": "STEP (last-layer probe, retrained on the same data)", "ours": "Ours"}
+               "ReProbe": "ReProbe (probe on stored states)",
+               "step": "STEP (last-layer probe, same data)", "ours": "Ours"}
 # parameters each verifier adds next to the generator (see fig_reprobe.py PARAMS)
 PARAMS = {PN.SKYWORK: 1.5e9, PN.H4: 1.5e9, PN.SHEPHERD: 7.2e9, PN.RLHF_DS: 8.0e9, PN.RLHF_MI: 8.0e9,
           PN.UNIVERSAL: 7.6e9, PN.PRM800K: 7.6e9, PN.PRM7B: 7.6e9, PN.RP_HS_SELF: 8.14e6, PN.RP_HS_DS: 8.14e6}
@@ -60,6 +60,12 @@ PARAMS = {PN.SKYWORK: 1.5e9, PN.H4: 1.5e9, PN.SHEPHERD: 7.2e9, PN.RLHF_DS: 8.0e9
 # backbone, mean of 3 seeds; ours.json key "step" (add_step below, from its summary.json).
 INSTEP_PARAMS, STEP_PARAMS = 307201, 4096 * 512 + 512 + 512 + 1
 OURS_ROW = "\\rowcolor{oursrow}"
+GROUP_ROW = "\\rowcolor{black!6}"
+
+
+def _group_row(n: int, title: str) -> str:
+    """A shaded, centred, italic row naming the group of methods below it (ReProbe's table style)."""
+    return f"{GROUP_ROW}\\multicolumn{{{n}}}{{c}}{{\\textit{{{title}}}}} \\\\"
 # Mean added ms per trajectory, Qwen3-8B on 200 MATH-500 trajectories, H100, given the generation
 # states; (1 trajectory per call, per candidate at 10 per call). All six from one job
 # (reprobe_cmp_v2/speed/rt_self-658276.json, sec_per_trace_mean): prm, reprobe_head_graph, and InStep
@@ -98,24 +104,57 @@ def _with_means(d: dict) -> dict:
 
 
 # --------------------------------------------------------------------------------- Table 1
-def table_qwen3_8b(ours: dict) -> str:
+def _rows_qwen3_8b(ours: dict) -> list[tuple[str, str, dict]]:
+    """(name, group, scores per set and mean) for every row of the Qwen3-8B table, in printed order."""
     o = ours["qwen3_8b"]
     rows = [(TEX[m], PN.GROUP[m], PN.per_set("qwen3_8b", m)) for m in PN.methods("qwen3_8b")]
     rows += [("STEP", "step", _with_means(o["step"])),
              ("\\textbf{InStep} (self)", "ours", _with_means(o["instep_self"])),
              ("\\textbf{InStep} (DS)", "ours", _with_means(o["instep_ds"]))]
+    return rows
+
+
+def table_qwen3_8b_avg(ours: dict) -> str:
+    """One-column version of the Qwen3-8B table for the main text: only ReProbe's Average block
+    (ID, OOD, overall), every row kept. The per-set table goes to the appendix."""
+    rows = _rows_qwen3_8b(ours)
+    cols = ["id", "ood", "overall"]
+    cells = [_marks([r[2][c] for r in rows]) for c in cols]
+    # under each average, the sets it covers (names as in the per-set table), so the compact table
+    # still says what is evaluated
+    sets = lambda *rows: ("{\\scriptsize\\color{black!65}\\begin{tabular}{@{}c@{}}"  # noqa: E731
+                          + " \\\\ ".join(rows) + "\\end{tabular}}")
+    L = ["\\begin{tabular}{l ccc}", "\\toprule",
+         "Method & ID & OOD & All \\\\",
+         " & " + sets("MATH, GSM8K,", "ProofNet") + " & " + sets("Trips, Meet., Cal.,", "StrQA, SciQA")
+         + " & " + sets("all 8", "sets") + " \\\\"]
+    prev = None
+    for i, (name, grp, _) in enumerate(rows):
+        if grp != prev:
+            L.append("\\midrule")
+            L.append(_group_row(4, GROUP_TITLE[grp]))
+            prev = grp
+        pre = OURS_ROW if "InStep" in name else ""
+        L.append(pre + name + " & " + " & ".join(cells[j][i] for j in range(len(cols))) + " \\\\")
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
+def table_qwen3_8b(ours: dict) -> str:
+    rows = _rows_qwen3_8b(ours)
     cells = [_marks([r[2][c] for r in rows]) for c in COLS]  # column-wise marks
     n = len(COLS) + 1
-    L = ["\\begin{tabular}{l ccc ccccc cc c}", "\\toprule",
-         " & \\multicolumn{3}{c}{In-domain (math)} & \\multicolumn{5}{c}{Out-of-domain} & "
-         "\\multicolumn{3}{c}{Mean} \\\\",
-         "\\cmidrule(lr){2-4} \\cmidrule(lr){5-9} \\cmidrule(lr){10-12}",
+    # column groups as in ReProbe's Table 1, so the two tables read line by line
+    L = ["\\begin{tabular}{l ccc ccc cc ccc}", "\\toprule",
+         " & \\multicolumn{3}{c}{Math (ID)} & \\multicolumn{3}{c}{Planning (OOD)} & "
+         "\\multicolumn{2}{c}{QA (OOD)} & \\multicolumn{3}{c}{Average} \\\\",
+         "\\cmidrule(lr){2-4} \\cmidrule(lr){5-7} \\cmidrule(lr){8-9} \\cmidrule(lr){10-12}",
          "Method & " + " & ".join(HEAD) + " \\\\"]
     prev = None
     for i, (name, grp, _) in enumerate(rows):
         if grp != prev:
             L.append("\\midrule")
-            L.append(f"\\multicolumn{{{n}}}{{l}}{{\\textit{{{GROUP_TITLE[grp]}}}}} \\\\")
+            L.append(_group_row(n, GROUP_TITLE[grp]))
             prev = grp
         pre = OURS_ROW if "InStep" in name else ""
         L.append(pre + name + " & " + " & ".join(cells[j][i] for j in range(len(COLS))) + " \\\\")
@@ -124,35 +163,38 @@ def table_qwen3_8b(ours: dict) -> str:
 
 
 # --------------------------------------------------------------------------------- Phi-4 / 32B
-def table_backbone(ours: dict, backbone: str, finalj: dict | None = None) -> str:
-    """One backbone, exactly the rows the ReProbe paper reports for it, plus ours.
-    Phi-4: mean of the five released sets (Table 9). Qwen3-32B: overall mean of 8 sets (Table 5)."""
-    if backbone == "phi4":
-        val = lambda m: PN.per_set("phi4", m)["t9"]  # noqa: E731
-        mine = lambda d: float(np.mean([d[s] for s in PN.T9]))  # noqa: E731
-        o = ours["phi4"]
-        arms = [("STEP", "step", mine(o["step"])), ("\\textbf{InStep}", "ours", mine(o["instep"]))]
-    else:
-        val = lambda m: PN.per_set(backbone, m)["overall"]  # noqa: E731
-        o = ours[backbone]
-        arms = [("STEP", "step", o["step"]["overall"]), ("\\textbf{InStep}", "ours", o["instep_ep4"]["overall"])]
+def table_backbones(ours: dict, finalj: dict | None = None) -> str:
+    """Phi-4 and Qwen3-32B in one column-width table: every row the ReProbe paper reports for either
+    generator ('--' where it reports none), then STEP and InStep. Phi-4: mean of the five released
+    sets (Table 9). Qwen3-32B: overall mean of 8 sets (Table 5); the printed PRM-7B value carries a
+    dagger when the value recomputed from the released scores (finalj) differs."""
+    bbs = ("phi4", "qwen3_32b")
+    val = {"phi4": lambda m: PN.per_set("phi4", m)["t9"],
+           "qwen3_32b": lambda m: PN.per_set("qwen3_32b", m)["overall"]}
+    t9 = lambda d: float(np.mean([d[s] for s in PN.T9]))  # noqa: E731
     grp_order = {"UQ": 0, "PRM": 1, "ReProbe": 2}
-    ms = sorted(PN.methods(backbone), key=lambda m: grp_order[PN.GROUP[m]])
-    rows = [(TEX[m], PN.GROUP[m], val(m), m) for m in ms] + [(n, g, v, None) for n, g, v in arms]
-    marks = _marks([r[2] for r in rows])
+    order = list(TEX)  # printed order of the methods
+    ms = sorted(set(PN.methods("phi4")) | set(PN.methods("qwen3_32b")),
+                key=lambda m: (grp_order[PN.GROUP[m]], order.index(m)))
+    rows = [(TEX[m], PN.GROUP[m], {bb: val[bb](m) if m in PN.methods(bb) else None for bb in bbs}, m)
+            for m in ms]
+    rows += [("STEP", "step", {"phi4": t9(ours["phi4"]["step"]), "qwen3_32b": ours["qwen3_32b"]["step"]["overall"]}, None),
+             ("\\textbf{InStep}", "ours", {"phi4": t9(ours["phi4"]["instep"]),
+                                            "qwen3_32b": ours["qwen3_32b"]["instep_ep4"]["overall"]}, None)]
+    marks = {bb: _marks([r[2][bb] for r in rows]) for bb in bbs}
     stored = None
-    if finalj is not None and backbone == "qwen3_32b":
+    if finalj is not None:
         stored = finalj["backbones"]["qwen3_32b"]["metrics"].get("prm7b_stored", {}).get("overall", {}).get("ap")
-    L = ["\\begin{tabular}{l c}", "\\toprule", "Method & PR-AUC \\\\"]
+    L = ["\\begin{tabular}{l cc}", "\\toprule", "Method & Phi-4 & Qwen3-32B \\\\"]
     prev = None
     for i, (name, grp, _, m) in enumerate(rows):
         if grp != prev:
             L.append("\\midrule")
-            L.append(f"\\multicolumn{{2}}{{l}}{{\\textit{{{GROUP_TITLE[grp].split(' (')[0]}}}}} \\\\")
+            L.append(_group_row(3, GROUP_TITLE[grp].split(" (")[0]))
             prev = grp
-        v = marks[i] + ("$^\\dagger$" if m == PN.PRM7B and stored is not None else "")
+        q = marks["qwen3_32b"][i] + ("$^\\dagger$" if m == PN.PRM7B and stored is not None else "")
         pre = OURS_ROW if "InStep" in name else ""
-        L.append(f"{pre}{name} & {v} \\\\")
+        L.append(f"{pre}{name} & {marks['phi4'][i]} & {q} \\\\")
     L += ["\\bottomrule", "\\end{tabular}"]
     return "\n".join(L) + "\n"
 
@@ -178,11 +220,11 @@ def figure_cost(ours: dict) -> str:
     # One point per verifier: InStep, the STEP probe on the same states, the best ReProbe probe,
     # and every PRM (light, one label). Direct labels, no legend, no frontier lines.
     return f"""% generated by scripts/instep_v1/paper_tex.py
-\\begin{{subfigure}}[b]{{0.55\\textwidth}}
+\\begin{{subfigure}}[b]{{\\linewidth}}
 \\centering
 \\begin{{tikzpicture}}
 \\begin{{axis}}[
-  width=\\linewidth, height=5.4cm,
+  width=\\linewidth, height=3.9cm,
   xmode=log, xmin=1e5, xmax=3e10, ymin=0.30, ymax=0.70, xminorticks=false,
   xtick={{1e5,1e6,1e7,1e8,1e9,1e10}},
   xticklabels={{100K,1M,10M,100M,1B,10B}},
@@ -203,13 +245,15 @@ def figure_cost(ours: dict) -> str:
 \\end{{tikzpicture}}
 \\caption{{Quality against verifier size.}}
 \\label{{fig:reprobe-cost-params}}
-\\end{{subfigure}}\\hfill
-\\begin{{subfigure}}[b]{{0.39\\textwidth}}
+\\end{{subfigure}}
+
+\\vspace{{1mm}}
+\\begin{{subfigure}}[b]{{\\linewidth}}
 \\centering
 \\begin{{tikzpicture}}
 \\begin{{axis}}[
-  width=\\linewidth, height=5.4cm,
-  ybar=2pt, bar width=8pt, ymin=0, ymax=50,
+  width=0.85\\linewidth, height=3.2cm,
+  ybar=3pt, bar width=11pt, ymin=0, ymax=58,
   symbolic x coords={{PRM,ReProbe,InStep}}, xtick=data,
   xticklabels={{PRM-7B,ReProbe$_{{\\text{{HS}}}}$,\\textbf{{InStep}}}},
   x tick label style={{font=\\footnotesize, align=center}},
@@ -320,19 +364,20 @@ def figure_tts(tts: dict) -> str:
     xs_c, ys_c = [p[2] for p in bp], [p[3] for p in bp]
     xlo, xhi = (np.floor(min(xs_c)) - 1, np.ceil(max(xs_c)) + 4) if bp else (0, 1)
     ylo, yhi = _axis_pad(ys_c, 0.5) if bp else (0, 1)
-    common = ("width=\\linewidth, height=4.8cm, tick label style={font=\\footnotesize}, "
+    common = ("width=0.92\\linewidth, height=3.3cm, tick label style={font=\\footnotesize}, "
               "label style={font=\\small}, ymajorgrids, grid style={gray!20}")
     return f"""% generated by scripts/instep_v1/paper_tex.py
 % (c) averages {", ".join(SET_LABEL[s] for s in sets)}
-\\begin{{subfigure}}[b]{{0.325\\textwidth}}
+\\begin{{subfigure}}[b]{{\\linewidth}}
 \\centering
 \\begin{{tikzpicture}}
 \\begin{{axis}}[{common},
   xmin=0.5, xmax={n_max + 0.5}, ymin={lo:g}, ymax={hi:g},
   xtick={{{",".join(str(n) for n in ns)}}},
   xlabel={{Candidates per question $N$}}, ylabel={{Accuracy (\\%)}},
-  legend style={{font=\\scriptsize, at={{(0.98,0.03)}}, anchor=south east, draw=none, fill=none,
-                cells={{anchor=west}}}},
+  legend style={{font=\\scriptsize, at={{(0.5,1.03)}}, anchor=south, draw=none, fill=none,
+                cells={{anchor=west}}, /tikz/every even column/.append style={{column sep=6pt}}}},
+  legend columns=4,  % above the axis, clear of the curves
   legend image code/.code={{\\draw[#1] (0cm,0cm) -- (0.35cm,0cm);}},  % short lines keep the legend clear of the curves
 ]
 {chr(10).join(lines)}
@@ -340,22 +385,26 @@ def figure_tts(tts: dict) -> str:
 \\end{{tikzpicture}}
 \\caption{{Best-of-$N$: accuracy.}}
 \\label{{fig:tts-bon}}
-\\end{{subfigure}}\\hfill
-\\begin{{subfigure}}[b]{{0.325\\textwidth}}
+\\end{{subfigure}}
+
+\\vspace{{1mm}}
+\\begin{{subfigure}}[b]{{\\linewidth}}
 \\centering
 \\begin{{tikzpicture}}
 \\begin{{axis}}[{common},
   xmode=log, xmin=10, xmax=1000, ymin={lo_b:g}, ymax={hi_b:g}, clip=false,
   xtick={{30,100,300,1000}}, xticklabels={{30,100,300,1000}},
-  xlabel={{Verifier time per question (ms)}}, ylabel={{Accuracy at $N={n_max}$ (\\%)}},
+  xlabel={{Verifier time per question (ms)}}, ylabel={{Acc.\\ at $N={n_max}$ (\\%)}},
 ]
 {chr(10).join(pts_b)}
 \\end{{axis}}
 \\end{{tikzpicture}}
 \\caption{{Best-of-$N$: cost.}}
 \\label{{fig:tts-bon-cost}}
-\\end{{subfigure}}\\hfill
-\\begin{{subfigure}}[b]{{0.325\\textwidth}}
+\\end{{subfigure}}
+
+\\vspace{{1mm}}
+\\begin{{subfigure}}[b]{{\\linewidth}}
 \\centering
 \\begin{{tikzpicture}}
 \\begin{{axis}}[{common},
@@ -413,7 +462,7 @@ def figure_size(ours: dict, prm_override: dict[str, float] | None = None) -> str
     lo, hi = np.floor(min(ys) * 20) / 20, np.ceil(max(ys) * 20) / 20
     return f"""% generated by scripts/instep_v1/paper_tex.py
 \\begin{{tikzpicture}}
-\\begin{{axis}}[width=0.62\\linewidth, height=5cm, tick label style={{font=\\footnotesize}},
+\\begin{{axis}}[width=0.74\\linewidth, height=4.0cm, tick label style={{font=\\footnotesize}},
   label style={{font=\\small}}, ymajorgrids, grid style={{gray!20}}, clip=false,
   xmode=log, xmin=1.4, xmax=38, xtick={{1.7,8,32}}, xticklabels={{1.7B,8B,32B}}, xminorticks=false,
   ymin={lo:g}, ymax={hi:g}, yticklabel style={{/pgf/number format/fixed, /pgf/number format/precision=2}},
@@ -463,15 +512,15 @@ def main() -> None:
     hdr = "% generated by scripts/instep_v1/paper_tex.py\n"
     t1 = tb / "reprobe_qwen3_8b.tex"
     t1.write_text(hdr + table_qwen3_8b(ours))
-    t2 = tb / "reprobe_phi4.tex"
-    t2.write_text(hdr + table_backbone(ours, "phi4"))
-    t3 = tb / "reprobe_qwen3_32b.tex"
-    t3.write_text(hdr + table_backbone(ours, "qwen3_32b", finalj))
+    t1a = tb / "reprobe_qwen3_8b_avg.tex"  # main text, one column; the per-set table is in the appendix
+    t1a.write_text(hdr + table_qwen3_8b_avg(ours))
+    t2 = tb / "reprobe_backbones.tex"
+    t2.write_text(hdr + table_backbones(ours, finalj))
     stored = (finalj or {}).get("backbones", {}).get("qwen3_32b", {}).get("metrics", {}).get(
         "prm7b_stored", {}).get("overall", {}).get("ap")
     f1 = fp / "reprobe_cost.tex"
     f1.write_text(figure_cost(ours))
-    print(t1, t2, t3, f1, sep="\n")
+    print(t1, t1a, t2, f1, sep="\n")
     if a.tts:
         f2 = fp / "tts.tex"
         f2.write_text(figure_tts(json.loads(a.tts.read_text())))

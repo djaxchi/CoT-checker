@@ -15,8 +15,12 @@ score is its worst step (highest P(incorrect); for the stored PRM and ReProbe co
 pool's stored trace score), the lowest-scoring candidate is picked (bon_analyze.py). Rows:
 pass@1, pass@N, majority vote (sets with a programmatic answer key), the pool's stored PRMs and
 ReProbe Attn+Logit DeepSeek column, the released ReProbe hidden-state probes, InStep (3 seeds).
-Beam search (Table 2): B = 5, N = 5 (beam_search.py), arms on the same questions with the same
-sampling seed, accuracy over the questions every arm finished.
+Beam search (Table 2): ReProbe's printed rows (PRMs and ReProbes, its own search and grading,
+cited as printed: no beam code is released) above our search, B = 5, N = 5 (beam_search.py):
+random scores, the released ReProbe hidden-state probes as the anchor, and InStep, on the same
+questions with the same sampling seed, accuracy over the questions every arm finished. Our search
+runs at a lower level than the printed one (ReProbe HS DeepSeek-anno 59.6 against 76.6 printed),
+so InStep is compared with the anchor row, never with a printed row.
 ID = mean of MATH, GSM8K, ProofNet; OOD = mean of the other sets; Overall = mean of all sets
 (the paper's averages). Writes tts_tables.{json,md,tex}.
 
@@ -68,16 +72,24 @@ T3_ROWS = [
     ("InStep (ours)", "InStep, Self-anno", "arm", "InStep-self"),
     ("InStep (ours)", "InStep, DeepSeek-anno", "arm", "InStep-DS"),
 ]
+OURS = "Our search (B = 5, N = 5), same questions and sampling seeds"
 T2_ROWS = [
-    ("No verifier", "Random scores (same search)", "random"),
-    ("PRMs", "Qwen2.5-Math-7B-PRM800k", "prm800k"),
-    ("PRMs", "Qwen2.5-Math-PRM-7B", "prm7b"),
-    ("ReProbes", "ReProbe, Attn+Logit, Self-anno", None),
-    ("ReProbes", "ReProbe, Attn+Logit, DeepSeek-anno", None),
-    ("ReProbes", "ReProbe, Hidden States, Self-anno", "rp_self"),
-    ("ReProbes", "ReProbe, Hidden States, DeepSeek-anno", "rp_ds"),
-    ("InStep (ours)", "InStep, Self-anno", "rt_self"),
-    ("InStep (ours)", "InStep, DeepSeek-anno", "instep_ds"),
+    (OURS, "Random scores (same search)", "random"),
+    (OURS, "ReProbe, Hidden States, Self-anno", "rp_self"),
+    (OURS, "ReProbe, Hidden States, DeepSeek-anno", "rp_ds"),
+    (OURS, "InStep, Self-anno", "rt_self"),
+    (OURS, "InStep, DeepSeek-anno", "instep_ds"),
+]
+# ReProbe's Table 2 as printed (arXiv 2511.06209v5 HTML, parsed 2026-11-09), Qwen3-8B; ID, OOD and
+# Overall are the printed averages
+T2_PRINTED_SEC = "Printed in ReProbe (Table 2, its search and grading)"
+T2_PRINTED = [
+    ("Qwen2.5-Math-7B-PRM800k", (89.8, 80.4, 95.2, 13.1, 45.0, 86.7, 91.2), (88.5, 59.0, 71.6)),
+    ("Qwen2.5-Math-PRM-7B", (88.1, 95.4, 93.6, 13.1, 41.5, 79.2, 83.6), (92.4, 54.4, 70.7)),
+    ("ReProbe, Attn+Logit, Self-anno", (90.3, 95.4, 95.1, 15.0, 41.5, 94.8, 96.2), (93.6, 61.9, 75.5)),
+    ("ReProbe, Attn+Logit, DeepSeek-anno", (81.8, 93.3, 79.1, 11.8, 42.4, 90.7, 90.8), (84.7, 58.9, 70.0)),
+    ("ReProbe, Hidden States, Self-anno", (84.1, 97.3, 90.6, 15.6, 40.5, 91.2, 92.8), (90.7, 60.0, 73.2)),
+    ("ReProbe, Hidden States, DeepSeek-anno", (86.8, 98.8, 95.6, 13.4, 48.0, 96.7, 96.7), (93.7, 63.7, 76.6)),
 ]
 
 
@@ -253,12 +265,13 @@ def beam_table(beam: Path, judged: dict, sets: tuple, n_boot: int, pairs: list) 
             seconds[a][s] = float(np.mean(t)) if t and len(t) == len(common) else None
     table = []
     for sec, label, a in T2_ROWS:
-        r = {"section": sec, "row": label, "note": None if a else "not released as a runnable probe"}
-        if a:
-            r.update({s: acc[a].get(s) for s in sets})
-            r.update(averages(r, sets))
+        r = {"section": sec, "row": label, "note": None}
+        r.update({s: acc[a].get(s) for s in sets})
+        r.update(averages(r, sets))
         table.append(r)
-    return {"rows": table, "info": info, "pairs": boot_pairs(perq, pairs, sets, n_boot),
+    printed = [{"section": T2_PRINTED_SEC, "row": label, "note": None, **dict(zip(T2_SETS, v)),
+                **dict(zip(("ID", "OOD", "Overall"), avg))} for label, v, avg in T2_PRINTED]
+    return {"rows": table, "printed": printed, "info": info, "pairs": boot_pairs(perq, pairs, sets, n_boot),
             "seconds": {a: dict(v) for a, v in seconds.items()}}
 
 
@@ -290,7 +303,7 @@ def md(t: dict, sets: tuple, title: str) -> list[str]:
     cols = [LBL[s] for s in sets] + ["ID", "OOD", "Overall"]
     L = [f"### {title}", "", "| Method | " + " | ".join(cols) + " |", "|---" * (len(cols) + 1) + "|"]
     sec = None
-    for r in t["rows"]:
+    for r in t.get("printed", []) + t["rows"]:
         if r["section"] != sec:
             sec = r["section"]
             L.append(f"| *{sec}* |" + " |" * len(cols))
@@ -311,7 +324,7 @@ def tex(t: dict, sets: tuple, caption: str) -> str:
          "\\begin{tabular}{l" + "c" * len(cols) + "}", "\\toprule", "Method & " + " & ".join(cols) + " \\\\",
          "\\midrule"]
     sec = None
-    for r in t["rows"]:
+    for r in t.get("printed", []) + t["rows"]:
         if r["section"] != sec:
             if sec is not None:
                 L.append("\\midrule")
@@ -349,19 +362,20 @@ def main() -> None:
                     ("InStep-DS", "Qwen/Qwen2.5-Math-PRM-7B"), ("InStep-DS", "majority"), ("InStep-DS", "pass@1")])
     judged = json.loads(a.beam_judged.read_text()) if a.beam_judged and a.beam_judged.exists() else {}
     t2 = beam_table(a.beam, judged, T2_SETS, a.n_boot,
-                    [("instep_ds", "rp_ds"), ("rt_self", "rp_self"), ("instep_ds", "prm7b"), ("instep_ds", "random")])
+                    [("instep_ds", "rp_ds"), ("rt_self", "rp_self"), ("instep_ds", "random"), ("rt_self", "random")])
     curve = bon_curve(a.bon, arms, T3_SETS, (1, 2, 4, 6, 8, 10))
     (a.out / "tts_tables.json").write_text(json.dumps({"table3_bon": t3, "table2_beam": t2, "bon_curve": curve},
                                                       indent=1))
     L = md(t3, T3_SETS, "Table 3: Best-of-N accuracy (Qwen3-8B), ReProbe's released pools, one harness")
     L += [f"- Best-of-N sets not graded yet: {t3['notes']}", ""] if t3["notes"] else []
-    L += md(t2, T2_SETS, "Table 2: Beam search accuracy (Qwen3-8B, B = 5, N = 5), one harness")
+    L += md(t2, T2_SETS, "Table 2: Beam search accuracy (Qwen3-8B): ReProbe's printed rows, then our search")
     L += [f"- beam questions per set (common to every arm run): "
           + ", ".join(f"{s} {v['questions']} ({len(v['arms'])} arms)" for s, v in t2["info"].items()), ""]
     (a.out / "tts_tables.md").write_text("\n".join(L))
     (a.out / "tts_tables.tex").write_text(
         tex(t3, T3_SETS, "Best-of-$N$ decoding accuracy (Qwen3-8B), recomputed on ReProbe's released pools.") + "\n\n"
-        + tex(t2, T2_SETS, "Beam search decoding accuracy (Qwen3-8B, $B=5$, $N=5$)."))
+        + tex(t2, T2_SETS, "Beam search decoding accuracy (Qwen3-8B). Top: ReProbe's printed rows. Bottom: our "
+              "search ($B=5$, $N=5$), where InStep is compared with the released ReProbe probe."))
     print("\n".join(L))
 
 

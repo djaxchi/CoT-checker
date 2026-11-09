@@ -111,3 +111,18 @@ def test_bon_table_partially_judged(tmp_path):
     assert rows["InStep, DeepSeek-anno"]["trips"] == 50  # q0 k1 right, q1 k2 wrong
     assert rows["ReProbe, Attn+Logit, DeepSeek-anno"]["trips"] is None  # its picks were not judged
     assert out["notes"]["trips"].startswith("partially judged")
+
+
+def test_beam_table_printed_rows_kept_apart(tmp_path):
+    beam = tmp_path / "beam"
+    beam.mkdir()
+    _w(beam / "x.jsonl", [{"set": "math", "qi": 0, "arm": a, "correct": True} for a in ("random", "rp_ds", "prm7b")])
+    out = T.beam_table(beam, {}, T.T2_SETS, 50, [])
+    # in-harness rows never include a PRM arm (cited as printed instead), even when the files hold one
+    assert all(r["section"] == T.OURS for r in out["rows"]) and "prm7b" not in out["seconds"]
+    pr = {r["row"]: r for r in out["printed"]}
+    assert pr["Qwen2.5-Math-PRM-7B"]["math"] == 88.1 and pr["ReProbe, Hidden States, DeepSeek-anno"]["Overall"] == 76.6
+    for r in out["printed"]:  # printed averages agree with the printed per-set cells (rounding)
+        assert abs(r["Overall"] - T.averages(r, T.T2_SETS)["Overall"]) < 0.11
+    L = T.md(out, T.T2_SETS, "t")
+    assert L.index(f"| *{T.T2_PRINTED_SEC}* |" + " |" * 10) < L.index(f"| *{T.OURS}* |" + " |" * 10)

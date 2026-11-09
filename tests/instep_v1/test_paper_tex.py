@@ -41,13 +41,26 @@ def test_one_column_table1_keeps_every_row_with_the_average_block_only():
 def test_backbone_table_merges_both_generators():
     finalj = {"backbones": {"qwen3_32b": {"metrics": {"prm7b_stored": {"overall": {"ap": 0.566}}}}}}
     tex = T.table_backbones(OURS, finalj)
-    assert "Method & Phi-4 & Qwen3-32B" in tex
+    assert "Method & Qwen3-32B & Phi-4" in tex  # no Qwen3-1.7B run in OURS: no column
     instep = next(line for line in tex.splitlines() if "InStep}" in line)
-    assert instep.rstrip(" \\").endswith("\\textbf{.410} & \\textbf{.630}")  # best on both
+    assert instep.rstrip(" \\").endswith("\\textbf{.630} & \\textbf{.410}")  # best on both
     prm7b = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
-    assert prm7b.endswith("$^\\dagger$ \\\\") and tex.count("$^\\dagger$") == 1
+    assert "$^\\dagger$" in prm7b and tex.count("$^\\dagger$") == 1
     maxprob = next(line for line in tex.splitlines() if line.startswith("MaxProb"))
-    assert maxprob.endswith("& -- \\\\")  # ReProbe reports no uncertainty scores on Qwen3-32B
+    assert maxprob.endswith("& -- & .149 \\\\")  # ReProbe reports no uncertainty scores on Qwen3-32B
+
+
+def test_backbone_table_adds_qwen3_1_7b_with_printed_table4_rows():
+    o = {k: dict(v) for k, v in OURS.items()}
+    o["qwen3_1_7b"] = {"instep": _arm(0.50)}  # no STEP run on 1.7B
+    tex = T.table_backbones(o)
+    assert "Method & Qwen3-1.7B & Qwen3-32B & Phi-4" in tex
+    prm7b = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
+    assert prm7b.startswith("Qwen2.5-Math-PRM-7B & .421 &")  # Table 4 as printed
+    step = next(line for line in tex.splitlines() if line.startswith("STEP"))
+    assert step.startswith("STEP & -- &")
+    instep = next(line for line in tex.splitlines() if "InStep}" in line)
+    assert "\\textbf{InStep} & \\textbf{.500}" in instep  # above ReProbe's .447
 
 
 def test_figure_renders_one_labelled_point_per_verifier():

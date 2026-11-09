@@ -164,37 +164,42 @@ def table_qwen3_8b(ours: dict) -> str:
 
 # --------------------------------------------------------------------------------- Phi-4 / 32B
 def table_backbones(ours: dict, finalj: dict | None = None) -> str:
-    """Phi-4 and Qwen3-32B in one column-width table: every row the ReProbe paper reports for either
-    generator ('--' where it reports none), then STEP and InStep. Phi-4: mean of the five released
-    sets (Table 9). Qwen3-32B: overall mean of 8 sets (Table 5); the printed PRM-7B value carries a
-    dagger when the value recomputed from the released scores (finalj) differs."""
-    bbs = ("phi4", "qwen3_32b")
-    val = {"phi4": lambda m: PN.per_set("phi4", m)["t9"],
-           "qwen3_32b": lambda m: PN.per_set("qwen3_32b", m)["overall"]}
+    """The other generators in one column-width table: Qwen3-1.7B (when our run is in `ours`),
+    Qwen3-32B and Phi-4. Every row the ReProbe paper reports for any of them ('--' where it reports
+    none), then STEP and InStep. Qwen3: overall mean of the 8 sets (Tables 4, 5); Phi-4: mean of the
+    five released sets (Table 9). The printed Qwen3-32B PRM-7B value carries a dagger when the value
+    recomputed from the released scores (finalj) is available."""
+    bbs = tuple(bb for bb in ("qwen3_1_7b", "qwen3_32b", "phi4") if bb in ours)
+    head = {"qwen3_1_7b": "Qwen3-1.7B", "qwen3_32b": "Qwen3-32B", "phi4": "Phi-4"}
     t9 = lambda d: float(np.mean([d[s] for s in PN.T9]))  # noqa: E731
+    printed = lambda bb, m: PN.per_set(bb, m)["t9" if bb == "phi4" else "overall"]  # noqa: E731
+    mine = lambda d, bb: None if d is None else (t9(d) if bb == "phi4" else d["overall"])  # noqa: E731
+    instep_key = {"qwen3_1_7b": "instep", "qwen3_32b": "instep_ep4", "phi4": "instep"}
     grp_order = {"UQ": 0, "PRM": 1, "ReProbe": 2}
     order = list(TEX)  # printed order of the methods
-    ms = sorted(set(PN.methods("phi4")) | set(PN.methods("qwen3_32b")),
+    ms = sorted(set().union(*(PN.methods(bb) for bb in bbs)),
                 key=lambda m: (grp_order[PN.GROUP[m]], order.index(m)))
-    rows = [(TEX[m], PN.GROUP[m], {bb: val[bb](m) if m in PN.methods(bb) else None for bb in bbs}, m)
+    rows = [(TEX[m], PN.GROUP[m], {bb: printed(bb, m) if m in PN.methods(bb) else None for bb in bbs}, m)
             for m in ms]
-    rows += [("STEP", "step", {"phi4": t9(ours["phi4"]["step"]), "qwen3_32b": ours["qwen3_32b"]["step"]["overall"]}, None),
-             ("\\textbf{InStep}", "ours", {"phi4": t9(ours["phi4"]["instep"]),
-                                            "qwen3_32b": ours["qwen3_32b"]["instep_ep4"]["overall"]}, None)]
+    rows += [("STEP", "step", {bb: mine(ours[bb].get("step"), bb) for bb in bbs}, None),
+             ("\\textbf{InStep}", "ours", {bb: mine(ours[bb][instep_key[bb]], bb) for bb in bbs}, None)]
     marks = {bb: _marks([r[2][bb] for r in rows]) for bb in bbs}
     stored = None
     if finalj is not None:
         stored = finalj["backbones"]["qwen3_32b"]["metrics"].get("prm7b_stored", {}).get("overall", {}).get("ap")
-    L = ["\\begin{tabular}{l cc}", "\\toprule", "Method & Phi-4 & Qwen3-32B \\\\"]
+    n = len(bbs) + 1
+    L = ["\\begin{tabular}{l " + "c" * len(bbs) + "}", "\\toprule",
+         "Method & " + " & ".join(head[bb] for bb in bbs) + " \\\\"]
     prev = None
     for i, (name, grp, _, m) in enumerate(rows):
         if grp != prev:
             L.append("\\midrule")
-            L.append(_group_row(3, GROUP_TITLE[grp].split(" (")[0]))
+            L.append(_group_row(n, GROUP_TITLE[grp].split(" (")[0]))
             prev = grp
-        q = marks["qwen3_32b"][i] + ("$^\\dagger$" if m == PN.PRM7B and stored is not None else "")
+        cells = [marks[bb][i] + ("$^\\dagger$" if bb == "qwen3_32b" and m == PN.PRM7B and stored is not None else "")
+                 for bb in bbs]
         pre = OURS_ROW if "InStep" in name else ""
-        L.append(f"{pre}{name} & {marks['phi4'][i]} & {q} \\\\")
+        L.append(f"{pre}{name} & " + " & ".join(cells) + " \\\\")
     L += ["\\bottomrule", "\\end{tabular}"]
     return "\n".join(L) + "\n"
 

@@ -301,6 +301,97 @@ BEAM_ARMS = [
     ("rp_self", "ReProbe, Hidden States, Self-anno", "ReProbe", "rpcol"),
     ("rt_self", "InStep, Self-anno", "\\textbf{InStep}", "instepdark"),
 ]
+# rows of tts_tables.json behind panel (b), by latency key; and the one-candidate baseline
+BON_ROW = {"PRM": "Qwen2.5-Math-PRM-7B", "ReProbe": "ReProbe, Hidden States, Self-anno", "InStep": "InStep, Self-anno"}
+PASS1_ROW = "Qwen3-8B pass@1 (lower bound)"
+# tts_tables.json row -> paper name (rows not listed keep their name; rows with no value are dropped)
+TTS_NAME = {
+    PASS1_ROW: "Pass@1 (one candidate)", "Qwen3-8B pass@N (upper bound)": "Pass@$N$ (oracle)",
+    "Majority voting": "Majority vote", "Random scores (same search)": "Random step scores",
+    "H4-Qwen2.5-PRM-1.5B-0.2": "H4-Qwen2.5-PRM-1.5B", "RLHFlow-PRM-Deepseek-Data": "RLHFlow-PRM-DeepSeek-8B",
+    "RLHFlow-PRM-Mistral-Data": "RLHFlow-PRM-Mistral-8B", "Universal-PRM-Qwen2.5-Math-7B": "Universal-PRM-7B",
+    "Qwen2.5-Math-7B-PRM800k": "Qwen2.5-Math-7B-PRM800K",
+    "ReProbe, Attn+Logit, Self-anno": "ReProbe$_{\\text{A+L}}$ (self)",
+    "ReProbe, Attn+Logit, DeepSeek-anno": "ReProbe$_{\\text{A+L}}$ (DS)",
+    "ReProbe, Hidden States, Self-anno": "ReProbe$_{\\text{HS}}$ (self)",
+    "ReProbe, Hidden States, DeepSeek-anno": "ReProbe$_{\\text{HS}}$ (DS)",
+    "InStep, Self-anno": "\\textbf{InStep} (self)", "InStep, DeepSeek-anno": "\\textbf{InStep} (DS)"}
+TTS_SECTION = {"Pass@N, majority voting": "No verifier", "PRMs": "Process reward models", "ReProbes": "ReProbe",
+               "InStep (ours)": "Ours", "Printed in ReProbe (Table 2, its search and grading)":
+               "Printed in ReProbe (its search and grading)",
+               "Our search (B = 5, N = 5), same questions and sampling seeds":
+               "Our search ($B = N = 5$), same questions and sampling seeds"}
+# main-text table: (group, best-of-N row, beam row); None where the method was not run in that setting
+TTS_MAIN = [
+    ("No verifier", PASS1_ROW, None), ("No verifier", None, "Random scores (same search)"),
+    ("Process reward models", "Qwen2.5-Math-PRM-7B", None),
+    ("Process reward models", "Universal-PRM-Qwen2.5-Math-7B", None),
+    ("Process reward models", "Qwen2.5-Math-7B-PRM800k", None),
+    ("ReProbe", "ReProbe, Attn+Logit, DeepSeek-anno", None),
+    ("ReProbe", "ReProbe, Hidden States, Self-anno", "ReProbe, Hidden States, Self-anno"),
+    ("ReProbe", "ReProbe, Hidden States, DeepSeek-anno", "ReProbe, Hidden States, DeepSeek-anno"),
+    ("Ours", "InStep, Self-anno", "InStep, Self-anno"), ("Ours", "InStep, DeepSeek-anno", "InStep, DeepSeek-anno"),
+]
+
+
+def _marks_pct(values: list[float | None]) -> list[str]:
+    """Accuracy in % to one decimal: bold the best, underline the second (ties share the mark)."""
+    present = sorted({round(v, 1) for v in values if v is not None}, reverse=True)
+    out = []
+    for v in values:
+        if v is None:
+            out.append("--")
+            continue
+        t = f"{v:.1f}"
+        r = round(v, 1)
+        out.append(f"\\textbf{{{t}}}" if r == present[0] else f"\\underline{{{t}}}" if len(present) > 1 and r == present[1] else t)
+    return out
+
+
+def table_tts(tts: dict) -> str:
+    """One-column test-time table: best-of-N and beam search side by side, ID / OOD / All."""
+    bon = {r["row"]: r for r in tts["table3_bon"]["rows"]}
+    beam = {r["row"]: r for r in tts["table2_beam"]["rows"]}
+    cols = [(bon, 1, "ID"), (bon, 1, "OOD"), (bon, 1, "Overall"), (beam, 2, "ID"), (beam, 2, "OOD"), (beam, 2, "Overall")]
+    vals = [[(src.get(r[i]) or {}).get(k) if r[i] else None for src, i, k in cols] for r in TTS_MAIN]
+    cells = [_marks_pct([v[j] for v in vals]) for j in range(len(cols))]
+    L = ["\\begin{tabular}{l ccc ccc}", "\\toprule",
+         " & \\multicolumn{3}{c}{Best-of-$N$} & \\multicolumn{3}{c}{Beam search} \\\\",
+         "\\cmidrule(lr){2-4} \\cmidrule(lr){5-7}",
+         "Method & ID & OOD & All & ID & OOD & All \\\\"]
+    prev = None
+    for i, (grp, rb, rm) in enumerate(TTS_MAIN):
+        if grp != prev:
+            L += ["\\midrule", _group_row(7, grp)]
+            prev = grp
+        name = TTS_NAME.get(rb or rm, rb or rm)
+        pre = OURS_ROW if "InStep" in name else ""
+        L.append(pre + name + " & " + " & ".join(cells[j][i] for j in range(len(cols))) + " \\\\")
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
+def table_tts_sets(rows: list[dict], sets: list[str]) -> str:
+    """Per-set accuracy table (appendix) in the layout of ReProbe's Tables 2 and 3: every row with a
+    value, grouped by section, best and second marked within each column over the rows shown."""
+    rows = [r for r in rows if any(r.get(k) is not None for k in sets + ["ID", "OOD", "Overall"])]
+    keys = sets + ["ID", "OOD", "Overall"]
+    cells = [_marks_pct([r.get(k) for r in rows]) for k in keys]
+    n = len(keys) + 1
+    L = ["\\begin{tabular}{l " + "c" * len(sets) + " ccc}", "\\toprule",
+         "Method & " + " & ".join(SET_LABEL[k] for k in sets) + " & ID & OOD & All \\\\"]
+    prev = None
+    for i, r in enumerate(rows):
+        if r["section"] != prev:
+            L += ["\\midrule", _group_row(n, TTS_SECTION.get(r["section"], r["section"]))]
+            prev = r["section"]
+        name = TTS_NAME.get(r["row"], r["row"])
+        pre = OURS_ROW if "InStep" in name else ""
+        L.append(pre + name + " & " + " & ".join(cells[j][i] for j in range(len(keys))) + " \\\\")
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
 SET_LABEL = {"math": "MATH", "gsm8k": "GSM8K", "proofnet": "ProofNet", "trips": "Trips", "meetings": "Meet.",
              "calendar": "Cal.", "strategyqa": "StrQA", "scienceqa": "SciQA"}
 
@@ -338,41 +429,31 @@ def figure_tts(tts: dict) -> str:
     ys = [v for key, *_ in BON_LINES if key in cur["curves"] for v in cur["curves"][key]]
     lo, hi = _axis_pad(ys)
     lo -= 0.5  # room for the legend (lower right, below the curves)
-    # (b) best-of-N at the largest N against the verifier's time per question: N candidates at the
-    # mean per-candidate latency of Figure 2b (10 per call)
+    # (b) best-of-N over all eight sets (the table's Overall column) against the verifier's time per
+    # question: N candidates at the mean per-candidate latency of Figure 2b (10 per call)
+    rows = {r["row"]: r for r in tts["table3_bon"]["rows"]}
     pts_b, ys_b = [], []
-    for key, lat, label, color, _ in BON_LINES:
-        if lat is None or key not in cur["curves"]:
+    for _, lat, label, color, _ in BON_LINES:
+        y = rows.get(BON_ROW.get(lat), {}).get("Overall")
+        if lat is None or y is None:
             continue
-        x, y = n_max * LATENCY[lat][1], cur["curves"][key][-1]
+        x = n_max * LATENCY[lat][1]
         ys_b.append(y)
-        where = {"InStep": "south east", "ReProbe": "south west"}.get(lat, "south")  # the two sit close
+        where = {"InStep": "south", "ReProbe": "north", "PRM": "south"}[lat]  # the three sit at one height
         pts_b.append(f"\\addplot[only marks, {color}, mark=*, mark size=2.2pt] coordinates {{({x:.1f},{y:.2f})}};\n"
                      f"\\node[font=\\footnotesize, text={color}, anchor={where}, inner sep=3pt] at (axis cs:{x:.1f},{y:.2f}) "
-                     f"{{{label}}};")
-    maj = cur["curves"].get("majority", [None])[-1]
-    if maj is not None:
-        ys_b.append(maj)
-        pts_b.append(f"\\addplot[black!45, dashed, line width=0.7pt, domain=10:1000, samples=2] {{{maj:.2f}}};\n"
-                     f"\\node[font=\\scriptsize, black!60, anchor=north east, inner sep=2pt] at (axis cs:950,{maj:.2f}) "
-                     f"{{majority vote (no verifier)}};")
-    lo_b, hi_b = _axis_pad(ys_b, 0.5)
-    # (c) beam search: accuracy against wall-clock seconds per question
-    sets, bp = beam_points(tts["table2_beam"])
-    pts_c = []
-    for lab, color, x, y in bp:
-        mark = "mark=o" if color == "black!45" else "mark=*"
-        where = "east" if "InStep" in lab else "west"  # InStep and ReProbe sit close; labels on either side
-        pts_c.append(f"\\addplot[only marks, {color}, {mark}, mark size=2.2pt] coordinates {{({x:.2f},{y:.2f})}};\n"
-                     f"\\node[font=\\footnotesize, text={color}, anchor={where}, inner sep=4pt] at (axis cs:{x:.2f},{y:.2f}) "
-                     f"{{{lab}}};")
-    xs_c, ys_c = [p[2] for p in bp], [p[3] for p in bp]
-    xlo, xhi = (np.floor(min(xs_c)) - 1, np.ceil(max(xs_c)) + 4) if bp else (0, 1)
-    ylo, yhi = _axis_pad(ys_c, 0.5) if bp else (0, 1)
+                     f"{{{label} ({y:.1f})}};")
+    one = rows.get(PASS1_ROW, {}).get("Overall")
+    if one is not None:
+        ys_b.append(one)
+        pts_b.append(f"\\addplot[black!45, dashed, line width=0.7pt, domain=10:1000, samples=2] {{{one:.2f}}};\n"
+                     f"\\node[font=\\scriptsize, black!60, anchor=south east, inner sep=2pt] at (axis cs:950,{one:.2f}) "
+                     f"{{one candidate, no verifier ({one:.1f})}};")
+    lo_b, hi_b = float(np.floor(min(ys_b)) - 1), float(np.ceil(max(ys_b)) + 2)  # room for the labels above the points
     common = ("width=0.92\\linewidth, height=3.3cm, tick label style={font=\\footnotesize}, "
               "label style={font=\\small}, ymajorgrids, grid style={gray!20}")
     return f"""% generated by scripts/instep_v1/paper_tex.py
-% (c) averages {", ".join(SET_LABEL[s] for s in sets)}
+% (a) the sets graded programmatically for every candidate; (b) all eight sets
 \\begin{{subfigure}}[b]{{\\linewidth}}
 \\centering
 \\begin{{tikzpicture}}
@@ -388,7 +469,7 @@ def figure_tts(tts: dict) -> str:
 {chr(10).join(lines)}
 \\end{{axis}}
 \\end{{tikzpicture}}
-\\caption{{Best-of-$N$: accuracy.}}
+\\caption{{Best-of-$N$ against $N$ ({", ".join(SET_LABEL[s] for s in cur["sets"])}).}}
 \\label{{fig:tts-bon}}
 \\end{{subfigure}}
 
@@ -399,28 +480,13 @@ def figure_tts(tts: dict) -> str:
 \\begin{{axis}}[{common},
   xmode=log, xmin=10, xmax=1000, ymin={lo_b:g}, ymax={hi_b:g}, clip=false,
   xtick={{30,100,300,1000}}, xticklabels={{30,100,300,1000}},
-  xlabel={{Verifier time per question (ms)}}, ylabel={{Acc.\\ at $N={n_max}$ (\\%)}},
+  xlabel={{Verifier time per question (ms)}}, ylabel={{Accuracy (\\%)}},
 ]
 {chr(10).join(pts_b)}
 \\end{{axis}}
 \\end{{tikzpicture}}
-\\caption{{Best-of-$N$: cost.}}
+\\caption{{Best-of-$N$ on the eight sets against verifier time.}}
 \\label{{fig:tts-bon-cost}}
-\\end{{subfigure}}
-
-\\vspace{{1mm}}
-\\begin{{subfigure}}[b]{{\\linewidth}}
-\\centering
-\\begin{{tikzpicture}}
-\\begin{{axis}}[{common},
-  xmin={xlo:g}, xmax={xhi:g}, ymin={ylo:g}, ymax={yhi:g}, clip=false,
-  xlabel={{Search time per question (s)}}, ylabel={{Accuracy (\\%)}},
-]
-{chr(10).join(pts_c)}
-\\end{{axis}}
-\\end{{tikzpicture}}
-\\caption{{Beam search ($B = N = 5$).}}
-\\label{{fig:tts-beam}}
 \\end{{subfigure}}
 """
 
@@ -528,8 +594,16 @@ def main() -> None:
     print(t1, t1a, t2, f1, sep="\n")
     if a.tts:
         f2 = fp / "tts.tex"
-        f2.write_text(figure_tts(json.loads(a.tts.read_text())))
-        print(f2)
+        tts = json.loads(a.tts.read_text())
+        f2.write_text(figure_tts(tts))
+        t3 = tb / "tts.tex"  # main text, one column
+        t3.write_text(hdr + table_tts(tts))
+        t3b = tb / "tts_bon_sets.tex"  # appendix, per set
+        t3b.write_text(hdr + table_tts_sets(tts["table3_bon"]["rows"], list(SET_LABEL)))
+        beam_sets = [k for k in SET_LABEL if k != "meetings"]  # Meetings is not in ReProbe's Table 2
+        t3c = tb / "tts_beam_sets.tex"
+        t3c.write_text(hdr + table_tts_sets(tts["table2_beam"].get("printed", []) + tts["table2_beam"]["rows"], beam_sets))
+        print(f2, t3, t3b, t3c, sep="\n")
     if a.q17:
         f3 = fp / "size.tex"
         f3.write_text(figure_size(ours, {"qwen3_32b": stored} if stored is not None else None))

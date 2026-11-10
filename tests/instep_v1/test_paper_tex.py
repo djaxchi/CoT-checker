@@ -70,12 +70,22 @@ def test_figure_renders_one_labelled_point_per_verifier():
     assert "const plot" not in fig and "legend" not in fig.split("\\vspace")[0]  # panel (a): no legend
 
 
+def _row(section, row, **v):
+    return {"section": section, "row": row, **v}
+
+
 TTS = {"bon_curve": {"sets": ["math"], "n": [1, 2, 10],
                      "curves": {"majority": [60.0, 61.0, 65.0], "InStep-self": [60.0, 64.0, 70.0]}},
+       "table3_bon": {"rows": [
+           _row("Pass@N, majority voting", "Qwen3-8B pass@1 (lower bound)", math=50.0, ID=50.0, OOD=40.0, Overall=45.0),
+           _row("Pass@N, majority voting", "Majority voting", math=52.0, ID=None, OOD=None, Overall=None),
+           _row("PRMs", "Skywork-PRM-1.5B", math=None, ID=None, OOD=None, Overall=None),  # not released: dropped
+           _row("PRMs", "Qwen2.5-Math-PRM-7B", math=60.0, ID=60.0, OOD=44.0, Overall=52.0),
+           _row("ReProbes", "ReProbe, Hidden States, Self-anno", math=58.0, ID=58.0, OOD=45.0, Overall=51.0),
+           _row("InStep (ours)", "InStep, Self-anno", math=59.0, ID=59.0, OOD=46.0, Overall=52.04)]},
        "table2_beam": {"rows": [
-           {"row": "Random scores (same search)", "math": 60.0, "gsm8k": 80.0, "trips": None},
-           {"row": "Qwen2.5-Math-PRM-7B", "math": None, "gsm8k": None},  # not run yet: no point
-           {"row": "InStep, Self-anno", "math": 67.0, "gsm8k": 79.0}],
+           _row("Our search", "Random scores (same search)", math=60.0, gsm8k=80.0, ID=70.0, OOD=50.0, Overall=58.0),
+           _row("Our search", "InStep, Self-anno", math=67.0, gsm8k=79.0, ID=73.0, OOD=49.0, Overall=59.0)],
            "seconds": {"random": {"math": 10.0, "gsm8k": 4.0}, "rt_self": {"math": 12.0, "gsm8k": 6.0}}}}
 
 
@@ -85,13 +95,29 @@ def test_beam_points_average_accuracy_and_time_over_common_sets():
     assert [(p[0], p[2], p[3]) for p in pts] == [("random scores", 7.0, 70.0), ("\\textbf{InStep}", 9.0, 73.0)]
 
 
-def test_tts_figure_has_accuracy_and_cost_panels():
+def test_tts_figure_has_curve_and_eight_set_cost_panels():
     fig = T.figure_tts(TTS)
-    assert fig.count("\\begin{tikzpicture}") == 3
-    assert "(10,70.00)" in fig and "Majority vote" in fig and "PRM-7B" not in fig
-    # (b): InStep at N = 10 candidates x its per-candidate latency at 10 per call
-    assert f"({10 * T.LATENCY['InStep'][1]:.1f},70.00)" in fig and "majority vote (no verifier)" in fig
-    assert "(9.00,73.00)" in fig  # (c)
+    assert fig.count("\\begin{tikzpicture}") == 2 and "fig:tts-beam" not in fig
+    assert "(10,70.00)" in fig and "Majority vote" in fig
+    # (b): the table's Overall column at N = 10 candidates x per-candidate latency at 10 per call
+    assert f"({10 * T.LATENCY['InStep'][1]:.1f},52.04)" in fig and "InStep} (52.0)" in fig
+    assert f"({10 * T.LATENCY['PRM'][1]:.1f},52.00)" in fig and "one candidate, no verifier (45.0)" in fig
+
+
+def test_tts_table_puts_best_of_n_and_beam_side_by_side():
+    tex = T.table_tts(TTS)
+    assert "\\multicolumn{3}{c}{Best-of-$N$} & \\multicolumn{3}{c}{Beam search}" in tex
+    instep = next(line for line in tex.splitlines() if "InStep} (self)" in line)
+    assert instep.rstrip(" \\").endswith("& \\textbf{52.0} & \\textbf{73.0} & \\underline{49.0} & \\textbf{59.0}")
+    prm = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
+    assert prm.endswith("& -- & -- & -- \\\\")  # not run in our beam search
+    rand = next(line for line in tex.splitlines() if line.startswith("Random step scores"))
+    assert rand.startswith("Random step scores & -- & -- & -- &")
+
+
+def test_tts_set_table_drops_rows_without_values():
+    tex = T.table_tts_sets(TTS["table3_bon"]["rows"], ["math"])
+    assert "Skywork" not in tex and "Majority vote & 52.0" in tex and "No verifier" in tex
 
 
 def test_add_step_takes_the_seed_mean_per_set():

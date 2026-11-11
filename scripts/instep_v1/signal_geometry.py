@@ -17,7 +17,8 @@ For each key, fitted on train40k only:
   axis     the raw class-mean difference (train, unstandardized): test PR-AUC / AUROC of the
            projection on it, and the share of the total variance along it
   pcs      the top --n_pcs principal directions of the raw train states: test AUROC of each
-           (sign fixed on train), the best one's index (1-based) and AUROC
+           (sign fixed on train); the best one is picked by train AUROC (index 1-based) and
+           reported with its test AUROC
 For the final key of each method (--final): the held-out 2D view (x = probe logit, y = first
 principal direction of the standardized states orthogonal to the probe weights), per-class
 histograms of x, and the in-set ceiling (5-fold trace-grouped CV of the same probe inside each
@@ -169,6 +170,8 @@ def analyze_key(D: Data, key: str, grid, n_pcs: int, dev, final: bool, n_correct
     _, S, V = torch.pca_lowrank(Xr, q=n_pcs, center=False, niter=4)
     pc_var = (S ** 2 / len(Xr)).cpu().numpy()
     sign = torch.sign((Xr[yt == 1] @ V).mean(0) - (Xr[yt == 0] @ V).mean(0))
+    ptr = ((Xr @ V) * sign).cpu().numpy()
+    pc_train = [auroc(ytr, ptr[:, j]) for j in range(ptr.shape[1])]  # picks the PC, on train only
     # 2D view: first principal direction of the standardized train states orthogonal to w
     wu = w / w.norm()
     Xo = Xt - (Xt @ wu)[:, None] * wu[None]
@@ -201,8 +204,8 @@ def analyze_key(D: Data, key: str, grid, n_pcs: int, dev, final: bool, n_correct
            "ap": mean_groups(per, "ap"), "auroc": mean_groups(per, "auroc"),
            "axis_ap": mean_groups(per, "axis_ap"), "axis_auroc": mean_groups(per, "axis_auroc"),
            "axis_var_share": var_axis / total_var, "pc_var_share": (pc_var / total_var).tolist(),
-           "pc_auroc_mean": pc_mean.tolist(), "best_pc": int(np.argmax(pc_mean)) + 1,
-           "best_pc_auroc": float(pc_mean.max()), "per_set": per}
+           "pc_auroc_mean": pc_mean.tolist(), "pc_auroc_train": pc_train, "best_pc": int(np.argmax(pc_train)) + 1,
+           "best_pc_auroc": float(pc_mean[int(np.argmax(pc_train))]), "per_set": per}
     if final:
         res["ceiling_ap"] = mean_groups(per, "ceiling_ap")
         with open(out / f"points_{key}.csv", "w") as f:

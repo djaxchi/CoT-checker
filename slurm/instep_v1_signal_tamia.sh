@@ -12,7 +12,8 @@
 #    and step-token states of the DS seed-0 token at every 4th block, on train40k, val and the
 #    8 test sets): GPU0 Qwen2.5-Math-PRM-7B separator states on val + test, GPU1 the same on
 #    train40k, GPU2 ReProbe's released DS head (pooled step representation) on val + test,
-#    GPU3 the same on train40k; written to $SS, each gated against the stored step scores.
+#    GPU3 the same on train40k; written to $SS/prm and $SS/reprobe, each gated against the
+#    stored step scores. METHODS="prm" (or "reprobe") reruns one method only.
 # 2. scripts/instep_v1/signal_geometry.py: one linear probe and one set of geometry measures
 #    per representation and layer, to $OUT/signal/.
 # SMOKE=N: states of the first N traces per set under ${SS}_smokeN (gates printed, not
@@ -47,6 +48,7 @@ pip install --no-index --upgrade pip >/dev/null
 # transformers < 5: the Qwen PRMs' remote code scores garbage under 5 (commit 41156c6)
 pip install --no-index torch "transformers<5" numpy scipy scikit-learn pyyaml 2>&1 | tail -1
 SM=(); [[ $SMOKE == 0 ]] || SM=(--smoke "$SMOKE")
+METHODS="${METHODS:-prm reprobe}"
 
 TESTS=(math gsm8k proofnet trips meetings calendar strategyqa scienceqa)
 PI=(); PK=(); RI=(); RK=()
@@ -59,19 +61,23 @@ PRM=(python scripts/instep_v1/signal_states.py prm --out "$SS" --gate_scores "$O
 RP=(python scripts/instep_v1/signal_states.py reprobe --ckpt "$V1/released/ds" --out "$SS"
     --gate_scores "$V1/runs/released/scores/rel_ds" "${SM[@]}")
 pids=()
-CUDA_VISIBLE_DEVICES=0 "${PRM[@]}" --sets "${PI[@]}" --keep "${PK[@]}" > "$LOGS/signal_prm_test$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
-CUDA_VISIBLE_DEVICES=1 "${PRM[@]}" --sets "train40k:$D/rt/ds_train.items.jsonl" --keep "${TK[@]}" \
-  > "$LOGS/signal_prm_train$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
-CUDA_VISIBLE_DEVICES=2 "${RP[@]}" --sets "${RI[@]}" --keep "${PK[@]}" > "$LOGS/signal_rp_test$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
-CUDA_VISIBLE_DEVICES=3 "${RP[@]}" --sets "train40k:$D/rp/train.traces.jsonl" --keep "${TK[@]}" \
-  > "$LOGS/signal_rp_train$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+if [[ " $METHODS " == *" prm "* ]]; then
+  CUDA_VISIBLE_DEVICES=0 "${PRM[@]}" --sets "${PI[@]}" --keep "${PK[@]}" > "$LOGS/signal_prm_test$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+  CUDA_VISIBLE_DEVICES=1 "${PRM[@]}" --sets "train40k:$D/rt/ds_train.items.jsonl" --keep "${TK[@]}" \
+    > "$LOGS/signal_prm_train$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+fi
+if [[ " $METHODS " == *" reprobe "* ]]; then
+  CUDA_VISIBLE_DEVICES=2 "${RP[@]}" --sets "${RI[@]}" --keep "${PK[@]}" > "$LOGS/signal_rp_test$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+  CUDA_VISIBLE_DEVICES=3 "${RP[@]}" --sets "train40k:$D/rp/train.traces.jsonl" --keep "${TK[@]}" \
+    > "$LOGS/signal_rp_train$SUF-$SLURM_JOB_ID.log" 2>&1 & pids+=($!)
+fi
 fail=0
 for p in "${pids[@]}"; do wait "$p" || fail=1; done
 grep -h "^\[prm\]\|^\[reprobe\]\|Error\|error" "$LOGS"/signal_*"$SUF-$SLURM_JOB_ID".log | tail -n 40 || true
 [[ $fail == 0 || $SMOKE != 0 ]] || exit 1
 
 if [[ $SMOKE == 0 ]]; then
-  CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/signal_geometry.py --states "$ST8" --extra "$SS" --data "$D" \
+  CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/signal_geometry.py --states "$ST8" --extra "$SS/prm" "$SS/reprobe" --data "$D" \
     --out "$OUT/signal"
 else
   CUDA_VISIBLE_DEVICES=0 python scripts/instep_v1/signal_geometry.py --states "$ST8" --data "$D" \

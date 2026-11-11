@@ -49,7 +49,7 @@ def _fixture(tmp_path, n=240, d=12, seed=0):
 
 def test_signal_geometry_separates_dominant_from_hidden_axis(tmp_path):
     st, ex, data = _fixture(tmp_path)
-    D = G.Data(st, ex, data, "ds")
+    D = G.Data(st, [ex], data, "ds")
     assert D.mask["math"][0] == False and int(D.mask["math"].sum()) == 239  # noqa: E712
     out = tmp_path / "out"
     out.mkdir()
@@ -69,7 +69,7 @@ def test_signal_geometry_rejects_misaligned_extra(tmp_path):
     st, ex, data = _fixture(tmp_path)
     (ex / "math.shard0.meta.jsonl").write_text(json.dumps({"uid": "other::0"}) + "\n")
     with pytest.raises(SystemExit):
-        G.Data(st, ex, data, "ds")
+        G.Data(st, [ex], data, "ds")
 
 
 def test_depth_and_family():
@@ -98,7 +98,7 @@ def test_gate_spearman(tmp_path):
 def test_fig_signal_from_geometry(tmp_path):
     from scripts.instep_v1 import fig_signal as F
     st, ex, data = _fixture(tmp_path)
-    D = G.Data(st, ex, data, "ds")
+    D = G.Data(st, [ex], data, "ds")
     out = tmp_path / "sig"
     out.mkdir()
     keys = [G.analyze_key(D, k, (1e-2,), 4, "cpu", k in G.FINAL, 20, out) for k in ("passive_final", "sep", "prm_final")]
@@ -109,3 +109,9 @@ def test_fig_signal_from_geometry(tmp_path):
     view = F.view_fig(sig, out, 10)
     assert view.count("\\begin{axis}") == 3 and "Text token" in view and "InStep" in view
     assert "| sep |" in F.summary_md(sig)
+
+
+def test_signal_geometry_rejects_a_key_in_two_dirs(tmp_path):
+    st, ex, data = _fixture(tmp_path)
+    with pytest.raises(SystemExit):
+        G.Data(st, [ex, ex], data, "ds")

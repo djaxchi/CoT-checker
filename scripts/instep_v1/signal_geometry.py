@@ -26,7 +26,7 @@ test set) against the train-fit probe.
 Outputs <out>/signal_geometry.json and <out>/points_<key>.csv (set, y, x, y2) with every
 incorrect test step and --n_correct sampled correct ones per set.
 
-    python scripts/instep_v1/signal_geometry.py --states $ST/qwen3_8b --extra $SS \\
+    python scripts/instep_v1/signal_geometry.py --states $ST/qwen3_8b --extra $SS/prm $SS/reprobe \\
         --data $D --out $OUT/signal
 """
 
@@ -87,11 +87,13 @@ class Data:
     """Labels and joint masks, the same for every key: a step counts when it is kept in every
     state source and labelled (val labels from the traces, as passive_fit.py)."""
 
-    def __init__(self, states: Path, extra: Path | None, data: Path, val_label: str):
-        self.dirs = [states] + ([extra] if extra else [])
+    def __init__(self, states: Path, extra: list[Path] | None, data: Path, val_label: str):
+        self.dirs = [states] + list(extra or [])
         self.where = {}
         for d in self.dirs:
             for k in keys_in(d):
+                if k in self.where:
+                    raise SystemExit(f"state key {k} in both {self.where[k]} and {d}")
                 self.where[k] = d
         self.sets = [TRAIN, "val", *TEST]
         self.uids, self.y, self.mask = {}, {}, {}
@@ -218,7 +220,7 @@ def analyze_key(D: Data, key: str, grid, n_pcs: int, dev, final: bool, n_correct
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--states", type=Path, required=True, help="InStep encode states (text + step token)")
-    p.add_argument("--extra", type=Path, default=None, help="signal_states.py outputs (PRM, ReProbe)")
+    p.add_argument("--extra", type=Path, nargs="*", default=[], help="signal_states.py output dirs (prm/, reprobe/)")
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--val_label", default="ds")
     p.add_argument("--out", type=Path, required=True)
@@ -235,7 +237,7 @@ def main() -> None:
     res = [analyze_key(D, k, tuple(float(c) for c in a.grid.split(",")), a.n_pcs, dev, k in FINAL, a.n_correct, a.out)
            for k in keys]
     (a.out / "signal_geometry.json").write_text(json.dumps(
-        {"states": str(a.states), "extra": str(a.extra), "n": {s: int(D.mask[s].sum()) for s in D.sets},
+        {"states": str(a.states), "extra": [str(x) for x in a.extra], "n": {s: int(D.mask[s].sum()) for s in D.sets},
          "keys": res}, indent=1))
     print(f"[signal] -> {a.out / 'signal_geometry.json'}", flush=True)
 

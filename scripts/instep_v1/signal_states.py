@@ -11,7 +11,7 @@ same steps as the stored InStep states (read_token_inline.py encode, $ST/qwen3_8
            head's pooled step representation, the input of its classifier (`reprobe_rep`,
            512 dims).
 
-Each output <out>/<name>.shard0.{npz,meta.jsonl} holds the uids of --keep <name>:<meta.jsonl>
+Each output <out>/<method>/<name>.shard0.{npz,meta.jsonl} holds the uids of --keep <name>:<meta.jsonl>
 in that order (the InStep states' meta), so every representation is aligned by row: npz keys
 y (int8, from the items / trace labels), kept (bool), the states (n, 1, d) float16, and p
 (float32, the method's own P(incorrect) from the same pass) for the gate. Traces without a
@@ -217,6 +217,7 @@ def main() -> None:
     p.add_argument("--max_claim_tokens", type=int, default=160000)
     p.add_argument("--smoke", type=int, default=0, help="first N traces per set")
     a = p.parse_args()
+    a.out = a.out / a.method  # one dir per method: both write <name>.shard0.npz
     rep = run_prm(a) if a.method == "prm" else run_reprobe(a)
     a.out.mkdir(parents=True, exist_ok=True)
     tag = "_".join(sorted(parse_pairs(a.sets)))

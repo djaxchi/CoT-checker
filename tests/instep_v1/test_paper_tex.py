@@ -120,6 +120,32 @@ def test_tts_set_table_drops_rows_without_values():
     assert "Skywork" not in tex and "Majority vote & 52.0" in tex and "No verifier" in tex
 
 
+def _pb_final() -> dict:
+    vals = {"maxprob": 0.70, "ptrue": 0.89, "prm800k": 0.92, "prm7b": 0.96, "rp_rel_self": 0.89,
+            "rp_rel_ds": 0.91, "instep_self": 0.93, "instep_ds": 0.935, "instep_prm": 0.945}
+    sub = ["gsm8k", "math", "olympiadbench", "omnimath"]
+    pb = {k: {"auroc_mean": v, "ap_mean": v - 0.2, "per_subset": {s: {"auroc": v, "ap": v - 0.2} for s in sub}}
+          for k, v in vals.items()}
+    c20 = {k: {"calib20_mean": v - 0.3, "per_subset": {s: v - 0.3 for s in sub}} for k, v in vals.items()}
+    return {"backbones": {"qwen3_8b": {"pb": pb, "calib20": c20}}}
+
+
+def test_processbench_table_has_three_metrics_and_marks_the_prm_best():
+    tex = T.table_processbench(_pb_final())
+    assert "Method & AUROC & PR-AUC & F1" in tex and tex.count(T.GROUP_ROW) == 4
+    prm = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
+    assert prm.endswith("& \\textbf{.960} & \\textbf{.760} & \\textbf{.660} \\\\")
+    ours = next(line for line in tex.splitlines() if "InStep} (PRM800K)" in line)
+    assert ours.startswith(T.OURS_ROW) and "\\underline{.945}" in ours
+
+
+def test_processbench_set_table_has_twelve_columns():
+    tex = T.table_processbench_sets(_pb_final())
+    assert "\\multicolumn{3}{c}{Omni-MATH}" in tex and "\\cmidrule(lr){11-13}" in tex
+    row = next(line for line in tex.splitlines() if line.startswith("MaxProb"))
+    assert row.count("&") == 12
+
+
 def test_add_step_takes_the_seed_mean_per_set():
     o = {"phi4": {}}
     T.add_step(o, "phi4", {"test_seed_mean": {"math": 0.4, "gsm8k": 0.2}})

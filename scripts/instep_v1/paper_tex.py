@@ -204,6 +204,69 @@ def table_backbones(ours: dict, finalj: dict | None = None) -> str:
     return "\n".join(L) + "\n"
 
 
+# --------------------------------------------------------------------------------- ProcessBench
+# Qwen3-8B reads ProcessBench's solutions (final_v1.json, backbones.qwen3_8b.pb and .calib20).
+# (arm key, row name, group); ReProbe rows are the released probes, InStep rows the 3-seed means.
+PB_ROWS = [("maxprob", "MaxProb", "UQ"), ("ptrue", "P(True)", "UQ"),
+           ("prm800k", TEX[PN.PRM800K], "PRM"), ("prm7b", TEX[PN.PRM7B], "PRM"),
+           ("rp_rel_self", TEX[PN.RP_HS_SELF], "ReProbe"), ("rp_rel_ds", TEX[PN.RP_HS_DS], "ReProbe"),
+           ("instep_self", "\\textbf{InStep} (self)", "ours"), ("instep_ds", "\\textbf{InStep} (DS)", "ours"),
+           ("instep_prm", "\\textbf{InStep} (PRM800K)", "ours")]
+PB_SUBSETS = [("gsm8k", "GSM8K"), ("math", "MATH"), ("olympiadbench", "OlympiadBench"), ("omnimath", "Omni-MATH")]
+
+
+def _pb_values(finalj: dict) -> list[tuple[str, str, dict]]:
+    """(name, group, {metric or (subset, metric): value}) per row; metrics auroc, ap, f1 (calib-20)."""
+    b = finalj["backbones"]["qwen3_8b"]
+    out = []
+    for key, name, grp in PB_ROWS:
+        pb, c20 = b["pb"][key], b["calib20"][key]
+        v = {"auroc": pb["auroc_mean"], "ap": pb["ap_mean"], "f1": c20["calib20_mean"]}
+        for s, _ in PB_SUBSETS:
+            v[(s, "auroc")] = pb["per_subset"][s]["auroc"]
+            v[(s, "ap")] = pb["per_subset"][s]["ap"]
+            v[(s, "f1")] = c20["per_subset"][s]
+        out.append((name, grp, v))
+    return out
+
+
+def _grouped_rows(rows: list[tuple[str, str, dict]], cols: list, n: int) -> list[str]:
+    cells = [_marks([r[2][c] for r in rows]) for c in cols]
+    L, prev = [], None
+    for i, (name, grp, _) in enumerate(rows):
+        if grp != prev:
+            L += ["\\midrule", _group_row(n, GROUP_TITLE[grp].split(" (")[0])]
+            prev = grp
+        pre = OURS_ROW if "InStep" in name else ""
+        L.append(pre + name + " & " + " & ".join(cells[j][i] for j in range(len(cols))) + " \\\\")
+    return L
+
+
+def table_processbench(finalj: dict) -> str:
+    """Main text, one column: mean over the four subsets of first-error AUROC, PR-AUC and F1."""
+    rows = _pb_values(finalj)
+    L = ["\\begin{tabular}{l ccc}", "\\toprule",
+         " & \\multicolumn{2}{c}{No threshold} & Threshold \\\\",
+         "\\cmidrule(lr){2-3} \\cmidrule(lr){4-4}",
+         "Method & AUROC & PR-AUC & F1 \\\\"]
+    L += _grouped_rows(rows, ["auroc", "ap", "f1"], 4)
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
+def table_processbench_sets(finalj: dict) -> str:
+    """Appendix, page width: the three metrics per subset."""
+    rows = _pb_values(finalj)
+    cols = [(s, m) for s, _ in PB_SUBSETS for m in ("auroc", "ap", "f1")]
+    L = ["\\begin{tabular}{l " + " ".join(["ccc"] * len(PB_SUBSETS)) + "}", "\\toprule",
+         " & " + " & ".join(f"\\multicolumn{{3}}{{c}}{{{lab}}}" for _, lab in PB_SUBSETS) + " \\\\",
+         " ".join(f"\\cmidrule(lr){{{2 + 3 * i}-{4 + 3 * i}}}" for i in range(len(PB_SUBSETS))),
+         "Method & " + " & ".join(["AUROC & PR-AUC & F1"] * len(PB_SUBSETS)) + " \\\\"]
+    L += _grouped_rows(rows, cols, len(cols) + 1)
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
 # --------------------------------------------------------------------------------- cost figure
 def figure_cost(ours: dict) -> str:
     o = ours["qwen3_8b"]
@@ -592,6 +655,12 @@ def main() -> None:
     f1 = fp / "reprobe_cost.tex"
     f1.write_text(figure_cost(ours))
     print(t1, t1a, t2, f1, sep="\n")
+    if finalj is not None:
+        t4 = tb / "processbench.tex"  # main text, one column
+        t4.write_text(hdr + table_processbench(finalj))
+        t4b = tb / "processbench_sets.tex"  # appendix, per subset
+        t4b.write_text(hdr + table_processbench_sets(finalj))
+        print(t4, t4b, sep="\n")
     if a.tts:
         f2 = fp / "tts.tex"
         tts = json.loads(a.tts.read_text())

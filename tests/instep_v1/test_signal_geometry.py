@@ -93,3 +93,19 @@ def test_gate_spearman(tmp_path):
     assert g["pass"] and g["n"] == 5
     arr["p"] = arr["p"][::-1].copy()
     assert not SS.gate("s", [f"u{i}" for i in range(5)], arr, tmp_path)["pass"]
+
+
+def test_fig_signal_from_geometry(tmp_path):
+    from scripts.instep_v1 import fig_signal as F
+    st, ex, data = _fixture(tmp_path)
+    D = G.Data(st, ex, data, "ds")
+    out = tmp_path / "sig"
+    out.mkdir()
+    keys = [G.analyze_key(D, k, (1e-2,), 4, "cpu", k in G.FINAL, 20, out) for k in ("passive_final", "sep", "prm_final")]
+    sig = {"keys": keys}
+    dep = F.depth_fig(sig)
+    assert "prmcol" in dep and "(100.0," in dep  # PRM final state is the PRM curve's last point
+    assert "instepdark, mark=none" not in dep  # sep is excluded from the step-token curve (no blocks here)
+    view = F.view_fig(sig, out, 10)
+    assert view.count("\\begin{axis}") == 3 and "Text token" in view and "InStep" in view
+    assert "| sep |" in F.summary_md(sig)

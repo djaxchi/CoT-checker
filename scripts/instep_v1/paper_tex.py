@@ -267,6 +267,102 @@ def table_processbench_sets(finalj: dict) -> str:
     return "\n".join(L) + "\n"
 
 
+# --------------------------------------------------------------------------------- ablations
+# The ladder on Qwen3-8B (DS labels), each variant at its own learning rate from the sweep:
+# final_lrpick/final.json (scripts/instep_v1/paper_v1.py, job 663297). Params on Qwen3-8B (d = 4096,
+# L = 36): head d + 1, one input embedding d, offsets L * d per trained token.
+_D, _L = 4096, 36
+ABLATION_ROWS = [  # (arm key in final.json, name, added parameters, group)
+    ("ptrue", "P(True), zero-shot", 0, "ladder"),
+    ("passive", "Linear probe on the text state", _D + 1, "ladder"),
+    ("emb_ds", "Step token, embedding only", 2 * _D + 1, "ladder"),
+    ("off_ds", "\\quad + offsets at every layer", _D * (_L + 1) + _D + 1, "ladder"),
+    ("chain_ds", "\\quad + chained step tokens", _D * (_L + 1) + _D + 1, "ladder"),
+    ("instep_ds", "\\quad + step-start marker (InStep)", 2 * _D * (_L + 1) + _D + 1, "ladder"),
+    ("nooff_ds", "InStep without offsets", 3 * _D + 1, "variant"),
+    ("allmk", "InStep, every earlier marker visible", 2 * _D * (_L + 1) + _D + 1, "variant"),
+]
+# Every earlier marker visible to each step token (REPORT 21.44, job 680648, 3 seeds): overall PR-AUC
+# from $OUT/allmarkers/analysis/summary.md; ProcessBench mean first-error AUROC computed with
+# scripts/instep_v1/pb_metrics.py on $OUT/rt/allmk_ds_seed{0,1,2} (0.9345; InStep DS on the same
+# code: 0.9350, as in final.json; all-markers PR-AUC there 0.7364).
+ALL_MARKERS = {"overall": 0.640, "pb_auroc": 0.93453}
+
+
+def _params(n: int) -> str:
+    return "0" if n == 0 else (f"{n / 1e3:.1f}K" if n < 1e4 else f"{n / 1e3:.0f}K")
+
+
+def table_ablation(lrpick: dict) -> str:
+    """One column: each ingredient added in turn, then two variants of InStep; overall PR-AUC on
+    ReProbe's benchmark and ProcessBench mean first-error AUROC, both with DS labels."""
+    b = lrpick["backbones"]["qwen3_8b"]
+    vals = []
+    for key, name, n, grp in ABLATION_ROWS:
+        if key == "allmk":
+            v = {"ap": ALL_MARKERS["overall"], "pb": ALL_MARKERS["pb_auroc"]}
+        else:
+            v = {"ap": b["metrics"][key]["overall"]["ap"], "pb": b["pb"][key]["auroc_mean"]}
+        vals.append((name, n, grp, v))
+    marks = {c: _marks([v[3][c] for v in vals]) for c in ("ap", "pb")}
+    L = ["\\begin{tabular}{l r cc}", "\\toprule",
+         " & & ReProbe & ProcessBench \\\\",
+         "Variant & Params & PR-AUC & AUROC \\\\", "\\midrule"]
+    prev = None
+    for i, (name, n, grp, _) in enumerate(vals):
+        if prev is not None and grp != prev:
+            L.append("\\midrule")
+        prev = grp
+        pre = OURS_ROW if "(InStep)" in name else ""
+        L.append(f"{pre}{name} & {_params(n)} & {marks['ap'][i]} & {marks['pb'][i]} \\\\")
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
+# --------------------------------------------------------------------------------- per layer
+# Validation PR-AUC of a logistic probe (40k training steps, C picked on validation) on the state at
+# every 4th layer: the text token that ends the step (passive) and the step token (InStep, seed 0).
+# $OUT/analysis/per_layer_<backbone>.json (scripts/instep_v1/passive_fit.py --per_layer). Qwen3-8B:
+# InStep DS seed 0; Phi-4: InStep (Qwen3-8B labels) seed 0, the paper's runs. Qwen3-32B is left out:
+# its states were read with the 1-epoch token, not the paper's 4-epoch one.
+LAYER_PANELS = [("qwen3_8b", "Qwen3-8B", 36), ("phi4", "Phi-4", 40)]
+
+
+def layer_series(per_layer: dict) -> dict[str, list[tuple[int, float]]]:
+    """{kind: [(layer number 1..L, val PR-AUC)]} for kind passive and read; the final-norm row is left out."""
+    out: dict[str, list[tuple[int, float]]] = {"passive": [], "read": []}
+    for r in per_layer["layers"]:
+        if r["block"] != "final":
+            out[r["kind"]].append((int(r["block"]) + 1, float(r["val_ap"])))
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def figure_layers(per_layer: dict[str, dict]) -> str:
+    panels = []
+    for i, (bb, title, n) in enumerate(LAYER_PANELS):
+        s = layer_series(per_layer[bb])
+        co = lambda pts: " ".join(f"({x},{y:.3f})" for x, y in pts)  # noqa: E731
+        lab = ""
+        if i == 0:  # key on the first panel only, in the empty upper left corner
+            lab = ("\\node[font=\\scriptsize, text=instepdark, anchor=west, inner sep=1pt] "
+                   "at (rel axis cs:0.04,0.90) {step token};\n"
+                   "\\node[font=\\scriptsize, text=black!60, anchor=west, inner sep=1pt] "
+                   "at (rel axis cs:0.04,0.76) {text token};")
+        ylab = "ylabel={Validation PR-AUC}," if i == 0 else "yticklabels={},"
+        panels.append(f"""\\begin{{tikzpicture}}
+\\begin{{axis}}[width={0.58 if i == 0 else 0.5}\\linewidth, height=3.4cm,
+  tick label style={{font=\\footnotesize}}, label style={{font=\\small}}, title style={{font=\\small, yshift=-4pt}},
+  title={{{title}}}, ymajorgrids, grid style={{gray!20}}, xmin=0, xmax={n}, ymin=0.2, ymax=0.65,
+  ytick={{0.2,0.3,0.4,0.5,0.6}}, yticklabel style={{/pgf/number format/fixed, /pgf/number format/precision=1}},
+  {ylab} xlabel={{Layer}}]
+\\addplot[black!55, mark=none, line width=0.8pt] coordinates {{{co(s["passive"])}}};
+\\addplot[instepdark, mark=none, line width=1.2pt] coordinates {{{co(s["read"])}}};
+{lab}
+\\end{{axis}}
+\\end{{tikzpicture}}""")
+    return "% generated by scripts/instep_v1/paper_tex.py\n" + "\\hfill\n".join(panels) + "\n"
+
+
 # --------------------------------------------------------------------------------- cost figure
 def figure_cost(ours: dict) -> str:
     o = ours["qwen3_8b"]
@@ -631,6 +727,10 @@ def main() -> None:
     p.add_argument("--q17", type=Path, default=None,
                    help="reprobe_cmp analysis summary.json of Qwen3-1.7B (adds the policy-size figure)")
     p.add_argument("--tts", type=Path, default=None, help="tts_tables.json (scripts/instep_v1/tts_tables.py)")
+    p.add_argument("--lrpick", type=Path, default=None,
+                   help="final_lrpick/final.json (paper_v1.py with per-variant learning rates): ablation table")
+    p.add_argument("--per_layer", type=Path, default=None,
+                   help="directory with per_layer_<backbone>.json (passive_fit.py --per_layer): layer figure")
     p.add_argument("--out", type=Path, required=True, help="paper root; writes tables/body/ and figures/plots/ under it")
     a = p.parse_args()
     ours = json.loads(a.ours.read_text())
@@ -661,6 +761,15 @@ def main() -> None:
         t4b = tb / "processbench_sets.tex"  # appendix, per subset
         t4b.write_text(hdr + table_processbench_sets(finalj))
         print(t4, t4b, sep="\n")
+    if a.lrpick:
+        t5 = tb / "ablation.tex"
+        t5.write_text(hdr + table_ablation(json.loads(a.lrpick.read_text())))
+        print(t5)
+    if a.per_layer:
+        f4 = fp / "layers.tex"
+        f4.write_text(figure_layers({bb: json.loads((a.per_layer / f"per_layer_{bb}.json").read_text())
+                                     for bb, _, _ in LAYER_PANELS}))
+        print(f4)
     if a.tts:
         f2 = fp / "tts.tex"
         tts = json.loads(a.tts.read_text())

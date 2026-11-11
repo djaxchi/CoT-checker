@@ -146,7 +146,28 @@ def test_processbench_set_table_has_twelve_columns():
     assert row.count("&") == 12
 
 
+def test_ablation_table_counts_parameters_and_shades_instep():
+    keys = ["ptrue", "passive", "emb_ds", "off_ds", "chain_ds", "instep_ds", "nooff_ds"]
+    ap = dict(zip(keys, [0.50, 0.57, 0.60, 0.643, 0.644, 0.647, 0.585]))
+    b = {"metrics": {k: {"overall": {"ap": v}} for k, v in ap.items()},
+         "pb": {k: {"auroc_mean": v + 0.3} for k, v in ap.items()}}
+    tex = T.table_ablation({"backbones": {"qwen3_8b": b}})
+    instep = next(line for line in tex.splitlines() if "(InStep)" in line)
+    assert instep.startswith(T.OURS_ROW) and "& 307K & \\textbf{.647} &" in instep
+    assert "embedding only & 8.2K &" in tex and "without offsets & 12K &" in tex
+    allmk = next(line for line in tex.splitlines() if line.startswith("InStep, every earlier marker"))
+    assert allmk.endswith("& 307K & .640 & .935 \\\\")  # REPORT 21.44 values, not from the fixture
+
+
+def test_layer_series_drops_the_final_norm_row_and_numbers_layers_from_one():
+    pl = {"layers": [{"kind": "passive", "block": 3, "val_ap": 0.3}, {"kind": "read", "block": 3, "val_ap": 0.31},
+                     {"kind": "passive", "block": "final", "val_ap": 0.5}, {"kind": "read", "block": 35, "val_ap": 0.6}]}
+    s = T.layer_series(pl)
+    assert s == {"passive": [(4, 0.3)], "read": [(4, 0.31), (36, 0.6)]}
+
+
 def test_add_step_takes_the_seed_mean_per_set():
+
     o = {"phi4": {}}
     T.add_step(o, "phi4", {"test_seed_mean": {"math": 0.4, "gsm8k": 0.2}})
     assert o["phi4"]["step"] == {"math": 0.4, "gsm8k": 0.2, "overall": 0.30000000000000004}

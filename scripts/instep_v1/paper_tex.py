@@ -51,7 +51,10 @@ TEX = {
 }
 GROUP_TITLE = {"UQ": "Uncertainty scores (no training)", "PRM": "Process reward models (separate model)",
                "ReProbe": "ReProbe (probe on stored states)",
-               "step": "STEP (last-layer probe, same data)", "ours": "Ours"}
+               "step": "Probes trained on InStep's data (our runs)", "ours": "Ours"}
+# Our zero-shot verification prompt (P(No) renormalised over {Yes, No}); not LM-Polygraph's P(True),
+# which ReProbe's tables print under that name.
+PNO = "P(No), prompted$^{\\ast}$"
 # parameters each verifier adds next to the generator (see fig_reprobe.py PARAMS)
 PARAMS = {PN.SKYWORK: 1.5e9, PN.H4: 1.5e9, PN.SHEPHERD: 7.2e9, PN.RLHF_DS: 8.0e9, PN.RLHF_MI: 8.0e9,
           PN.UNIVERSAL: 7.6e9, PN.PRM800K: 7.6e9, PN.PRM7B: 7.6e9, PN.RP_HS_SELF: 8.14e6, PN.RP_HS_DS: 8.14e6}
@@ -104,20 +107,33 @@ def _with_means(d: dict) -> dict:
 
 
 # --------------------------------------------------------------------------------- Table 1
-def _rows_qwen3_8b(ours: dict) -> list[tuple[str, str, dict]]:
-    """(name, group, scores per set and mean) for every row of the Qwen3-8B table, in printed order."""
+def _arm_ap(finalj: dict, backbone: str, arm: str) -> dict:
+    """Per-set and mean PR-AUC of one of our scored arms (final_v1.json metrics)."""
+    m = finalj["backbones"][backbone]["metrics"][arm]
+    return {k: m[k]["ap"] for k in COLS}
+
+
+def _rows_qwen3_8b(ours: dict, finalj: dict | None = None) -> list[tuple[str, str, dict]]:
+    """(name, group, scores per set and mean) for every row of the Qwen3-8B table, in printed order.
+    With finalj, two rows scored in our harness join the printed ones: the prompted P(No) (last of
+    the uncertainty scores), and with STEP ReProbe's hidden-state head retrained on InStep's
+    training split (rp_ds, 3 seeds)."""
     o = ours["qwen3_8b"]
     rows = [(TEX[m], PN.GROUP[m], PN.per_set("qwen3_8b", m)) for m in PN.methods("qwen3_8b")]
+    if finalj is not None:
+        last_uq = max(i for i, r in enumerate(rows) if r[1] == "UQ")
+        rows.insert(last_uq + 1, (PNO, "UQ", _arm_ap(finalj, "qwen3_8b", "ptrue")))
+        rows.append((TEX[PN.RP_HS_DS] + ", retrained", "step", _arm_ap(finalj, "qwen3_8b", "rp_ds")))
     rows += [("STEP", "step", _with_means(o["step"])),
              ("\\textbf{InStep} (self)", "ours", _with_means(o["instep_self"])),
              ("\\textbf{InStep} (DS)", "ours", _with_means(o["instep_ds"]))]
     return rows
 
 
-def table_qwen3_8b_avg(ours: dict) -> str:
+def table_qwen3_8b_avg(ours: dict, finalj: dict | None = None) -> str:
     """One-column version of the Qwen3-8B table for the main text: only ReProbe's Average block
     (ID, OOD, overall), every row kept. The per-set table goes to the appendix."""
-    rows = _rows_qwen3_8b(ours)
+    rows = _rows_qwen3_8b(ours, finalj)
     cols = ["id", "ood", "overall"]
     cells = [_marks([r[2][c] for r in rows]) for c in cols]
     # under each average, the sets it covers (names as in the per-set table), so the compact table
@@ -140,8 +156,8 @@ def table_qwen3_8b_avg(ours: dict) -> str:
     return "\n".join(L) + "\n"
 
 
-def table_qwen3_8b(ours: dict) -> str:
-    rows = _rows_qwen3_8b(ours)
+def table_qwen3_8b(ours: dict, finalj: dict | None = None) -> str:
+    rows = _rows_qwen3_8b(ours, finalj)
     cells = [_marks([r[2][c] for r in rows]) for c in COLS]  # column-wise marks
     n = len(COLS) + 1
     # column groups as in ReProbe's Table 1, so the two tables read line by line
@@ -181,12 +197,16 @@ def table_backbones(ours: dict, finalj: dict | None = None) -> str:
                 key=lambda m: (grp_order[PN.GROUP[m]], order.index(m)))
     rows = [(TEX[m], PN.GROUP[m], {bb: printed(bb, m) if m in PN.methods(bb) else None for bb in bbs}, m)
             for m in ms]
-    rows += [("STEP", "step", {bb: mine(ours[bb].get("step"), bb) for bb in bbs}, None),
-             ("\\textbf{InStep}", "ours", {bb: mine(ours[bb][instep_key[bb]], bb) for bb in bbs}, None)]
-    marks = {bb: _marks([r[2][bb] for r in rows]) for bb in bbs}
     stored = None
     if finalj is not None:
         stored = finalj["backbones"]["qwen3_32b"]["metrics"].get("prm7b_stored", {}).get("overall", {}).get("ap")
+    if stored is not None:  # the value the released scores give replaces the printed one (dagger)
+        for r in rows:
+            if r[3] == PN.PRM7B:
+                r[2]["qwen3_32b"] = stored
+    rows += [("STEP", "step", {bb: mine(ours[bb].get("step"), bb) for bb in bbs}, None),
+             ("\\textbf{InStep}", "ours", {bb: mine(ours[bb][instep_key[bb]], bb) for bb in bbs}, None)]
+    marks = {bb: _marks([r[2][bb] for r in rows]) for bb in bbs}
     n = len(bbs) + 1
     L = ["\\begin{tabular}{l " + "c" * len(bbs) + "}", "\\toprule",
          "Method & " + " & ".join(head[bb] for bb in bbs) + " \\\\"]
@@ -207,7 +227,7 @@ def table_backbones(ours: dict, finalj: dict | None = None) -> str:
 # --------------------------------------------------------------------------------- ProcessBench
 # Qwen3-8B reads ProcessBench's solutions (final_v1.json, backbones.qwen3_8b.pb and .calib20).
 # (arm key, row name, group); ReProbe rows are the released probes, InStep rows the 3-seed means.
-PB_ROWS = [("maxprob", "MaxProb", "UQ"), ("ptrue", "P(True)", "UQ"),
+PB_ROWS = [("maxprob", "MaxProb", "UQ"), ("ptrue", PNO, "UQ"),
            ("prm800k", TEX[PN.PRM800K], "PRM"), ("prm7b", TEX[PN.PRM7B], "PRM"),
            ("rp_rel_self", TEX[PN.RP_HS_SELF], "ReProbe"), ("rp_rel_ds", TEX[PN.RP_HS_DS], "ReProbe"),
            ("instep_self", "\\textbf{InStep} (self)", "ours"), ("instep_ds", "\\textbf{InStep} (DS)", "ours"),
@@ -273,8 +293,7 @@ def table_processbench_sets(finalj: dict) -> str:
 # L = 36): head d + 1, one input embedding d, offsets L * d per trained token.
 _D, _L = 4096, 36
 ABLATION_ROWS = [  # (arm key in final.json, name, added parameters, group)
-    ("ptrue", "P(True), zero-shot", 0, "ladder"),
-    ("passive", "Linear probe on the text state", _D + 1, "ladder"),
+    ("ptrue", PNO, 0, "ladder"),
     ("emb_ds", "Step token, embedding only", 2 * _D + 1, "ladder"),
     ("off_ds", "\\quad + offsets at every layer", _D * (_L + 1) + _D + 1, "ladder"),
     ("chain_ds", "\\quad + chained step tokens", _D * (_L + 1) + _D + 1, "ladder"),
@@ -672,35 +691,59 @@ def size_points(ours: dict, prm_override: dict[str, float] | None = None) -> lis
 
 
 def figure_size(ours: dict, prm_override: dict[str, float] | None = None) -> str:
-    lines = []
+    """Grouped bars, one group per Qwen3 policy. Bars and not lines: the three benchmarks differ in
+    thinking mode and label source, so the points are not one sweep."""
     series = size_points(ours, prm_override)
-    # end labels, top to bottom, pushed apart to at least 0.025 PR-AUC so they never touch
-    order = sorted(range(len(series)), key=lambda i: -series[i][2][-1][1])
-    label_y, prev = {}, None
-    for i in order:
-        y = series[i][2][-1][1]
-        label_y[i] = y if prev is None else min(y, prev - 0.025)
-        prev = label_y[i]
-    for i, (label, color, pts) in enumerate(series):
-        width = "1.2pt" if color == "instepdark" else "0.8pt"
-        co = " ".join(f"({x:g},{y:.3f})" for x, y in pts)
-        x, y = pts[-1]
-        lines.append(f"\\addplot[{color}, mark=none, line width={width}] coordinates {{{co}}};\n"
-                     f"\\node[font=\\footnotesize, text={color}, anchor=west, inner sep=3pt] "
-                     f"at ({{rel axis cs:1,0}} |- {{axis cs:{x:g},{label_y[i]:.3f}}}) {{{label} (.{round(y * 1000):03d})}};")
-    ys = [y for _, _, pts in size_points(ours, prm_override) for _, y in pts]
-    lo, hi = np.floor(min(ys) * 20) / 20, np.ceil(max(ys) * 20) / 20
+    names = {1.7: "1.7B", 8.0: "8B", 32.0: "32B"}
+    plots = []
+    for label, color, pts in series:
+        co = " ".join(f"({names[x]},{y:.3f})" for x, y in pts)
+        fill = f"{color}!70" if color != "instepdark" else "instep"
+        plots.append(f"\\addplot[draw={color}, fill={fill}, line width=0.4pt] coordinates {{{co}}};\n"
+                     f"\\addlegendentry{{{label}}}")
+    ys = [y for _, _, pts in series for _, y in pts]
+    lo, hi = np.floor(min(ys) * 10) / 10, np.ceil((max(ys) + 0.03) * 20) / 20
     return f"""% generated by scripts/instep_v1/paper_tex.py
 \\begin{{tikzpicture}}
-\\begin{{axis}}[width=0.74\\linewidth, height=4.0cm, tick label style={{font=\\footnotesize}},
-  label style={{font=\\small}}, ymajorgrids, grid style={{gray!20}}, clip=false,
-  xmode=log, xmin=1.4, xmax=38, xtick={{1.7,8,32}}, xticklabels={{1.7B,8B,32B}}, xminorticks=false,
+\\begin{{axis}}[width=\\linewidth, height=4.0cm, tick label style={{font=\\footnotesize}},
+  label style={{font=\\small}}, ymajorgrids, grid style={{gray!20}}, ybar, bar width=9pt,
+  symbolic x coords={{1.7B,8B,32B}}, xtick=data, enlarge x limits=0.25, xtick style={{draw=none}},
   ymin={lo:g}, ymax={hi:g}, yticklabel style={{/pgf/number format/fixed, /pgf/number format/precision=2}},
-  xlabel={{Policy size (Qwen3)}}, ylabel={{Overall PR-AUC}}]
-{chr(10).join(lines)}
+  nodes near coords, nodes near coords style={{font=\\tiny, /pgf/number format/fixed,
+    /pgf/number format/precision=3, /pgf/number format/skip 0.=true}},
+  legend style={{font=\\scriptsize, draw=none, fill=none, at={{(0.5,1.02)}}, anchor=south,
+    legend columns=3, /tikz/every even column/.append style={{column sep=6pt}}}},
+  legend image code/.code={{\\draw[#1] (0cm,-0.08cm) rectangle (0.22cm,0.1cm);}},
+  xlabel={{Qwen3 policy}}, ylabel={{Overall PR-AUC}}]
+{chr(10).join(plots)}
 \\end{{axis}}
 \\end{{tikzpicture}}
 """
+
+
+# --------------------------------------------------------------------------------- other metrics
+# Qwen3-8B, mean of the eight sets, arms scored in our harness (final_v1.json metrics.<arm>.overall):
+# PR-AUC, AUROC, F1 at the threshold that maximises F1 on the validation split, and the oracle F1.
+METRIC_ROWS = [("maxprob", "MaxProb", "UQ"), ("ptrue", PNO, "UQ"),
+               ("prm800k", TEX[PN.PRM800K], "PRM"), ("prm7b", TEX[PN.PRM7B], "PRM"),
+               ("rp_rel_ds", TEX[PN.RP_HS_DS] + ", released", "ReProbe"),
+               ("rp_ds", TEX[PN.RP_HS_DS] + ", retrained", "ReProbe"),
+               ("instep_prm", "\\textbf{InStep} (PRM800K)", "ours"),
+               ("instep_self", "\\textbf{InStep} (self)", "ours"), ("instep_ds", "\\textbf{InStep} (DS)", "ours")]
+
+
+def table_metrics(finalj: dict) -> str:
+    m = finalj["backbones"]["qwen3_8b"]["metrics"]
+    cols = ["ap", "auroc", "val_f1", "oracle_f1"]
+    rows = [(name, grp, {c: m[key]["overall"][c] for c in cols}) for key, name, grp in METRIC_ROWS]
+    triv = m["instep_ds"]["overall"]["trivial_f1"]
+    L = ["\\begin{tabular}{l cc cc}", "\\toprule",
+         " & & & \\multicolumn{2}{c}{F1} \\\\", "\\cmidrule(lr){4-5}",
+         "Method & PR-AUC & AUROC & val.\\ thr. & oracle \\\\", "\\midrule",
+         f"Always incorrect & -- & .500 & \\multicolumn{{2}}{{c}}{{{fmt(triv)}}} \\\\"]
+    L += _grouped_rows(rows, cols, 5)
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
 
 
 def add_q17(ours: dict, summary: dict) -> None:
@@ -745,9 +788,9 @@ def main() -> None:
     fp.mkdir(parents=True, exist_ok=True)
     hdr = "% generated by scripts/instep_v1/paper_tex.py\n"
     t1 = tb / "reprobe_qwen3_8b.tex"
-    t1.write_text(hdr + table_qwen3_8b(ours))
+    t1.write_text(hdr + table_qwen3_8b(ours, finalj))
     t1a = tb / "reprobe_qwen3_8b_avg.tex"  # main text, one column; the per-set table is in the appendix
-    t1a.write_text(hdr + table_qwen3_8b_avg(ours))
+    t1a.write_text(hdr + table_qwen3_8b_avg(ours, finalj))
     t2 = tb / "reprobe_backbones.tex"
     t2.write_text(hdr + table_backbones(ours, finalj))
     stored = (finalj or {}).get("backbones", {}).get("qwen3_32b", {}).get("metrics", {}).get(
@@ -760,7 +803,9 @@ def main() -> None:
         t4.write_text(hdr + table_processbench(finalj))
         t4b = tb / "processbench_sets.tex"  # appendix, per subset
         t4b.write_text(hdr + table_processbench_sets(finalj))
-        print(t4, t4b, sep="\n")
+        t6 = tb / "reprobe_metrics.tex"  # appendix: AUROC and F1 next to PR-AUC
+        t6.write_text(hdr + table_metrics(finalj))
+        print(t4, t4b, t6, sep="\n")
     if a.lrpick:
         t5 = tb / "ablation.tex"
         t5.write_text(hdr + table_ablation(json.loads(a.lrpick.read_text())))

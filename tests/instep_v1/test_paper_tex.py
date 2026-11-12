@@ -189,7 +189,8 @@ def test_size_figure_uses_printed_baselines_and_our_instep_per_policy():
     assert [x for x, _ in pts["\\textbf{InStep}"]] == [1.7, 8.0, 32.0]
     assert [y for _, y in pts["\\textbf{InStep}"]] == [0.50, 0.95, 0.63]
     tex = T.figure_size(o)
-    assert "mark=none" in tex and "xticklabels={1.7B,8B,32B}" in tex
+    # grouped bars, not lines: the three benchmarks are not one controlled sweep
+    assert "ybar" in tex and "symbolic x coords={1.7B,8B,32B}" in tex and "mark=none" not in tex
     # the 32B PRM point can be replaced by the value recomputed from the released scores
     over = {label: p for label, _, p in T.size_points(o, {"qwen3_32b": 0.566})}
     assert [round(y, 3) for _, y in over["PRM-7B"]] == [0.421, 0.565, 0.566]

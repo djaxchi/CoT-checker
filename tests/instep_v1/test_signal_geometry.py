@@ -115,3 +115,19 @@ def test_signal_geometry_rejects_a_key_in_two_dirs(tmp_path):
     st, ex, data = _fixture(tmp_path)
     with pytest.raises(SystemExit):
         G.Data(st, [ex, ex], data, "ds")
+
+
+def test_signal_pca_removes_set_offsets_and_finds_the_class_axis():
+    from scripts.instep_v1.signal_pca import dprime, project
+    rng = np.random.default_rng(0)
+    n, d = 400, 30
+    sets = np.repeat(["a", "b"], n)
+    y = np.tile(np.r_[np.zeros(n // 2), np.ones(n // 2)], 2).astype(int)
+    X = rng.normal(size=(2 * n, d))
+    X[:, :10] += 1.5 * y[:, None]  # the class direction, spread over 10 dims
+    X[sets == "b", 1] += 20.0     # a task offset, larger than the class gap
+    from scripts.reprobe_cmp.analyze import auroc
+    for scale in ("dim", "none"):
+        Z, var = project(X, sets, y, 3, scale)
+        assert auroc(y, Z[:, 0]) > 0.95 and dprime(Z[:, 0], y) > 2
+        assert var[0] > var[1]

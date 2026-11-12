@@ -131,3 +131,18 @@ def test_signal_pca_removes_set_offsets_and_finds_the_class_axis():
         Z, var = project(X, sets, y, 3, scale)
         assert auroc(y, Z[:, 0]) > 0.95 and dprime(Z[:, 0], y) > 2
         assert var[0] > var[1]
+
+
+def test_signal_lda_plane_is_orthogonal_and_finds_the_class_direction():
+    from scripts.instep_v1.signal_lda import plane_from, scatter
+    from scripts.reprobe_cmp.analyze import auroc
+    rng = np.random.default_rng(1)
+    n, d = 2000, 20
+    y = (rng.random(n) < 0.4).astype(int)
+    X = rng.normal(size=(n, d)) * np.r_[10.0, np.ones(d - 1)]  # a high-variance nuisance dim
+    X[:, 1] += 2.0 * y
+    X[:, 2] += 0.7 * y + 0.5 * X[:, 0] / 10  # weaker class signal mixed with the nuisance
+    Sw, dm = scatter(X, y)
+    w1, w2 = plane_from(Sw, dm, 1e-3)
+    assert abs(w1 @ w2) < 1e-8
+    assert abs(w1[0]) < 0.3 and auroc(y, X @ w1) > 0.85

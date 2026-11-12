@@ -146,3 +146,21 @@ def test_signal_lda_plane_is_orthogonal_and_finds_the_class_direction():
     w1, w2 = plane_from(Sw, dm, 1e-3)
     assert abs(w1 @ w2) < 1e-8
     assert abs(w1[0]) < 0.3 and auroc(y, X @ w1) > 0.85
+
+
+def test_signal_anatomy_variance_budget_attributes_each_factor():
+    from scripts.instep_v1.signal_anatomy import FACTORS, variance_budget
+    rng = np.random.default_rng(2)
+    n, d = 3000, 10
+    task = rng.integers(0, 3, n)
+    y = rng.integers(0, 2, n)
+    X = rng.normal(size=(n, d))
+    X[:, 0] += 3 * task          # task-driven dim
+    X[:, 1] += 2 * y             # correctness-driven dim
+    t = np.eye(3)[task][:, 1:]
+    blocks = {"task": t, "position": rng.normal(size=(n, 1)), "length": rng.normal(size=(n, 1)),
+              "correctness": y[:, None].astype(float)}
+    b = variance_budget(X, blocks)
+    assert set(b) == set(FACTORS) | {"rest"} and abs(sum(b.values()) - 1) < 1e-9
+    assert b["task"] > 0.07 and b["correctness"] > 0.04
+    assert b["position"] < 0.01 and b["length"] < 0.01

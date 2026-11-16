@@ -22,9 +22,10 @@ def test_marks_best_and_second():
 
 def test_table1_has_every_paper_row_and_bolds_best_overall():
     tex = T.table_qwen3_8b(OURS)
-    assert tex.count("\\\\") == 2 + 22 + 3 + 5  # header rows, paper rows, our rows, group titles
+    assert tex.count("\\\\") == 2 + 22 + 3 + 5 + 1  # header rows, paper rows, our rows, group titles, delta row
     instep_self = next(line for line in tex.splitlines() if "InStep} (self)" in line)
-    assert instep_self.rstrip(" \\").endswith("\\textbf{.950}")
+    assert instep_self.rstrip(" \\").endswith("\\textbf{.950}")  # best overall
+    assert "\\Delta" in tex and "gaincol" in tex
     # ReProbe's column groups and shaded group rows, so the two tables compare line by line
     assert "{Planning (OOD)}" in tex and "{QA (OOD)}" in tex and tex.count(T.GROUP_ROW) == 5
 
@@ -98,7 +99,7 @@ def test_beam_points_average_accuracy_and_time_over_common_sets():
 def test_tts_figure_has_curve_and_eight_set_cost_panels():
     fig = T.figure_tts(TTS)
     assert fig.count("\\begin{tikzpicture}") == 2 and "fig:tts-beam" not in fig
-    assert "(10,70.00)" in fig and "Majority vote" in fig
+    assert fig.count("xmode=log") == 2 and "majority vote" in fig  # both panels against verifier time
     # (b): the table's Overall column at N = 10 candidates x per-candidate latency at 10 per call
     assert f"({10 * T.LATENCY['InStep'][1]:.1f},52.04)" in fig and "InStep} (52.0)" in fig
     assert f"({10 * T.LATENCY['PRM'][1]:.1f},52.00)" in fig and "one candidate, no verifier (45.0)" in fig
@@ -109,10 +110,10 @@ def test_tts_table_puts_best_of_n_and_beam_side_by_side():
     assert "\\multicolumn{3}{c}{Best-of-$N$} & \\multicolumn{3}{c}{Beam search}" in tex
     instep = next(line for line in tex.splitlines() if "InStep} (self)" in line)
     assert instep.rstrip(" \\").endswith("& \\textbf{52.0} & \\textbf{73.0} & \\underline{49.0} & \\textbf{59.0}")
-    prm = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
-    assert prm.endswith("& -- & -- & -- \\\\")  # not run in our beam search
-    rand = next(line for line in tex.splitlines() if line.startswith("Random step scores"))
-    assert rand.startswith("Random step scores & -- & -- & -- &")
+    # one no-verifier row: one candidate (best-of-N) next to random step scores (beam search)
+    base = next(line for line in tex.splitlines() if line.startswith(T.NO_VERIFIER))
+    assert base.startswith(T.NO_VERIFIER + " & 50.0 & 40.0 & 45.0 & ") and "70.0" in base and "58.0" in base
+    assert "Universal-PRM" not in tex and "A+L" not in tex  # rows not run in beam search stay in the appendix
 
 
 def test_tts_set_table_drops_rows_without_values():
@@ -194,3 +195,15 @@ def test_size_figure_uses_printed_baselines_and_our_instep_per_policy():
     # the 32B PRM point can be replaced by the value recomputed from the released scores
     over = {label: p for label, _, p in T.size_points(o, {"qwen3_32b": 0.566})}
     assert [round(y, 3) for _, y in over["PRM-7B"]] == [0.421, 0.565, 0.566]
+
+
+def test_pb_values_places_step_before_ours():
+    final = {"backbones": {"qwen3_8b": {
+        "pb": {k: {"auroc_mean": 0.9, "ap_mean": 0.6, "per_subset": {s: {"auroc": 0.9, "ap": 0.6} for s, _ in T.PB_SUBSETS}}
+               for k, _, _ in T.PB_ROWS},
+        "calib20": {k: {"calib20_mean": 0.5, "per_subset": {s: 0.5 for s, _ in T.PB_SUBSETS}} for k, _, _ in T.PB_ROWS}}}}
+    rows = T._pb_values(final, {"arms": {"step": {"auroc": 0.85, "ap": 0.466, "calib20": 0.376}}})
+    names = [r[0] for r in rows]
+    assert names.index("STEP") == next(i for i, r in enumerate(rows) if r[1] == "ours") - 1
+    assert rows[names.index("STEP")][2] == {"auroc": 0.85, "ap": 0.466, "f1": 0.376}
+    assert "STEP" not in [r[0] for r in T._pb_values(final)]

@@ -26,9 +26,9 @@ from pathlib import Path
 import numpy as np
 
 LINES = [  # family, colour, width, label
-    ("text", "black!55", "0.8pt", "text token"),
-    ("prm", "prmcol", "0.8pt", "PRM separator"),
-    ("instep", "instepdark", "1.2pt", "step token"),
+    ("text", "neutraldark", "1.0pt", "text token"),
+    ("prm", "prmcol", "1.0pt", "PRM separator"),
+    ("instep", "instepdark", "1.6pt", "step token"),
 ]
 PANELS = [  # final key, title, colour
     ("passive_final", "Text token", "black!80"),
@@ -36,6 +36,7 @@ PANELS = [  # final key, title, colour
     ("prm_final", "Qwen2.5-Math-PRM-7B", "prmcol"),
     ("sep", "InStep", "instepdark"),
 ]
+N_LAYERS = {"text": 36, "instep": 36, "prm": 28}  # Qwen3-8B (text, step token), Qwen2.5-Math-PRM-7B
 HEAD = ("width={w}, height={h}, tick label style={{font=\\footnotesize}}, label style={{font=\\small}}, "
         "title style={{font=\\small, yshift=-4pt}}")
 
@@ -49,19 +50,19 @@ def curve(keys: list[dict], fam: str, field: str) -> list[tuple[float, float]]:
         if k["family"] != fam or k["key"] in ("passive_final", "sep"):
             continue
         v = k[field]["all"] if isinstance(k[field], dict) else k[field]
-        pts.append((100 * k["depth"], v))
+        pts.append((round(N_LAYERS[fam] * k["depth"]), v))  # layer number, not relative depth
     return sorted(pts)
 
 
 def coords(pts) -> str:
-    return " ".join(f"({x:.1f},{y:.3f})" for x, y in pts)
+    return " ".join(f"({x:g},{y:.3f})" for x, y in pts)
 
 
 def depth_axis(keys: list[dict], field: str, ylabel: str, ymin: float, ymax: float, w: str, labels: bool,
                title: str = "") -> str:
     L = ["\\begin{tikzpicture}", "\\begin{axis}[" + HEAD.format(w=w, h="3.6cm") + f", title={{{title}}},",
-         f"  ymajorgrids, grid style={{gray!20}}, xmin=0, xmax=100, ymin={ymin}, ymax={ymax},",
-         "  xtick={0,25,50,75,100}, xlabel={Depth (\\% of layers)}, "
+         f"  xmin=0, xmax=37, ymin={ymin}, ymax={ymax},",
+         "  xtick={4,12,20,28,36}, xlabel={Layer}, "
          f"ylabel={{{ylabel}}}, yticklabel style={{/pgf/number format/fixed, /pgf/number format/precision=2}}]"]
     for fam, col, wd, lab in LINES:
         pts = curve(keys, fam, field)
@@ -70,10 +71,10 @@ def depth_axis(keys: list[dict], field: str, ylabel: str, ymin: float, ymax: flo
     rp = [k for k in keys if k["key"] == "reprobe_rep"]
     if rp:
         v = rp[0][field]["all"] if isinstance(rp[0][field], dict) else rp[0][field]
-        L.append(f"\\addplot[rpcol, only marks, mark=*, mark size=1.6pt] coordinates {{(100,{v:.3f})}};")
+        L.append(f"\\addplot[only marks, mark=*, mark size=2pt, mark options={{draw=black, fill=rpcol, line width=0.4pt}}] coordinates {{(36,{v:.3f})}};")
         if labels:
             L.append(f"\\node[font=\\scriptsize, text=rpcol, anchor=north east, inner sep=2pt] at "
-                     f"(axis cs:100,{v:.3f}) {{ReProbe}};")
+                     f"(axis cs:36,{v:.3f}) {{ReProbe}};")
     if labels:  # bottom right, below the curves
         for i, (fam, col, _, lab) in enumerate(reversed(LINES)):
             L.append(f"\\node[font=\\scriptsize, text={col}, anchor=east, inner sep=1pt] at "

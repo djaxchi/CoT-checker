@@ -75,6 +75,8 @@ T3_ROWS = [
 OURS = "Our search (B = 5, N = 5), same questions and sampling seeds"
 T2_ROWS = [
     (OURS, "Random scores (same search)", "random"),
+    (OURS, "Qwen2.5-Math-7B-PRM800k", "prm800k"),
+    (OURS, "Qwen2.5-Math-PRM-7B", "prm7b"),
     (OURS, "ReProbe, Hidden States, Self-anno", "rp_self"),
     (OURS, "ReProbe, Hidden States, DeepSeek-anno", "rp_ds"),
     (OURS, "InStep, Self-anno", "rt_self"),
@@ -349,7 +351,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bon", type=Path, required=True)
     p.add_argument("--beam", type=Path, required=True)
-    p.add_argument("--beam_judged", type=Path, default=None)
+    p.add_argument("--beam_judged", type=Path, action="append", default=None,
+                   help="beam_judged.json of tts_judge.py; repeat, later files override earlier ones")
     p.add_argument("--rt", action="append", help="NAME=DIR[,DIR] read-token arm (bon_<set>.shard0.npz)")
     p.add_argument("--rp", action="append", help="NAME=DIR[,DIR] {uid, p} arm (bon_<set>.jsonl)")
     p.add_argument("--n_boot", type=int, default=2000)
@@ -360,9 +363,13 @@ def main() -> None:
     t3 = bon_table(a.bon, arms, T3_SETS, a.n_boot,
                    [("InStep-DS", "ReProbe HS DeepSeek-anno"), ("InStep-self", "ReProbe HS self-anno"),
                     ("InStep-DS", "Qwen/Qwen2.5-Math-PRM-7B"), ("InStep-DS", "majority"), ("InStep-DS", "pass@1")])
-    judged = json.loads(a.beam_judged.read_text()) if a.beam_judged and a.beam_judged.exists() else {}
+    judged = {}  # later files win per question and arm (the PRM arms were re-run and re-judged)
+    for f in a.beam_judged or []:
+        for st, v in json.loads(f.read_text()).items():
+            judged.setdefault(st, {}).update(v)
     t2 = beam_table(a.beam, judged, T2_SETS, a.n_boot,
-                    [("instep_ds", "rp_ds"), ("rt_self", "rp_self"), ("instep_ds", "random"), ("rt_self", "random")])
+                    [("instep_ds", "rp_ds"), ("rt_self", "rp_self"), ("instep_ds", "random"), ("rt_self", "random"),
+                     ("instep_ds", "prm7b"), ("rt_self", "prm7b"), ("instep_ds", "prm800k")])
     curve = bon_curve(a.bon, arms, T3_SETS, (1, 2, 4, 6, 8, 10))
     (a.out / "tts_tables.json").write_text(json.dumps({"table3_bon": t3, "table2_beam": t2, "bon_curve": curve},
                                                       indent=1))

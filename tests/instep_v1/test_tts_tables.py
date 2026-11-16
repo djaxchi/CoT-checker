@@ -118,8 +118,9 @@ def test_beam_table_printed_rows_kept_apart(tmp_path):
     beam.mkdir()
     _w(beam / "x.jsonl", [{"set": "math", "qi": 0, "arm": a, "correct": True} for a in ("random", "rp_ds", "prm7b")])
     out = T.beam_table(beam, {}, T.T2_SETS, 50, [])
-    # in-harness rows never include a PRM arm (cited as printed instead), even when the files hold one
-    assert all(r["section"] == T.OURS for r in out["rows"]) and "prm7b" not in out["seconds"]
+    # the PRM arms sit in our search, apart from ReProbe's printed PRM rows
+    rows = {r["row"]: r for r in out["rows"]}
+    assert all(r["section"] == T.OURS for r in out["rows"]) and rows["Qwen2.5-Math-PRM-7B"]["math"] == 100
     pr = {r["row"]: r for r in out["printed"]}
     assert pr["Qwen2.5-Math-PRM-7B"]["math"] == 88.1 and pr["ReProbe, Hidden States, DeepSeek-anno"]["Overall"] == 76.6
     for r in out["printed"]:  # printed averages agree with the printed per-set cells (rounding)

@@ -11,7 +11,7 @@
 # hidden-state head (self labels) and the PRM, per trajectory and per step, with the Stage H4
 # benchmark (scripts/analysis/inline_speed.py --reprobe_release). One GPU, the node otherwise
 # idle. smoke (8 trajectories), then 200 trajectories of the T=1.0 MATH-500 pool at batch 1
-# and 10, then the same again (run-to-run spread).
+# and 10, then the same again (run-to-run spread). MODE=b10: batch 10 only, twice (--time=00:45:00).
 set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$HOME/CoT-checker}"
 V1=/project/aip-azouaq/$USER/cot_mech/reprobe_cmp_v1
@@ -44,7 +44,16 @@ run() {  # name n batches...
   grep -vE "Loading weights|UNEXPECTED|Notes:|can be ignored|LOAD REPORT|^Key|^-+\+|^ *$" \
     "$SP/logs/${name}-$SLURM_JOB_ID.log" | tail -45
 }
-run smoke 8 1 2
-run rt_self 200 1 10
-run rt_self_rep 200 1 10
+if [[ "${MODE:-full}" == b10 ]]; then
+  # batch 10 alone in a fresh process: in 658276 the compiled fused reader ran out of memory at
+  # batch 10 after the batch-1 CUDA graphs had been captured, so its row fell back to the
+  # slower graphed reader
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  run rt_self_b10 200 10
+  run rt_self_b10_rep 200 10
+else
+  run smoke 8 1 2
+  run rt_self 200 1 10
+  run rt_self_rep 200 1 10
+fi
 echo "[$(date)] done"

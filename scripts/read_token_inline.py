@@ -159,6 +159,79 @@ def marker_hooks(model, mk: StartMarker | None, lo: int, hi: int):
             hd.remove()
 
 
+def add_extras(rt, n_layers: int, d: int, n_kv: int, head_dim: int, scale: bool = False,
+               kv_prefix: int = 0) -> None:
+    """Other per-layer parameterisations of the read token (reviewer W1), at the read positions:
+    scale      a per-layer multiplicative scale of the block output, h * (1 + g_l), g_l
+               initialised to 0 (with --deep: h * (1 + g_l) + delta_l)
+    kv_prefix  P learned key and value vectors per layer and key/value head, appended to the
+               text cache; only the read tokens attend to them (keys in the cache's post-RoPE
+               space, no position). Keys start at 0, values small random (breaks the symmetry
+               of the P slots)."""
+    rt.scale = torch.nn.Parameter(torch.zeros(n_layers, 1, d)) if scale else None
+    if kv_prefix:
+        rt.pk = torch.nn.Parameter(torch.zeros(n_layers, n_kv, kv_prefix, head_dim))
+        rt.pv = torch.nn.Parameter(torch.randn(n_layers, n_kv, kv_prefix, head_dim) * 0.01)
+    else:
+        rt.pk = rt.pv = None
+
+
+def extra_params(rt) -> list[torch.nn.Parameter]:
+    return [p for p in (getattr(rt, "scale", None), getattr(rt, "pk", None), getattr(rt, "pv", None))
+            if p is not None]
+
+
+def extras_from_ckpt(rt, ck: dict, dev) -> None:
+    """Attach a checkpoint's scale and key/value prefix (None when it has none)."""
+    rt.scale = None if ck.get("scale") is None else torch.nn.Parameter(ck["scale"].to(dev))
+    rt.pk = None if ck.get("kv_prefix_k") is None else torch.nn.Parameter(ck["kv_prefix_k"].to(dev))
+    rt.pv = None if ck.get("kv_prefix_v") is None else torch.nn.Parameter(ck["kv_prefix_v"].to(dev))
+
+
+def prefix_len(rt) -> int:
+    return 0 if getattr(rt, "pk", None) is None else int(rt.pk.shape[2])
+
+
+@contextlib.contextmanager
+def scale_hooks(model, rt, n: int):
+    """Multiply decoder layer l's output by (1 + rt.scale[l]) at the last n positions."""
+    sc = getattr(rt, "scale", None)
+    if sc is None:
+        yield
+        return
+
+    def make(l):
+        def hook(_mod, _inp, out):
+            h = out[0] if isinstance(out, tuple) else out
+            h = torch.cat([h[:, :-n], h[:, -n:] * (1 + sc[l].to(h.dtype))[None]], 1)
+            return (h,) + tuple(out[1:]) if isinstance(out, tuple) else h
+        return hook
+
+    handles = [layer.register_forward_hook(make(l)) for l, layer in enumerate(model.model.layers)]
+    try:
+        yield
+    finally:
+        for hd in handles:
+            hd.remove()
+
+
+def append_prefix(rt, cache, mask: torch.Tensor, K: int) -> torch.Tensor:
+    """Append rt's key/value prefix to every layer of the text cache and return the read mask
+    with P prefix columns after the text ones, seen by the last K rows (the read tokens) only."""
+    P = prefix_len(rt)
+    if not P:
+        return mask
+    B, _, S, n = mask.shape
+    T = n - S
+    for l, layer in enumerate(cache.layers):
+        k, v = layer.keys, layer.values
+        layer.keys = torch.cat([k, rt.pk[l].to(k.dtype)[None].expand(B, -1, -1, -1)], 2)
+        layer.values = torch.cat([v, rt.pv[l].to(v.dtype)[None].expand(B, -1, -1, -1)], 2)
+    col = torch.zeros(B, 1, S, P, dtype=torch.bool, device=mask.device)
+    col[:, :, S - K:] = True
+    return torch.cat([mask[..., :T], col, mask[..., T:]], -1)
+
+
 def encode_text(tok, text: str) -> tuple[list[int], dict[int, int]]:
     """Token ids and {character end: number of tokens up to the last token ending there}."""
     enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
@@ -332,12 +405,13 @@ def read_pass(model, rt: ReadToken, cache, lay: dict, grad: bool, soft_attn: str
     emb = rt.soft.to(model.dtype)[None].expand(B, K, -1)
     if mk is not None:
         emb = torch.cat([mk.soft.to(model.dtype)[None].expand(B, K, -1), emb], 1)
-    with torch.set_grad_enabled(grad), read_hooks(model, rt, n=K), marker_hooks(model, mk, 0, K), \
-            soft_kernels(soft_attn):
+    with torch.set_grad_enabled(grad), scale_hooks(model, rt, K), read_hooks(model, rt, n=K), \
+            marker_hooks(model, mk, 0, K), soft_kernels(soft_attn):
+        mask = append_prefix(rt, cache, lay["mask"], K)
         # registered after the offset hooks, so they record the offset-shifted outputs
         handles = gather_hooks(model, sorted(capture), lay["rows"], lay["cols"], capture) if capture else []
         try:
-            h = model.model(inputs_embeds=emb, attention_mask=lay["mask"], position_ids=lay["pos"],
+            h = model.model(inputs_embeds=emb, attention_mask=mask, position_ids=lay["pos"],
                             past_key_values=cache, use_cache=True).last_hidden_state
         finally:
             for hd in handles:
@@ -389,8 +463,18 @@ def uncached_reference(model, rt: ReadToken, ids: list[int], pos: list[int], dev
         if chain:
             mask[r, T + M:r] = True
     position += list(pos)
-    with read_hooks(model, rt, n=K), marker_hooks(model, mk, T, T + M):
-        h = model.model(inputs_embeds=x, attention_mask=mask[None, None],
+    past, P = None, prefix_len(rt)
+    if P:
+        # the key/value prefix as the past of this forward, seen by the read tokens only
+        from transformers import DynamicCache
+        past = DynamicCache()
+        for l in range(len(model.model.layers)):
+            past.update(rt.pk[l].to(model.dtype)[None], rt.pv[l].to(model.dtype)[None], l)
+        pre = torch.zeros(n, P, dtype=torch.bool, device=dev)
+        pre[T + M:] = True
+        mask = torch.cat([pre, mask], 1)
+    with scale_hooks(model, rt, K), read_hooks(model, rt, n=K), marker_hooks(model, mk, T, T + M):
+        h = model.model(inputs_embeds=x, attention_mask=mask[None, None], past_key_values=past,
                         position_ids=torch.tensor([position], device=dev)).last_hidden_state
     return h[0, -K:].float()
 
@@ -545,6 +629,15 @@ def main() -> None:
     p.add_argument("--all_markers", action="store_true",
                    help="train (with --chain --start_marker): read k sees the markers of steps 0..k")
     p.add_argument("--soft_attn", choices=["no_cudnn"], default=None)
+    p.add_argument("--interv", choices=["lora"], default=None,
+                   help="train: LoRA on q_proj and v_proj of every layer, at the read positions only")
+    p.add_argument("--rank", type=int, default=1, help="train: --interv lora rank")
+    p.add_argument("--scale", action="store_true", help="train: a per-layer scale at the read positions")
+    p.add_argument("--kv_prefix", type=int, default=0,
+                   help="train: P learned key/value vectors per layer that only the read tokens attend to")
+    p.add_argument("--exclude_problems", type=Path, default=None,
+                   help="train: JSON list of problems; training items of these problems (normalized text) "
+                        "are dropped after the --n_train draw")
     p.add_argument("--train", type=Path)
     p.add_argument("--n_train", type=int, default=100000)
     p.add_argument("--epochs", type=int, default=1)
@@ -594,18 +687,35 @@ def main() -> None:
                 raise SystemExit(f"--start_init_text {a.start_init_text!r} is {len(sids)} tokens, not 1")
             sinit = emb[torch.tensor(sids, device=emb.device)].detach().float().cpu()
         configs = parse_sweep(a.sweep, a.lr, a.warmup)
+        at0 = model.model.layers[0].self_attn
+        lora_dims = (at0.q_proj.out_features, at0.v_proj.out_features) if a.interv else None
+        n_kv = model.config.num_key_value_heads
+        head_dim = getattr(model.config, "head_dim", None) or d // model.config.num_attention_heads
         # every config starts from the same parameters: the RNG state is restored before each,
         # so the first config is exactly the single run of the same seed
         rng0 = torch.get_rng_state()
         runs = []
         for lr_c, wu_c in configs:
             torch.set_rng_state(rng0)
-            rt_c = ReadToken(1, d, init.cpu(), head=a.head, n_layers=n_layers if a.deep else 0).to(dev)
+            rt_c = ReadToken(1, d, init.cpu(), head=a.head, n_layers=n_layers if a.deep else 0,
+                             interv=a.interv, rank=a.rank if a.interv else 0,
+                             n_interv_layers=n_layers if a.interv else 0, lora_dims=lora_dims)
+            add_extras(rt_c, n_layers, d, n_kv, head_dim, a.scale, a.kv_prefix)
+            rt_c = rt_c.to(dev)
             mk_c = StartMarker(d, sinit, n_layers if a.start_deep else 0).to(dev) if a.start_marker else None
             runs.append({"lr": lr_c, "warmup": wu_c, "tag": cfg_tag(lr_c, wu_c), "rt": rt_c, "mk": mk_c,
                          "trace": [], "run": 0.0, "dead": None})
         rt, mk = runs[0]["rt"], runs[0]["mk"]
         items = prm800k_items(a.train, a.n_train, a.seed)
+        n_excluded = 0
+        if a.exclude_problems is not None:
+            from src.data.prm_trajectories import normalize_problem
+            drop = {normalize_problem(q) for q in json.loads(a.exclude_problems.read_text())}
+            keep = [it for it in items if normalize_problem(it["problem"]) not in drop]
+            n_excluded = len(items) - len(keep)
+            print(f"[exclude] {n_excluded} of {len(items)} drawn items belong to the {len(drop)} excluded "
+                  f"problems and are dropped", flush=True)
+            items = keep
         if a.smoke:
             items = items[:a.smoke]
         per_step, rth_steps = rth_items_per_step(tok, items, a.max_tokens, a.max_seq_len)
@@ -619,8 +729,10 @@ def main() -> None:
         n_read = sum(len(s["pos"]) for s in seqs)
         bl = seq_batches([len(s["ids"]) for s in seqs], [len(s["members"]) for s in seqs],
                          a.max_tokens, cap, a.seed)
+        n_par = sum(q.numel() for q in rt.parameters()) + (sum(q.numel() for q in mk.parameters()) if mk else 0)
         print(f"[config] model={a.model} layout={a.layout} init={a.init_text!r} deep={a.deep} "
-              f"head={a.head} n_train={a.n_train} seed={a.seed} "
+              f"interv={a.interv} rank={a.rank if a.interv else 0} scale={a.scale} kv_prefix={a.kv_prefix} "
+              f"trainable params={n_par} head={a.head} n_train={a.n_train} seed={a.seed} "
               f"configs={','.join(r['tag'] for r in runs)} start_marker="
               f"{repr(a.start_init_text) if mk is not None else None} start_deep={a.start_deep} chain={chain} "
               f"all_markers={allm}", flush=True)
@@ -638,7 +750,7 @@ def main() -> None:
             k = 0
             for s in g:
                 refs = (uncached_reference(model, rt, s["ids"], s["pos"], dev, s["spos"], mk, chain, allm)
-                        if mk is not None or chain else None)
+                        if mk is not None or chain or extra_params(rt) else None)
                 for j, pk in enumerate(s["pos"]):
                     ref = (read_all_states(model, rt, [s["ids"][:pk]], pad, dev, grad=False,
                                            soft_attn=a.soft_attn)[0, -1] if refs is None else refs[j])
@@ -655,6 +767,8 @@ def main() -> None:
             if r["mk"] is not None:
                 r["opt"].add_param_group({"params": list(r["mk"].parameters()), "lr": r["lr"],
                                           "weight_decay": 0.0})
+            if extra_params(r["rt"]):
+                r["opt"].add_param_group({"params": extra_params(r["rt"]), "lr": r["lr"]})
             r["params"] = ([q for q in r["rt"].parameters() if q.requires_grad]
                            + (list(r["mk"].parameters()) if r["mk"] is not None else []))
             r["sched"] = torch.optim.lr_scheduler.OneCycleLR(r["opt"], max_lr=r["lr"], total_steps=steps,
@@ -722,7 +836,12 @@ def main() -> None:
                         "model": a.model, "init": "text", "init_text": a.init_text, "read": "last",
                         "head_kind": a.head, "freeze_soft": False, "seed": a.seed, "n_train": a.n_train,
                         "soft_attn": a.soft_attn, "deep": None if rt_c.deep is None else rt_c.deep.detach().cpu(),
-                        "interv": None, "rank": 0, "lora_dims": None, "interv_state": None, "lr": r["lr"],
+                        "interv": rt_c.interv, "rank": rt_c.rank, "lora_dims": rt_c.lora_dims,
+                        "interv_state": rt_c.interv_state(), "lr": r["lr"],
+                        "scale": None if rt_c.scale is None else rt_c.scale.detach().cpu(),
+                        "kv_prefix_k": None if rt_c.pk is None else rt_c.pk.detach().cpu(),
+                        "kv_prefix_v": None if rt_c.pv is None else rt_c.pv.detach().cpu(),
+                        "n_excluded": n_excluded, "exclude_problems": str(a.exclude_problems or ""),
                         "warmup": r["warmup"], "dead_at": r["dead"],
                         "layout": a.layout, "inline": True, "items_per_step": cap,
                         "start_soft": None if mk_c is None else mk_c.soft.detach().cpu(),
@@ -736,6 +855,7 @@ def main() -> None:
 
     ck = torch.load(a.ckpt or a.out / "read_token.pt", map_location="cpu", weights_only=False)
     rt = read_token_from_ckpt(ck, model, dev)
+    extras_from_ckpt(rt, ck, dev)
     mk = marker_from_ckpt(ck, dev)
     chain, allm = bool(ck.get("chain")), bool(ck.get("all_markers"))
     soft_attn = a.soft_attn or ck.get("soft_attn")

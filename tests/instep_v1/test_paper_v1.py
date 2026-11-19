@@ -298,3 +298,29 @@ def test_override_and_workers(tree, tmp_path):
     a = F["backbones"]["qwen3_8b"]["pairs"][0]["overall"]["ap"]
     b = G["backbones"]["qwen3_8b"]["pairs"][0]["overall"]["ap"]
     assert a == b
+
+
+def test_extra_pairs_for_an_added_arm(tree, tmp_path):
+    """An --override arm under a new key gets the pairs named by --extra_pairs / --extra_pb_pairs;
+    the existing arms' numbers do not change."""
+    base, ext = tmp_path / "base", tmp_path / "ext"
+    assert _run(tree, base, ["--no_figures", "--no_calib20"]) == 0
+    ov = "qwen3_8b:instep_prm_nopb=" + ",".join(str(tree["out"] / "rt" / f"instep_prm_seed{s}") for s in (0, 1))
+    assert _run(tree, ext, ["--no_figures", "--no_calib20", "--override", ov,
+                            "--extra_pairs", "instep_ds-instep_prm_nopb", "instep_prm_nopb-prm7b",
+                            "--extra_pb_pairs", "instep_prm_nopb-prm7b", "instep_prm_nopb-instep_prm"]) == 0
+    A = json.loads((base / "final.json").read_text())["backbones"]["qwen3_8b"]
+    B = json.loads((ext / "final.json").read_text())["backbones"]["qwen3_8b"]
+    assert "instep_prm_nopb" in B["metrics"] and "instep_prm_nopb" in B["pb"]
+    tp = {(p["a"], p["b"]): p for p in B["pairs"]}
+    assert ("instep_ds", "instep_prm_nopb") in tp and ("instep_prm_nopb", "prm7b") in tp
+    pp = {(p["a"], p["b"]): p for p in B["pb_pairs"]}
+    assert ("instep_prm_nopb", "prm7b") in pp and ("instep_prm_nopb", "instep_prm") in pp
+    # the same dirs as instep_prm seeds 0-1: its pair with instep_prm is exactly zero
+    assert pp[("instep_prm_nopb", "instep_prm")]["auroc_mean"]["delta"] == pytest.approx(0, abs=1e-12) or \
+        len(B["arms"]["instep_prm"]["dirs"]) != 2
+    for k in A["metrics"]:
+        assert A["metrics"][k] == B["metrics"][k], k
+    old = {(p["a"], p["b"]): p for p in A["pairs"]}
+    for k, v in old.items():
+        assert tp[k] == v, k

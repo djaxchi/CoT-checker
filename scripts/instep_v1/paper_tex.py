@@ -78,12 +78,13 @@ def _group(n: int, title: str, first: bool) -> list[str]:
 
 
 # Mean added ms per trajectory, Qwen3-8B on 200 MATH-500 trajectories, H100, given the generation
-# states; (1 trajectory per call, per candidate at 10 per call). All six from one job
-# (reprobe_cmp_v2/speed/rt_self-658276.json, sec_per_trace_mean): prm, reprobe_head_graph, and InStep
-# read_fused at 1 per call; at 10 per call read_fused hit OOM in that job, so InStep is read_graph
-# there (the slower of the two read paths, so conservative). Means throughout, never mixed with
-# medians: ReProbe's median at 1 per call is 1.25 ms against a 9.38 ms mean (heavy tail).
-LATENCY = {"PRM": (29.88, 43.68), "ReProbe": (9.38, 14.03), "InStep": (9.77, 6.61)}
+# states; (1 trajectory per call, per candidate at 10 per call). prm, reprobe_head_graph and InStep
+# read_fused (sec_per_trace_mean): 1 per call from reprobe_cmp_v2/speed/rt_self-658276.json, 10 per
+# call from rt_self_b10-700604.json (batch 10 alone in a fresh process, so the fused reader fits in
+# memory; in 658276 it ran out after the batch-1 graphs; the repeat rt_self_b10_rep-700604 agrees
+# within 0.13 ms). Means throughout, never mixed with medians: ReProbe's median at 1 per call is
+# 1.25 ms against a 9.38 ms mean (heavy tail).
+LATENCY = {"PRM": (29.88, 44.35), "ReProbe": (9.38, 14.04), "InStep": (9.77, 5.14)}
 
 
 def fmt(v: float) -> str:
@@ -266,16 +267,20 @@ PB_ROWS = [("maxprob", "MaxProb", "UQ"), ("ptrue", PNO, "UQ"),
 PB_SUBSETS = [("gsm8k", "GSM8K"), ("math", "MATH"), ("olympiadbench", "OlympiadBench"), ("omnimath", "Omni-MATH")]
 
 
-def _pb_values(finalj: dict, pb_step: dict | None = None) -> list[tuple[str, str, dict]]:
+def _pb_values(finalj: dict, pb_step: dict | None = None, pb_prm: dict | None = None) -> list[tuple[str, str, dict]]:
     """(name, group, {metric or (subset, metric): value}) per row; metrics auroc, ap, f1 (calib-20).
     pb_step: pb_report.json of scripts/instep_v1/pb_oracle.py; its "step" arm (STEP, mean of the four
     subsets, three seeds) is placed before our rows. It has no per-subset values."""
     b = finalj["backbones"]["qwen3_8b"]
     out = []
-    step_row = None
+    step_rows = []
+    row = lambda name, a: (name, "step", {"auroc": a["auroc"], "ap": a["ap"], "f1": a["calib20"]})  # noqa: E731
     if pb_step is not None:
-        a = pb_step["arms"]["step"]
-        step_row = ("STEP", "step", {"auroc": a["auroc"], "ap": a["ap"], "f1": a["calib20"]})
+        step_rows.append(row("STEP (DS)" if pb_prm is not None else "STEP", pb_step["arms"]["step"]))
+    if pb_prm is not None:  # review/item2_lightweight_baselines.json: same backbone, data and labels as InStep (PRM800K)
+        m = pb_prm["four_subset_mean"]
+        step_rows += [row("STEP (PRM800K)", m["step_prm"]),
+                      row(TEX[PN.RP_HS_DS].replace(" (DS)", "") + ", masked (PRM800K)", m["rpc_prm"])]
     for key, name, grp in PB_ROWS:
         pb, c20 = b["pb"][key], b["calib20"][key]
         v = {"auroc": pb["auroc_mean"], "ap": pb["ap_mean"], "f1": c20["calib20_mean"]}
@@ -283,9 +288,9 @@ def _pb_values(finalj: dict, pb_step: dict | None = None) -> list[tuple[str, str
             v[(s, "auroc")] = pb["per_subset"][s]["auroc"]
             v[(s, "ap")] = pb["per_subset"][s]["ap"]
             v[(s, "f1")] = c20["per_subset"][s]
-        if grp == "ours" and step_row is not None:
-            out.append(step_row)
-            step_row = None
+        if grp == "ours" and step_rows:
+            out += step_rows
+            step_rows = []
         out.append((name, grp, v))
     return out
 
@@ -302,9 +307,9 @@ def _grouped_rows(rows: list[tuple[str, str, dict]], cols: list, n: int) -> list
     return L
 
 
-def table_processbench(finalj: dict, pb_step: dict | None = None) -> str:
+def table_processbench(finalj: dict, pb_step: dict | None = None, pb_prm: dict | None = None) -> str:
     """Main text, one column: mean over the four subsets of first-error AUROC, PR-AUC and F1."""
-    rows = _pb_values(finalj, pb_step)
+    rows = _pb_values(finalj, pb_step, pb_prm)
     L = ["\\begin{tabular}{l ccc}", "\\toprule",
          " & \\multicolumn{2}{c}{No threshold} & Threshold \\\\",
          "\\cmidrule(lr){2-3} \\cmidrule(lr){4-4}",
@@ -352,7 +357,10 @@ def _params(n: int) -> str:
     return "0" if n == 0 else (f"{n / 1e3:.1f}K" if n < 1e4 else f"{n / 1e3:.0f}K")
 
 
-def table_ablation(lrpick: dict) -> str:
+KVP_ROW = "Key/value slots at every layer"
+
+
+def table_ablation(lrpick: dict, per_layer_alt: dict | None = None) -> str:
     """One column: each ingredient added in turn, then two variants of InStep; overall PR-AUC on
     ReProbe's benchmark and ProcessBench mean first-error AUROC, both with DS labels."""
     b = lrpick["backbones"]["qwen3_8b"]
@@ -363,6 +371,10 @@ def table_ablation(lrpick: dict) -> str:
         else:
             v = {"ap": b["metrics"][key]["overall"]["ap"], "pb": b["pb"][key]["auroc_mean"]}
         vals.append((name, n, grp, v))
+    if per_layer_alt is not None:  # review/item3_per_layer_param.json, arm kvp (3 seeds)
+        vals.append((KVP_ROW, per_layer_alt["params"]["kvp"], "variant",
+                     {"ap": per_layer_alt["test"]["overall"]["all"]["arms"]["kvp"]["ap"],
+                      "pb": per_layer_alt["pb"]["arms"]["kvp"]["auroc"]}))
     marks = {c: _marks([v[3][c] for v in vals]) for c in ("ap", "pb")}
     L = ["\\begin{tabular}{l r cc}", "\\toprule",
          " & & ReProbe & ProcessBench \\\\",
@@ -858,6 +870,9 @@ def main() -> None:
                    help="directory with per_layer_<backbone>.json (passive_fit.py --per_layer): layer figure")
     p.add_argument("--pb_step", type=Path, default=None,
                    help="pb_report.json (scripts/instep_v1/pb_oracle.py): adds the STEP row to the ProcessBench table")
+    p.add_argument("--review", type=Path, default=None,
+                   help="dir with item2_lightweight_baselines.json and item3_per_layer_param.json (reviewer runs): "
+                        "PRM800K-label probes on ProcessBench, key/value-slot rung in the ablation table")
     p.add_argument("--out", type=Path, required=True, help="paper root; writes tables/body/ and figures/plots/ under it")
     a = p.parse_args()
     ours = json.loads(a.ours.read_text())
@@ -885,7 +900,9 @@ def main() -> None:
         fa.write_text(figure_abstention(finalj))
         print(fa)
         t4 = tb / "processbench.tex"  # main text, one column
-        t4.write_text(hdr + table_processbench(finalj, json.loads(a.pb_step.read_text()) if a.pb_step else None))
+        rv = lambda f: json.loads((a.review / f).read_text()) if a.review and (a.review / f).exists() else None  # noqa: E731
+        t4.write_text(hdr + table_processbench(finalj, json.loads(a.pb_step.read_text()) if a.pb_step else None,
+                                               rv("item2_lightweight_baselines.json")))
         t4b = tb / "processbench_sets.tex"  # appendix, per subset
         t4b.write_text(hdr + table_processbench_sets(finalj))
         t6 = tb / "reprobe_metrics.tex"  # appendix: AUROC and F1 next to PR-AUC
@@ -893,7 +910,9 @@ def main() -> None:
         print(t4, t4b, t6, sep="\n")
     if a.lrpick:
         t5 = tb / "ablation.tex"
-        t5.write_text(hdr + table_ablation(json.loads(a.lrpick.read_text())))
+        alt = a.review / "item3_per_layer_param.json" if a.review else None
+        t5.write_text(hdr + table_ablation(json.loads(a.lrpick.read_text()),
+                                           json.loads(alt.read_text()) if alt and alt.exists() else None))
         print(t5)
     if a.per_layer:
         f4 = fp / "layers.tex"

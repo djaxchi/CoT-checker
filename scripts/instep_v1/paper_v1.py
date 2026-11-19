@@ -869,7 +869,7 @@ def analyse_backbone(bb: str, a, missing: list, log) -> dict | None:
     log(f"[{bb}] test bootstrap of {len(boots)} arms x {a.n_boot} in {time.time() - t0:.0f}s")
     B = {k: boots[(bb, k)] for k in metrics}
     pairs = []
-    for A_, B_ in pairs_for(bb):
+    for A_, B_ in pairs_for(bb) + [tuple(x.split("-", 1)) for x in a.extra_pairs]:
         if A_ in metrics and B_ in metrics:
             pairs.append(pair_result(A_, B_, metrics[A_], metrics[B_], B[A_], B[B_], groups))
         else:
@@ -907,7 +907,7 @@ def analyse_backbone(bb: str, a, missing: list, log) -> dict | None:
         res["pb_n_boot"] = a.pb_boot
         res["pb_ci"] = {k: {m: PBM.ci(v[m]) for m in v} for k, v in pbb.items()}
         res["pb_pairs"] = []
-        for A_, B_ in PB_PAIRS:
+        for A_, B_ in PB_PAIRS + [tuple(x.split("-", 1)) for x in a.extra_pb_pairs]:
             if A_ in pbb and B_ in pbb:
                 r = PBM.pair_from_arrays(res["pb"][A_], res["pb"][B_], pbb[A_], pbb[B_])
                 res["pb_pairs"].append({"a": A_, "b": B_, **r})
@@ -998,6 +998,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pb_all", action="store_true", help="ProcessBench on every backbone with data/pb (default: Qwen3-8B)")
     p.add_argument("--override", nargs="*", default=[],
                    help="bb:key=dir1,dir2 replaces (or adds) an arm's seed dirs, e.g. for a dry run")
+    p.add_argument("--extra_pairs", nargs="*", default=[],
+                   help="A-B: paired test-set bootstraps added to the backbone's list (arm keys, e.g. override arms)")
+    p.add_argument("--extra_pb_pairs", nargs="*", default=[], help="A-B: paired ProcessBench bootstraps added")
     a = p.parse_args(argv)
     a.final = a.final or a.out_root / "final"
     a.final.mkdir(parents=True, exist_ok=True)

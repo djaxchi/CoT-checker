@@ -103,9 +103,6 @@ def test_fig_signal_from_geometry(tmp_path):
     out.mkdir()
     keys = [G.analyze_key(D, k, (1e-2,), 4, "cpu", k in G.FINAL, 20, out) for k in ("passive_final", "sep", "prm_final")]
     sig = {"keys": keys}
-    dep = F.depth_fig(sig)
-    assert "prmcol" in dep and "(100.0," in dep  # PRM final state is the PRM curve's last point
-    assert "instepdark, mark=none" not in dep  # sep is excluded from the step-token curve (no blocks here)
     view = F.view_fig(sig, out, 10)
     assert view.count("\\begin{axis}") == 3 and "Text token" in view and "InStep" in view
     assert "| sep |" in F.summary_md(sig)
@@ -164,3 +161,30 @@ def test_signal_anatomy_variance_budget_attributes_each_factor():
     assert set(b) == set(FACTORS) | {"rest"} and abs(sum(b.values()) - 1) < 1e-9
     assert b["task"] > 0.07 and b["correctness"] > 0.04
     assert b["position"] < 0.01 and b["length"] < 0.01
+
+
+def _row(src, key, ap, kind="probe", seed=None):
+    return {"src": src, "key": key, "kind": kind, "seed": seed, "mean_ap": ap}
+
+
+def test_fig_signal_depth_four_verifiers_one_panel():
+    from scripts.instep_v1 import fig_signal as F
+    rows = [_row("s0", "read_block3", 0.40), _row("in1", "read_block3", 0.44), _row("in2", "read_block3", 0.42),
+            _row("s0", "read_block35", 0.65), _row("in1", "read_block35", 0.64), _row("in2", "read_block35", 0.66),
+            _row("s0", "sep", 0.652), _row("s0", "passive_block35", 0.577), _row("s0", "passive_final", 0.570),
+            _row("prm", "prm_block23", 0.627), _row("prm", "prm_final", 0.624), _row("rp", "reprobe_rep", 0.580),
+            _row("rpl0", "rp_block35", 0.55), _row("rpl1", "rp_block35", 0.57), _row("rpl2", "rp_block35", 0.56),
+            _row("rpl0", "p_block35", 0.50, "own"), _row("s0", "passive_block35", 0.59, "step_mlp", 0)]
+    cur = F.verifier_curves(rows)
+    assert cur["InStep"][-1][:4] == (36, pytest.approx(0.65), 0.64, 0.66)  # block 35 = layer 36, seed mean
+    assert cur["PRM"] == [(24, 0.627, 0.627, 0.627, 1), (28, 0.624, 0.624, 0.624, 1)]  # final state at 28
+    assert cur["STEP"] == [(36, 0.577, 0.577, 0.577, 1)]  # block output, not passive_final; not the MLP
+    assert cur["ReProbe"][0][0] == 36 and cur["ReProbe"][0][1] == pytest.approx(0.56)  # released rep not a curve
+    tex = F.depth_fig(rows)
+    assert tex.count("\\begin{axis}") == 1 and "(a)" not in tex
+    assert "mark=none" in tex and "mark=*" not in tex
+    for lab, col in (("InStep", "instepdark"), ("ReProbe", "rpcol"), ("STEP", "neutraldark"), ("PRM", "prmcol")):
+        assert f"\\addlegendentry{{{lab}}}" in tex and f"\\addplot[{col}, mark=none" in tex
+    assert tex.count("fill opacity") == 2  # bands only where there are seeds: InStep, ReProbe
+    md = F.layers_md(rows)
+    assert "| 36 | 0.650 [0.640, 0.660] | 0.560 [0.550, 0.570] | 0.577 |  | 0.590 | 0.500 |" in md

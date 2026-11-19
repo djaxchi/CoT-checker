@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""InStep paper, "where the signal lives": pgfplots bodies from signal_geometry.py outputs.
+"""InStep paper, "where the signal forms": pgfplots bodies for the InStep repo.
 
-  signal_depth.tex  (a) test PR-AUC of the same linear probe against relative depth, for
-                    Qwen3-8B's text state at the step's last token, InStep's step token and
-                    Qwen2.5-Math-PRM-7B's separator; ReProbe's pooled step representation as
-                    one point at the top. (b) test AUROC of the best single principal direction
-                    of the raw train states (top 20; no labels used to build the axis).
-  signal_view.tex   held-out 2D view of each method's final representation (x: the probe's
+  signal_depth.tex  (--layers, signal_layers.py JSONs) one panel: test PR-AUC (mean of the 8
+                    ReProbe test sets) of the shared linear probe against the layer, one curve per
+                    verifier, each on the representation that verifier reads: InStep's step token
+                    (3 tokens), ReProbe's pooled step representation (its head retrained on that
+                    layer, 3 seeds, reprobe_layers.py), STEP's text token at the step's last
+                    token, Qwen2.5-Math-PRM-7B's separator (28 layers; its last point is its final
+                    state). Seed mean as the line, seed range as a light band. Also writes
+                    layers_summary.md next to the first JSON (per-layer table, with STEP's own MLP
+                    and the retrained ReProbe heads' own scores as reader checks).
+  signal_view.tex   (--signal, signal_geometry.py output) held-out 2D view of each method's final representation (x: the probe's
                     logit, y: the first principal direction orthogonal to the probe), incorrect
                     steps in the method's colour over correct ones in grey; at most --per_class
                     steps per class and set, x and y standardized per panel.
 
-Colours follow the paper (main.tex): instepdark, rpcol, prmcol; the text state is black!55.
+Colours follow the paper (main.tex): instepdark, rpcol, prmcol, neutraldark (STEP).
 
-    python scripts/instep_v1/fig_signal.py --signal results/instep_v1/signal --out ~/Code/InStep/figures/plots
+    python scripts/instep_v1/fig_signal.py --layers results/instep_v1/signal/layers_*.json \\
+        --out ~/Code/InStep/figures/plots
 """
 
 from __future__ import annotations
@@ -21,73 +26,116 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 
-LINES = [  # family, colour, width, label
-    ("text", "neutraldark", "1.0pt", "text token"),
-    ("prm", "prmcol", "1.0pt", "PRM separator"),
-    ("instep", "instepdark", "1.6pt", "step token"),
-]
 PANELS = [  # final key, title, colour
     ("passive_final", "Text token", "black!80"),
     ("reprobe_rep", "ReProbe", "rpcol"),
     ("prm_final", "Qwen2.5-Math-PRM-7B", "prmcol"),
     ("sep", "InStep", "instepdark"),
 ]
-N_LAYERS = {"text": 36, "instep": 36, "prm": 28}  # Qwen3-8B (text, step token), Qwen2.5-Math-PRM-7B
+# signal_depth.tex: one curve per verifier, drawing order (InStep last, on top). Each curve is the
+# shared probe's test PR-AUC on that verifier's state at layer l (block l-1's output), averaged
+# over the sources listed (seeds); the PRM's last point is its final post-norm state (layer 28).
+VERIFIERS = [  # label, colour, line width, sources (seeds), key pattern (group 1 = block)
+    ("STEP", "neutraldark", "1.0pt", ("s0",), r"passive_block(\d+)"),
+    ("PRM", "prmcol", "1.0pt", ("prm",), r"prm_block(\d+)|prm_final"),
+    ("ReProbe", "rpcol", "1.0pt", ("rpl0", "rpl1", "rpl2"), r"rp_block(\d+)"),
+    ("InStep", "instepdark", "1.6pt", ("s0", "in1", "in2"), r"read_block(\d+)"),
+]
+PRM_LAYERS = 28  # Qwen2.5-Math-PRM-7B; Qwen3-8B has 36
 HEAD = ("width={w}, height={h}, tick label style={{font=\\footnotesize}}, label style={{font=\\small}}, "
         "title style={{font=\\small, yshift=-4pt}}")
 
 
-def curve(keys: list[dict], fam: str, field: str) -> list[tuple[float, float]]:
-    pts = []
-    for k in keys:
-        # the curves use block outputs; the post-norm final states of the text and the step
-        # token sit at depth 1 next to block 35 (the PRM's states stop at block 23, so its
-        # final state is its last point)
-        if k["family"] != fam or k["key"] in ("passive_final", "sep"):
-            continue
-        v = k[field]["all"] if isinstance(k[field], dict) else k[field]
-        pts.append((round(N_LAYERS[fam] * k["depth"]), v))  # layer number, not relative depth
-    return sorted(pts)
+def load_rows(paths: list[Path]) -> list[dict]:
+    """signal_layers.py rows from several JSONs; a later (src, key, kind, seed) replaces an earlier one."""
+    out = {}
+    for p in paths:
+        for r in json.loads(Path(p).read_text())["rows"]:
+            out[(r["src"], r["key"], r["kind"], r.get("seed"))] = r
+    return list(out.values())
+
+
+def layer_of(key: str, pattern: str) -> int | None:
+    m = re.fullmatch(pattern, key)
+    if not m:
+        return None
+    return int(m.group(1)) + 1 if m.group(1) is not None else PRM_LAYERS
+
+
+def verifier_curves(rows: list[dict], kind: str = "probe", field: str = "mean_ap") -> dict:
+    """{label: [(layer, mean, min, max, n seeds)]} over the verifier's sources."""
+    out = {}
+    for label, _, _, srcs, pat in VERIFIERS:
+        by = {}
+        for r in rows:
+            if r["kind"] != kind or r["src"] not in srcs:
+                continue
+            l = layer_of(r["key"], pat)
+            if l is not None:
+                by.setdefault(l, []).append(r[field])
+        out[label] = [(l, float(np.mean(v)), float(np.min(v)), float(np.max(v)), len(v)) for l, v in sorted(by.items())]
+    return out
 
 
 def coords(pts) -> str:
     return " ".join(f"({x:g},{y:.3f})" for x, y in pts)
 
 
-def depth_axis(keys: list[dict], field: str, ylabel: str, ymin: float, ymax: float, w: str, labels: bool,
-               title: str = "") -> str:
-    L = ["\\begin{tikzpicture}", "\\begin{axis}[" + HEAD.format(w=w, h="3.6cm") + f", title={{{title}}},",
-         f"  xmin=0, xmax=37, ymin={ymin}, ymax={ymax},",
-         "  xtick={4,12,20,28,36}, xlabel={Layer}, "
-         f"ylabel={{{ylabel}}}, yticklabel style={{/pgf/number format/fixed, /pgf/number format/precision=2}}]"]
-    for fam, col, wd, lab in LINES:
-        pts = curve(keys, fam, field)
-        if pts:
-            L.append(f"\\addplot[{col}, mark=none, line width={wd}] coordinates {{{coords(pts)}}};")
-    rp = [k for k in keys if k["key"] == "reprobe_rep"]
-    if rp:
-        v = rp[0][field]["all"] if isinstance(rp[0][field], dict) else rp[0][field]
-        L.append(f"\\addplot[only marks, mark=*, mark size=2pt, mark options={{draw=black, fill=rpcol, line width=0.4pt}}] coordinates {{(36,{v:.3f})}};")
-        if labels:
-            L.append(f"\\node[font=\\scriptsize, text=rpcol, anchor=north east, inner sep=2pt] at "
-                     f"(axis cs:36,{v:.3f}) {{ReProbe}};")
-    if labels:  # bottom right, below the curves
-        for i, (fam, col, _, lab) in enumerate(reversed(LINES)):
-            L.append(f"\\node[font=\\scriptsize, text={col}, anchor=east, inner sep=1pt] at "
-                     f"(rel axis cs:0.95,{0.12 + 0.11 * i:.2f}) {{{lab}}};")
+def depth_fig(rows: list[dict], ymin: float = 0.35, ymax: float = 0.7) -> str:
+    """One panel: test PR-AUC (8-set mean) per layer for the four verifiers, seed mean as a thin
+    line and, where there are seeds, their range as a light band; small legend bottom right."""
+    cur = verifier_curves(rows)
+    L = ["% generated by scripts/instep_v1/fig_signal.py",
+         "\\begin{tikzpicture}",
+         "\\begin{axis}[" + HEAD.format(w="\\linewidth", h="4.6cm") + ",",
+         f"  xmin=0, xmax=37, ymin={ymin}, ymax={ymax}, xtick={{4,8,12,16,20,24,28,32,36}}, xlabel={{Layer}},",
+         "  ylabel={Test PR-AUC}, yticklabel style={/pgf/number format/fixed, /pgf/number format/precision=2},",
+         "  legend pos=south east, legend cell align=left, legend style={font=\\scriptsize, draw=none, fill=none},",
+         "  legend image post style={xscale=0.6}]"]
+    for label, col, wd, _, _ in VERIFIERS:
+        pts = cur[label]
+        if not pts:
+            continue
+        if max(n for *_, n in pts) > 1:
+            band = [(l, hi) for l, _, _, hi, _ in pts] + [(l, lo) for l, _, lo, _, _ in reversed(pts)]
+            L.append(f"\\addplot[forget plot, draw=none, fill={col}, fill opacity=0.18] coordinates "
+                     f"{{{coords(band)}}} -- cycle;")
+        L.append(f"\\addplot[{col}, mark=none, line width={wd}] coordinates {{{coords([(l, m) for l, m, *_ in pts])}}};")
+        L.append(f"\\addlegendentry{{{label}}}")
     L += ["\\end{axis}", "\\end{tikzpicture}"]
-    return "\n".join(L)
+    return "\n".join(L) + "\n"
 
 
-def depth_fig(sig: dict) -> str:
-    keys = sig["keys"]
-    a = depth_axis(keys, "ap", "Test PR-AUC", 0.35, 0.7, "0.49\\linewidth", True, "(a)")
-    b = depth_axis(keys, "best_pc_auroc", "Best-PC AUROC", 0.45, 0.9, "0.49\\linewidth", False, "(b)")
-    return "% generated by scripts/instep_v1/fig_signal.py\n" + a + "\\hfill\n" + b + "\n"
+def layers_md(rows: list[dict]) -> str:
+    """Per-layer table of the four curves (seed mean [min, max]) plus the two reader checks: STEP's
+    own MLP on the text states and the retrained ReProbe heads' own scores."""
+    cols = [("InStep", "probe"), ("ReProbe", "probe"), ("STEP", "probe"), ("PRM", "probe"),
+            ("STEP", "step_mlp"), ("ReProbe", "own")]
+    cur = {(lab, kind): {l: (m, lo, hi, n) for l, m, lo, hi, n in verifier_curves(
+        [dict(r, kind="probe") for r in rows if r["kind"] == kind] if kind != "probe" else rows, "probe")[lab]}
+        for lab, kind in cols}
+    own = {}  # p_block<l> rows: the head's own score, keyed like rp_block
+    for r in rows:
+        if r["kind"] == "own" and r["src"] in ("rpl0", "rpl1", "rpl2"):
+            own.setdefault(int(re.search(r"\d+$", r["key"]).group()) + 1, []).append(r["mean_ap"])
+    cur[("ReProbe", "own")] = {l: (float(np.mean(v)), min(v), max(v), len(v)) for l, v in own.items()}
+    layers = sorted({l for c in cur.values() for l in c})
+
+    def cell(c, l):
+        if l not in c:
+            return ""
+        m, lo, hi, n = c[l]
+        return f"{m:.3f}" + (f" [{lo:.3f}, {hi:.3f}]" if n > 1 else "")
+    L = ["| layer | InStep (step token) | ReProbe (retrained head, pooled rep) | STEP (text token) | PRM (separator) "
+         "| check: STEP's MLP on text token | check: ReProbe head's own score |", "|---" * 7 + "|"]
+    for l in layers:
+        L.append(f"| {l} | " + " | ".join(cell(cur[c], l) for c in cols) + " |")
+    return "\n".join(L) + "\n"
 
 
 def load_points(path: Path, per_class: int, seed: int = 0) -> list[tuple]:
@@ -169,18 +217,24 @@ def summary_md(sig: dict) -> str:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--signal", type=Path, required=True, help="dir with signal_geometry.json and points_*.csv")
+    p.add_argument("--layers", type=Path, nargs="*", default=[], help="signal_layers.py JSONs (signal_depth.tex)")
+    p.add_argument("--signal", type=Path, default=None, help="dir with signal_geometry.json and points_*.csv")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--per_class", type=int, default=150)
     a = p.parse_args()
-    sig = json.loads((a.signal / "signal_geometry.json").read_text())
     a.out.mkdir(parents=True, exist_ok=True)
-    (a.out / "signal_depth.tex").write_text(depth_fig(sig))
-    (a.out / "signal_view.tex").write_text(view_fig(sig, a.signal, a.per_class))
-    (a.out / "signal_hist.tex").write_text(hist_fig(sig))
-    (a.signal / "summary.md").write_text(summary_md(sig))
-    print(summary_md(sig))
-
+    if a.layers:
+        rows = load_rows(a.layers)
+        (a.out / "signal_depth.tex").write_text(depth_fig(rows))
+        md = layers_md(rows)
+        (a.layers[0].parent / "layers_summary.md").write_text(md)
+        print(md)
+    if a.signal:
+        sig = json.loads((a.signal / "signal_geometry.json").read_text())
+        (a.out / "signal_view.tex").write_text(view_fig(sig, a.signal, a.per_class))
+        (a.out / "signal_hist.tex").write_text(hist_fig(sig))
+        (a.signal / "summary.md").write_text(summary_md(sig))
+        print(summary_md(sig))
 
 if __name__ == "__main__":
     main()

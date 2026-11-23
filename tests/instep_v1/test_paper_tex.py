@@ -102,7 +102,7 @@ def test_tts_figure_has_curve_and_eight_set_cost_panels():
     assert fig.count("xmode=log") == 2 and "majority vote" in fig  # both panels against verifier time
     # (b): the table's Overall column at N = 10 candidates x per-candidate latency at 10 per call
     assert f"({10 * T.LATENCY['InStep'][1]:.1f},52.04)" in fig and "InStep} (52.0)" in fig
-    assert f"({10 * T.LATENCY['PRM'][1]:.1f},52.00)" in fig and "one candidate, no verifier (45.0)" in fig
+    assert f"({10 * min(T.LATENCY['PRM']):.1f},52.00)" in fig and "one candidate, no verifier (45.0)" in fig
 
 
 def test_tts_table_puts_best_of_n_and_beam_side_by_side():

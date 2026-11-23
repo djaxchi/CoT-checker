@@ -465,7 +465,7 @@ def figure_cost(ours: dict) -> str:
   xticklabels={{100K,1M,10M,100M,1B,10B}},
   ytick={{0.3,0.4,0.5,0.6,0.7}},
   yticklabel style={{/pgf/number format/fixed, /pgf/number format/precision=1}},
-  xlabel={{Parameters added to the generator}}, ylabel={{Overall PR-AUC}},
+  xlabel={{Parameters added to the model}}, ylabel={{Overall PR-AUC}},
   tick label style={{font=\\footnotesize}}, label style={{font=\\small}},
   clip=false,
 ]
@@ -650,21 +650,23 @@ def figure_tts(tts: dict) -> str:
     cur = tts["bon_curve"]
     ns, n_max = cur["n"], cur["n"][-1]
     # (a) best-of-N accuracy against what the verifier costs: N candidates at its mean per-candidate
-    # latency (Figure 2b, 10 per call), one point per N >= 2. Against N alone the verifiers overlap;
+    # latency (the faster of 1 and 10 per call, Figure 2b), one point per N >= 2. Against N alone the verifiers overlap;
     # against time they separate. Majority vote and a single candidate need no verifier: reference lines.
     lines = []
     for key, lat, label, color, width in BON_LINES:
         if key in cur["curves"] and lat is not None:
-            co = " ".join(f"({n * LATENCY[lat][1]:.1f},{v:.2f})" for n, v in zip(ns, cur["curves"][key]) if n > 1)
+            co = " ".join(f"({n * min(LATENCY[lat]):.1f},{v:.2f})" for n, v in zip(ns, cur["curves"][key]) if n > 1)
             lines.append(f"\\addplot[{color}, line width={width}, mark=*, mark size=1.5pt, "
                          f"mark options={{draw=black, fill={color}, line width=0.3pt}}] coordinates {{{co}}};\n"
                          f"\\addlegendentry{{{label}}}")
-    one_a = next(iter(cur["curves"].values()))[0]  # N = 1: no selection, the same for every verifier
+    p1 = next((r for r in tts["table3_bon"]["rows"] if r["row"] == PASS1_ROW), None)
+    # one candidate = candidate 0, as in the per-set table's Pass@1 (the curves' N = 1 averages over all candidates)
+    one_a = float(np.mean([p1[s] for s in cur["sets"]])) if p1 else next(iter(cur["curves"].values()))[0]
     refs = [(one_a, "one candidate", "south east")]
     if "majority" in cur["curves"]:
         refs.append((cur["curves"]["majority"][-1], "majority vote", "north east"))
     if PRM7B in cur["curves"]:  # which end of a curve is which N, written once on the curve that stands alone
-        x, c = LATENCY["PRM"][1], cur["curves"][PRM7B]
+        x, c = min(LATENCY["PRM"]), cur["curves"][PRM7B]
         lines.append(f"\\node[font=\\scriptsize, anchor=north west, inner sep=2pt] at (axis cs:{ns[1] * x:.1f},{c[1]:.2f}) {{$N={ns[1]}$}};\n"
                      f"\\node[font=\\scriptsize, anchor=south, inner sep=3pt] at (axis cs:{n_max * x:.1f},{c[-1]:.2f}) {{$N={n_max}$}};")
     for y, name, where in refs:
@@ -681,7 +683,7 @@ def figure_tts(tts: dict) -> str:
         y = rows.get(BON_ROW.get(lat), {}).get("Overall")
         if lat is None or y is None:
             continue
-        x = n_max * LATENCY[lat][1]
+        x = n_max * min(LATENCY[lat])
         ys_b.append(y)
         where = {"InStep": "south", "ReProbe": "north", "PRM": "south"}[lat]  # the three sit at one height
         pts_b.append(f"\\addplot[only marks, mark=*, mark size=2.6pt, mark options={{draw=black, fill={color}, line width=0.4pt}}] coordinates {{({x:.1f},{y:.2f})}};\n"
@@ -779,7 +781,7 @@ def figure_size(ours: dict, prm_override: dict[str, float] | None = None) -> str
   legend style={{font=\\scriptsize, draw=none, fill=none, at={{(0.5,1.02)}}, anchor=south,
     legend columns=3, /tikz/every even column/.append style={{column sep=6pt}}}},
   legend image code/.code={{\\draw[#1] (0cm,-0.08cm) rectangle (0.22cm,0.1cm);}},
-  xlabel={{Qwen3 policy}}, ylabel={{Overall PR-AUC}}]
+  xlabel={{Qwen3 model}}, ylabel={{Overall PR-AUC}}]
 {chr(10).join(plots)}
 \\end{{axis}}
 \\end{{tikzpicture}}

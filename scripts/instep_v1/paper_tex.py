@@ -354,13 +354,16 @@ ALL_MARKERS = {"overall": 0.640, "pb_auroc": 0.93453}
 
 
 def _params(n: int) -> str:
+    if n >= 1e6:
+        return f"{n / 1e6:.1f}M"
     return "0" if n == 0 else (f"{n / 1e3:.1f}K" if n < 1e4 else f"{n / 1e3:.0f}K")
 
 
 KVP_ROW = "Key/value slots at every layer"
+LORA_ROW = "LoRA on Qwen3-8B (rank 16)"
 
 
-def table_ablation(lrpick: dict, per_layer_alt: dict | None = None) -> str:
+def table_ablation(lrpick: dict, per_layer_alt: dict | None = None, lora: dict | None = None) -> str:
     """One column: each ingredient added in turn, then two variants of InStep; overall PR-AUC on
     ReProbe's benchmark and ProcessBench mean first-error AUROC, both with DS labels."""
     b = lrpick["backbones"]["qwen3_8b"]
@@ -375,6 +378,9 @@ def table_ablation(lrpick: dict, per_layer_alt: dict | None = None) -> str:
         vals.append((KVP_ROW, per_layer_alt["params"]["kvp"], "variant",
                      {"ap": per_layer_alt["test"]["overall"]["all"]["arms"]["kvp"]["ap"],
                       "pb": per_layer_alt["pb"]["arms"]["kvp"]["auroc"]}))
+    if lora is not None:  # review2/itemC1_lora.json, arm lora_r16 (3 seeds): the model's weights are trained
+        r = lora["arms"]["lora_r16"]
+        vals.append((LORA_ROW, r["params"], "reference", {"ap": r["test"]["ap"], "pb": r["pb"]["auroc"]}))
     marks = {c: _marks([v[3][c] for v in vals]) for c in ("ap", "pb")}
     L = ["\\begin{tabular}{l r cc}", "\\toprule",
          " & & ReProbe & ProcessBench \\\\",
@@ -386,6 +392,33 @@ def table_ablation(lrpick: dict, per_layer_alt: dict | None = None) -> str:
         prev = grp
         pre = OURS_ROW if "(InStep)" in name else ""
         L.append(f"{pre}{name} & {_params(n)} & {marks['ap'][i]} & {marks['pb'][i]} \\\\")
+    L += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(L) + "\n"
+
+
+# ------------------------------------------------------------------------- first-error split
+FE_ROWS = [("instep_ds", "\\textbf{InStep} (DS)", True), ("prm7b", "Qwen2.5-Math-PRM-7B", False),
+           ("prm800k", "Qwen2.5-Math-7B-PRM800K", False), ("rp_ds", "ReProbe$_{\\text{HS}}$ (DS), retrained", False)]
+FE_CARRIED = ("prm7b_max", "Qwen2.5-Math-PRM-7B, score carried forward", False)
+
+
+def table_first_error(fe: dict) -> str:
+    """Appendix: PR-AUC per test set on the steps up to and including the first error and on the steps
+    after it (review2/itemB_first_error_prop.json; first error = first step DeepSeek-R1 labels incorrect)."""
+    n = len(SETS) + 2
+    L = ["\\begin{tabular}{l " + "c" * len(SETS) + " c}", "\\toprule",
+         "Method & " + " & ".join(SET_LABEL[s] for s in SETS) + " & \\textbf{All} \\\\"]
+    for first, (part, title, rows) in enumerate([("upto", "Up to and including the first error", FE_ROWS),
+                                                 ("after", "After the first error", FE_ROWS + [FE_CARRIED])]):
+        L += _group(n, title, first == 0)
+        cols = [_marks([fe["sets"][s][part]["arms"][k]["ap"] for k, _, _ in rows]) for s in SETS]
+        cols.append(_marks([fe["overall"][part]["arms"][k]["ap"] for k, _, _ in rows]))
+        for i, (_, name, ours) in enumerate(rows):
+            L.append((OURS_ROW if ours else "") + name + " & " + " & ".join(c[i] for c in cols) + " \\\\")
+        if part == "after":
+            sh = [f"{100 * fe['sets'][s]['after_share_of_incorrect']:.0f}" for s in SETS]
+            L += ["\\addlinespace[3pt]", "\\% of incorrect steps after the first error & " + " & ".join(sh)
+                  + f" & {100 * fe['overall']['after_share_of_incorrect']['pooled']:.0f} \\\\"]
     L += ["\\bottomrule", "\\end{tabular}"]
     return "\n".join(L) + "\n"
 
@@ -435,7 +468,7 @@ def figure_layers(per_layer: dict[str, dict]) -> str:
 
 
 # --------------------------------------------------------------------------------- cost figure
-def figure_cost(ours: dict) -> str:
+def figure_cost(ours: dict, lora: dict | None = None) -> str:
     o = ours["qwen3_8b"]
     prm = [(PARAMS[m], PN.per_set("qwen3_8b", m)["overall"]) for m in PN.methods("qwen3_8b")
            if PN.GROUP[m] == "PRM"]
@@ -452,6 +485,12 @@ def figure_cost(ours: dict) -> str:
     labels = "\n".join([lab(ins, "\\textbf{InStep}", "west", ", text=instepdark"),
                         lab(lin, "STEP", "north"), lab(best_rp, "ReProbe", "west"),
                         lab(best_prm, "best PRM", "north east")])
+    lora_plot = ""
+    if lora is not None:  # review2/itemC1_lora.json: rank-16 LoRA step classifier on the same model and labels
+        lp = (lora["arms"]["lora_r16"]["params"], lora["arms"]["lora_r16"]["test"]["ap"])
+        labels += "\n" + lab(lp, "LoRA", "south west")
+        lora_plot = ("\\addplot[only marks, mark=pentagon*, mark size=3.0pt, mark options={draw=black, fill=white, "
+                     f"line width=0.5pt}}] coordinates {{{co([lp])}}};\n")
     # One point per verifier: InStep, the STEP probe on the same states, the best ReProbe probe,
     # and every PRM (light, one label). Direct labels, no legend, no frontier lines.
     return f"""% generated by scripts/instep_v1/paper_tex.py
@@ -473,7 +512,7 @@ def figure_cost(ours: dict) -> str:
 \\addplot[only marks, mark=diamond*, mark size=3.4pt, mark options={{draw=black, fill=rpcol, line width=0.4pt}}] coordinates {{{co([best_rp])}}};
 \\addplot[only marks, mark=square*, mark size=2.4pt, mark options={{draw=black, fill=neutraldark, line width=0.4pt}}] coordinates {{{co([lin])}}};
 \\addplot[only marks, mark=*, mark size=3.4pt, mark options={{draw=black, fill=instepdark, line width=0.4pt}}] coordinates {{{co([ins])}}};
-{labels}
+{lora_plot}{labels}
 \\node[font=\\footnotesize, neutraldark, anchor=east] at (axis cs:1.3e9,0.40) {{PRMs}};
 \\end{{axis}}
 \\end{{tikzpicture}}
@@ -875,6 +914,9 @@ def main() -> None:
     p.add_argument("--review", type=Path, default=None,
                    help="dir with item2_lightweight_baselines.json and item3_per_layer_param.json (reviewer runs): "
                         "PRM800K-label probes on ProcessBench, key/value-slot rung in the ablation table")
+    p.add_argument("--review2", type=Path, default=None,
+                   help="dir with itemC1_lora.json and itemB_first_error_prop.json (second reviewer runs): LoRA "
+                        "row and point, first-error table")
     p.add_argument("--out", type=Path, required=True, help="paper root; writes tables/body/ and figures/plots/ under it")
     a = p.parse_args()
     ours = json.loads(a.ours.read_text())
@@ -895,7 +937,12 @@ def main() -> None:
     stored = (finalj or {}).get("backbones", {}).get("qwen3_32b", {}).get("metrics", {}).get(
         "prm7b_stored", {}).get("overall", {}).get("ap")
     f1 = fp / "reprobe_cost.tex"
-    f1.write_text(figure_cost(ours))
+    rv2 = lambda f: json.loads((a.review2 / f).read_text()) if a.review2 and (a.review2 / f).exists() else None  # noqa: E731
+    f1.write_text(figure_cost(ours, rv2("itemC1_lora.json")))
+    if rv2("itemB_first_error_prop.json") is not None:
+        tfe = tb / "first_error.tex"
+        tfe.write_text(hdr + table_first_error(rv2("itemB_first_error_prop.json")))
+        print(tfe)
     print(t1, t2, f1, sep="\n")
     if finalj is not None:
         fa = fp / "abstention.tex"
@@ -914,7 +961,8 @@ def main() -> None:
         t5 = tb / "ablation.tex"
         alt = a.review / "item3_per_layer_param.json" if a.review else None
         t5.write_text(hdr + table_ablation(json.loads(a.lrpick.read_text()),
-                                           json.loads(alt.read_text()) if alt and alt.exists() else None))
+                                           json.loads(alt.read_text()) if alt and alt.exists() else None,
+                                           rv2("itemC1_lora.json")))
         print(t5)
     if a.per_layer:
         f4 = fp / "layers.tex"

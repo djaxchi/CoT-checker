@@ -686,93 +686,39 @@ def _axis_pad(vals: list[float], pad: float = 1.0) -> tuple[float, float]:
 
 
 def figure_tts(tts: dict) -> str:
-    cur = tts["bon_curve"]
-    ns, n_max = cur["n"], cur["n"][-1]
-    # (a) best-of-N accuracy against what the verifier costs: N candidates at its mean per-candidate
-    # latency (the faster of 1 and 10 per call, Figure 2b), one point per N >= 2. Against N alone the verifiers overlap;
-    # against time they separate. Majority vote and a single candidate need no verifier: reference lines.
-    lines = []
-    for key, lat, label, color, width in BON_LINES:
-        if key in cur["curves"] and lat is not None:
-            co = " ".join(f"({n * min(LATENCY[lat]):.1f},{v:.2f})" for n, v in zip(ns, cur["curves"][key]) if n > 1)
-            lines.append(f"\\addplot[{color}, line width={width}, mark=*, mark size=1.5pt, "
-                         f"mark options={{draw=black, fill={color}, line width=0.3pt}}] coordinates {{{co}}};\n"
-                         f"\\addlegendentry{{{label}}}")
-    p1 = next((r for r in tts["table3_bon"]["rows"] if r["row"] == PASS1_ROW), None)
-    # one candidate = candidate 0, as in the per-set table's Pass@1 (the curves' N = 1 averages over all candidates)
-    one_a = float(np.mean([p1[s] for s in cur["sets"]])) if p1 else next(iter(cur["curves"].values()))[0]
-    refs = [(one_a, "one candidate", "south east")]
-    if "majority" in cur["curves"]:
-        refs.append((cur["curves"]["majority"][-1], "majority vote", "north east"))
-    if PRM7B in cur["curves"]:  # which end of a curve is which N, written once on the curve that stands alone
-        x, c = min(LATENCY["PRM"]), cur["curves"][PRM7B]
-        lines.append(f"\\node[font=\\scriptsize, anchor=north west, inner sep=2pt] at (axis cs:{ns[1] * x:.1f},{c[1]:.2f}) {{$N={ns[1]}$}};\n"
-                     f"\\node[font=\\scriptsize, anchor=south, inner sep=3pt] at (axis cs:{n_max * x:.1f},{c[-1]:.2f}) {{$N={n_max}$}};")
-    for y, name, where in refs:
-        lines.append(f"\\addplot[neutraldark, densely dashed, line width=0.9pt, domain=10:1000, samples=2, forget plot] {{{y:.2f}}};\n"
-                     f"\\node[font=\\scriptsize, neutraldark, anchor={where}, inner sep=2pt] at (axis cs:960,{y:.2f}) "
-                     f"{{{name} ({y:.1f})}};")
-    ys = [v for key, *_ in BON_LINES if key in cur["curves"] for v in cur["curves"][key]]
-    lo, hi = _axis_pad(ys)
-    # (b) best-of-N over all eight sets (the table's Overall column) against the verifier's time per
-    # question: N candidates at the mean per-candidate latency of Figure 2b (10 per call)
+    """One panel: best-of-N accuracy at N = 10 over all eight sets (the table's Overall column) against
+    the verifier's time per question (N candidates at its faster per-candidate latency); dashed line
+    for one candidate. Majority vote is not drawn: it is undefined on the sets a judge grades."""
+    n_max = tts["bon_curve"]["n"][-1]
     rows = {r["row"]: r for r in tts["table3_bon"]["rows"]}
-    pts_b, ys_b = [], []
+    pts, ys = [], []
     for _, lat, label, color, _ in BON_LINES:
         y = rows.get(BON_ROW.get(lat), {}).get("Overall")
         if lat is None or y is None:
             continue
         x = n_max * min(LATENCY[lat])
-        ys_b.append(y)
+        ys.append(y)
         where = {"InStep": "south", "ReProbe": "north", "PRM": "south"}[lat]  # the three sit at one height
-        pts_b.append(f"\\addplot[only marks, mark=*, mark size=2.6pt, mark options={{draw=black, fill={color}, line width=0.4pt}}] coordinates {{({x:.1f},{y:.2f})}};\n"
-                     f"\\node[font=\\footnotesize, text={color}, anchor={where}, inner sep=3pt] at (axis cs:{x:.1f},{y:.2f}) "
-                     f"{{{label} ({y:.1f})}};")
-    one = rows.get(PASS1_ROW, {}).get("Overall")
-    if one is not None:
-        ys_b.append(one)
-        pts_b.append(f"\\addplot[neutraldark, densely dashed, line width=0.9pt, domain=10:1000, samples=2] {{{one:.2f}}};\n"
-                     f"\\node[font=\\scriptsize, neutraldark, anchor=south east, inner sep=2pt] at (axis cs:950,{one:.2f}) "
-                     f"{{one candidate, no verifier ({one:.1f})}};")
-    lo_b, hi_b = float(np.floor(min(ys_b)) - 1), float(np.ceil(max(ys_b)) + 2)  # room for the labels above the points
-    common = ("width=0.92\\linewidth, height=3.3cm, tick label style={font=\\footnotesize}, "
-              "label style={font=\\small}")
+        pts.append(f"\\addplot[only marks, mark=*, mark size=2.6pt, mark options={{draw=black, fill={color}, line width=0.4pt}}] coordinates {{({x:.1f},{y:.2f})}};\n"
+                   f"\\node[font=\\footnotesize, text={color}, anchor={where}, inner sep=3pt] at (axis cs:{x:.1f},{y:.2f}) "
+                   f"{{{label} ({y:.1f})}};")
+    one = rows[PASS1_ROW]["Overall"]
+    ys.append(one)
+    pts.append(f"\\addplot[neutraldark, densely dashed, line width=0.9pt, domain=10:1000, samples=2] {{{one:.2f}}};\n"
+               f"\\node[font=\\scriptsize, neutraldark, anchor=south east, inner sep=2pt] at (axis cs:950,{one:.2f}) "
+               f"{{one candidate, no verifier ({one:.1f})}};")
+    lo, hi = float(np.floor(min(ys)) - 1), float(np.ceil(max(ys)) + 2)  # room for the labels above the points
     return f"""% generated by scripts/instep_v1/paper_tex.py
-% (a) the sets graded programmatically for every candidate; (b) all eight sets
-\\begin{{subfigure}}[b]{{\\linewidth}}
-\\centering
+% best-of-N at N = {n_max}, all eight sets
 \\begin{{tikzpicture}}
-\\begin{{axis}}[{common}, height=4.3cm,
-  xmode=log, xmin=10, xmax=1000, ymin={lo + 1:g}, ymax={hi - 0.5:g},
-  xtick={{30,100,300,1000}}, xticklabels={{30,100,300,1000}},
-  xlabel={{Verifier time per question (ms)}}, ylabel={{Accuracy (\\%)}},
-  legend style={{font=\\scriptsize, at={{(0.5,1.03)}}, anchor=south, draw=none, fill=none,
-                cells={{anchor=west}}, /tikz/every even column/.append style={{column sep=6pt}}}},
-  legend columns=3,  % above the axis, clear of the curves
-  legend image code/.code={{\\draw[#1] (0cm,0cm) -- (0.35cm,0cm);}},  % short lines keep the legend clear of the curves
-]
-{chr(10).join(lines)}
-\\end{{axis}}
-\\end{{tikzpicture}}
-\\caption{{Best-of-$N$ against verifier time, $N = {ns[1]}$ to ${n_max}$ ({", ".join(SET_LABEL[s] for s in cur["sets"])}).}}
-\\label{{fig:tts-bon}}
-\\end{{subfigure}}
-
-\\vspace{{1mm}}
-\\begin{{subfigure}}[b]{{\\linewidth}}
-\\centering
-\\begin{{tikzpicture}}
-\\begin{{axis}}[{common},
-  xmode=log, xmin=10, xmax=1000, ymin={lo_b:g}, ymax={hi_b:g}, clip=false,
+\\begin{{axis}}[width=0.92\\linewidth, height=3.6cm, tick label style={{font=\\footnotesize}}, label style={{font=\\small}},
+  xmode=log, xmin=10, xmax=1000, ymin={lo:g}, ymax={hi:g}, clip=false,
   xtick={{30,100,300,1000}}, xticklabels={{30,100,300,1000}},
   xlabel={{Verifier time per question (ms)}}, ylabel={{Accuracy (\\%)}},
 ]
-{chr(10).join(pts_b)}
+{chr(10).join(pts)}
 \\end{{axis}}
 \\end{{tikzpicture}}
-\\caption{{Best-of-$N$ on the eight sets against verifier time.}}
-\\label{{fig:tts-bon-cost}}
-\\end{{subfigure}}
 """
 
 

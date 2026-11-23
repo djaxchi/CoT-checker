@@ -96,13 +96,13 @@ def test_beam_points_average_accuracy_and_time_over_common_sets():
     assert [(p[0], p[2], p[3]) for p in pts] == [("random scores", 7.0, 70.0), ("\\textbf{InStep}", 9.0, 73.0)]
 
 
-def test_tts_figure_has_curve_and_eight_set_cost_panels():
+def test_tts_figure_is_one_panel_over_the_eight_sets():
     fig = T.figure_tts(TTS)
-    assert fig.count("\\begin{tikzpicture}") == 2 and "fig:tts-beam" not in fig
-    assert fig.count("xmode=log") == 2 and "majority vote" in fig  # both panels against verifier time
-    # (b): the table's Overall column at N = 10 candidates x per-candidate latency at 10 per call
-    assert f"({10 * T.LATENCY['InStep'][1]:.1f},52.04)" in fig and "InStep} (52.0)" in fig
-    assert f"({10 * min(T.LATENCY['PRM']):.1f},52.00)" in fig and "one candidate, no verifier (45.0)" in fig
+    assert fig.count("\\begin{tikzpicture}") == 1 and fig.count("xmode=log") == 1 and "subfigure" not in fig
+    # the table's Overall column at N = 10 candidates x the faster per-candidate latency; no majority line
+    assert f"({10 * min(T.LATENCY['InStep']):.1f},52.04)" in fig and "InStep} (52.0)" in fig
+    assert f"({10 * min(T.LATENCY['PRM']):.1f},52.00)" in fig
+    assert "one candidate, no verifier (45.0)" in fig and "majority" not in fig
 
 
 def test_tts_table_puts_best_of_n_and_beam_side_by_side():

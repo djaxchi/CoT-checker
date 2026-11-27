@@ -47,8 +47,7 @@ def test_backbone_table_merges_both_generators():
     assert instep.rstrip(" \\").endswith("\\textbf{.630} & \\textbf{.410}")  # best on both
     prm7b = next(line for line in tex.splitlines() if line.startswith("Qwen2.5-Math-PRM-7B"))
     assert "$^\\dagger$" in prm7b and tex.count("$^\\dagger$") == 1
-    maxprob = next(line for line in tex.splitlines() if line.startswith("MaxProb"))
-    assert maxprob.endswith("& -- & .149 \\\\")  # ReProbe reports no uncertainty scores on Qwen3-32B
+    assert "MaxProb" not in tex and "Uncertainty scores" not in tex  # training-free scores are left out
 
 
 def test_backbone_table_adds_qwen3_1_7b_with_printed_table4_rows():
@@ -207,3 +206,9 @@ def test_pb_values_places_step_before_ours():
     assert names.index("STEP") == next(i for i, r in enumerate(rows) if r[1] == "ours") - 1
     assert rows[names.index("STEP")][2] == {"auroc": 0.85, "ap": 0.466, "f1": 0.376}
     assert "STEP" not in [r[0] for r in T._pb_values(final)]
+
+
+def test_cost_figure_latency_panel_is_preprint_only():
+    tex = T.figure_cost(OURS)
+    assert tex.count("\\ifacl\\else") == 1 and tex.rstrip().endswith("\\fi")
+    assert tex.index("\\ifacl") < tex.index("fig:reprobe-cost-latency")
